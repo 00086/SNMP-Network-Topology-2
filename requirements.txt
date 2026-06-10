@@ -1,0 +1,25 @@
+# Web 伺服器與路由框架
+Flask>=2.0.0
+waitress>=3.0.0
+
+# SNMP 網路探測引擎
+pysnmp>=5.0.0
+
+# SSH 終端機自動化爬蟲 (用於 Aruba CX / Palo Alto 等設備)
+paramiko>=3.0.0
+
+# NCM 自動備份引擎 (支援多廠牌 CLI 互動)
+netmiko>=4.0.0
+
+# HTTP 請求套件 (用於觸發 ntfy.sh 手機推播)
+requests>=2.25.0
+
+#虛擬環境安裝
+#python -m venv venv
+#第一種執行方式
+#venv\Scripts\activate
+#python app.py
+#第二種執行方式
+#venv\Scripts\python.exe app.py
+#一行安裝
+#venv\Scripts\pip install Flask waitress pysnmp paramiko requests netmiko
