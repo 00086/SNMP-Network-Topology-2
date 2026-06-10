@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系統登入 - 網路拓樸管理系統</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        body { background-color: #1a202c; color: #e2e8f0; height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .login-card { background-color: #2d3748; border: 1px solid #4a5568; border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); width: 100%; max-width: 400px; padding: 2rem; }
+        .form-control-custom { background-color: #1a202c; border: 1px solid #4a5568; color: #e2e8f0; }
+        .form-control-custom:focus { background-color: #1a202c; border-color: #0dcaf0; color: #e2e8f0; box-shadow: none; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="text-center mb-4">
+            <i class="bi bi-diagram-3-fill text-info" style="font-size: 3rem;"></i>
+            <h4 class="fw-bold mt-2 text-white">智慧網管平台</h4>
+            <p class="text-white-50" style="font-size: 0.9rem;">請輸入管理員帳號與密碼</p>
+        </div>
+        <div id="errorMsg" class="alert alert-danger d-none py-2 fw-bold" style="font-size: 0.85rem;"></div>
+        <div class="mb-3">
+            <label class="form-label text-white-50 fw-bold" style="font-size: 0.85rem;">登入帳號</label>
+            <div class="input-group">
+                <span class="input-group-text bg-dark border-secondary text-white-50"><i class="bi bi-person-fill"></i></span>
+                <input type="text" id="username" class="form-control form-control-custom" placeholder="請輸入 Admin 或自訂帳號">
+            </div>
+        </div>
+        <div class="mb-4">
+            <label class="form-label text-white-50 fw-bold" style="font-size: 0.85rem;">密碼</label>
+            <div class="input-group">
+                <span class="input-group-text bg-dark border-secondary text-white-50"><i class="bi bi-key-fill"></i></span>
+                <input type="password" id="password" class="form-control form-control-custom" placeholder="請輸入密碼" onkeypress="if(event.key === 'Enter') doLogin()">
+            </div>
+        </div>
+        <button class="btn btn-info w-100 fw-bold shadow-sm" onclick="doLogin()">登入系統 <i class="bi bi-box-arrow-in-right ms-1"></i></button>
+    </div>
+
+    <script>
+        function doLogin() {
+            const u = document.getElementById('username').value;
+            const p = document.getElementById('password').value;
+            const err = document.getElementById('errorMsg');
+            
+            if(!u || !p) { err.innerText = "請完整輸入帳號與密碼"; err.classList.remove('d-none'); return; }
+            
+            let btn = document.querySelector('button');
+            let originalHtml = btn.innerHTML;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>驗證中...';
+            btn.classList.add('disabled');
+            
+            fetch('/api/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: u, password: p})
+            }).then(res => res.json()).then(data => {
+                if(data.status === 'success') {
+                    window.location.href = '/dashboard'; // 登入成功導向戰情室
+                } else {
+                    err.innerText = data.msg || "登入失敗"; err.classList.remove('d-none');
+                    btn.innerHTML = originalHtml; btn.classList.remove('disabled');
+                }
+            }).catch(e => {
+                err.innerText = "伺服器連線異常"; err.classList.remove('d-none');
+                btn.innerHTML = originalHtml; btn.classList.remove('disabled');
+            });
+        }
+    </script>
+</body>
+</html>

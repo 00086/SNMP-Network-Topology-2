@@ -1,0 +1,804 @@
+{% extends 'layout.html' %}
+{% block title %}戰情儀表板總覽 - 網路拓樸管理系統{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+    body { background-color: #1a202c; color: #e2e8f0; overflow: hidden !important; }
+    .card { background-color: #2d3748; border: 1px solid #4a5568; border-radius: 10px; }
+    .card-header { background-color: #2a4365; border-bottom: 1px solid #4a5568; font-weight: bold; color: #63b3ed; padding: 0.35rem 1rem; min-height: 40px; }
+    .stat-box { text-align: center; padding: 10px 5px; border-radius: 8px; }
+    .stat-number { font-size: 2.2rem; font-weight: bold; line-height: 1.2; }
+    .bg-up { background-color: rgba(32, 201, 151, 0.15); border: 1px solid #20c997; color: #20c997; }
+    .bg-down { background-color: rgba(220, 53, 69, 0.15); border: 1px solid #dc3545; color: #ff6b6b; }
+    .bg-warning-box { background-color: rgba(255, 193, 7, 0.15); border: 1px solid #ffc107; color: #ffc107; }
+    .bg-total { background-color: rgba(13, 202, 240, 0.15); border: 1px solid #0dcaf0; color: #0dcaf0; }
+    .custom-scroll::-webkit-scrollbar { width: 6px; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #6c757d; border-radius: 3px; }
+    .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+    .dropdown-menu-dark .dropdown-item.active, .dropdown-menu-dark .dropdown-item:active { background-color: #0dcaf0; color: #000; font-weight: bold; }
+    .carousel-container { position: relative; width: 100%; height: calc(100vh - 220px); }
+    .carousel-page { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transition: opacity 0.8s ease-in-out; }
+    .carousel-page.hidden { opacity: 0; pointer-events: none; z-index: 0; }
+    .carousel-page.active { opacity: 1; pointer-events: auto; z-index: 10; }
+    .page-indicator { width: 12px; height: 12px; border-radius: 50%; background-color: #4a5568; margin: 0 5px; cursor: pointer; transition: all 0.3s ease; }
+    .page-indicator:hover { background-color: #6c757d; transform: scale(1.2); }
+    .page-indicator.active { background-color: #0dcaf0; transform: scale(1.3); box-shadow: 0 0 8px rgba(13, 202, 240, 0.8); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid" style="margin-top: -12px;">
+    
+    <div class="d-flex justify-content-between align-items-center mb-2">
+        <h4 class="m-0 fw-bold text-info" style="font-size: 1.2rem;"><i class="bi bi-speedometer me-2"></i>全網戰情儀表板</h4>
+        
+        <div class="d-flex align-items-center">
+            <div class="d-flex align-items-center bg-dark border border-secondary rounded-pill px-3 py-1 me-3 shadow-sm">
+                <span class="text-white-50 small fw-bold me-2" style="font-size: 0.75rem; letter-spacing: 1px;">輪播視角</span>
+                <div id="dot1" class="page-indicator active" onclick="switchPage(1)" title="即時流量負載"></div>
+                <div id="dot2" class="page-indicator" onclick="switchPage(2)" title="PoE 供電詳情"></div>
+                <div id="dot3" class="page-indicator" onclick="switchPage(3)" title="設備分佈與健康度"></div>
+				<div id="dot4" class="page-indicator" onclick="switchPage(4)" title="全天候異常偵測與CPU負載"></div>
+				<div id="dot5" class="page-indicator" onclick="switchPage(5)" title="內網流量消耗 Top 10"></div>
+			</div>
+
+            <button class="btn btn-sm btn-outline-info fw-bold shadow-sm" onclick="fetchDashboardData()"><i class="bi bi-arrow-clockwise me-1"></i>手動更新</button>
+            <span class="badge bg-secondary ms-2" style="font-size: 0.75rem;">最後更新: <span id="last-update-time">--:--:--</span></span>
+        </div>
+    </div>
+
+    <div class="row g-2 mb-2">
+        <div class="col-md-3"><div class="stat-box bg-total shadow-sm"><div class="text-uppercase mb-1" style="font-size: 0.85rem; letter-spacing: 1px;">總監监控設備數</div><div class="stat-number" id="stat-total">0</div></div></div>
+        <div class="col-md-3"><div class="stat-box bg-up shadow-sm"><div class="text-uppercase mb-1" style="font-size: 0.85rem; letter-spacing: 1px;">連線正常 (Up)</div><div class="stat-number" id="stat-up">0</div></div></div>
+        <div class="col-md-3"><div class="stat-box bg-warning-box shadow-sm"><div class="text-uppercase mb-1" style="font-size: 0.85rem; letter-spacing: 1px;">SNMP異常 (Warning)</div><div class="stat-number" id="stat-warning">0</div></div></div>
+        <div class="col-md-3"><div class="stat-box bg-down shadow-sm"><div class="text-uppercase mb-1" style="font-size: 0.85rem; letter-spacing: 1px;">徹底斷線 (Down)</div><div class="stat-number" id="stat-down">0</div></div></div>
+    </div>
+
+    <div class="carousel-container">
+        
+        <div id="page1" class="carousel-page active">
+            <div class="row g-2 h-100">
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex justify-content-between align-items-center flex-shrink-0">
+                            <span><i class="bi bi-bar-chart-fill me-2"></i>Top 10 單埠網路負載排行 (即時吞吐量)</span>
+                            {% if session.get('username') %}
+							<div class="dropdown">
+                                <button class="btn btn-sm btn-dark border-secondary text-white fw-bold dropdown-toggle shadow-sm" type="button" id="deviceTrafficFilterBtn" data-bs-toggle="dropdown" aria-expanded="false" data-value="ALL" style="padding-top:0px; padding-bottom:0px; min-height:20px;">全網 Top 10</button>
+                                <ul class="dropdown-menu dropdown-menu-dark shadow custom-scroll" aria-labelledby="deviceTrafficFilterBtn" id="deviceTrafficFilterMenu" style="max-height: 300px; overflow-y: auto; font-size: 0.85rem;"></ul>
+                            </div>
+							{% endif %}
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="topTrafficChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex align-items-center flex-shrink-0">
+                            <span><i class="bi bi-server me-2 text-warning"></i>Top 10 交換器整機流量排行 (即時吞吐量)</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div id="noSwitchDataMsg" class="position-absolute top-50 start-50 translate-middle text-center text-white-50 d-none" style="z-index: 10;">
+                                <i class="bi bi-info-circle me-1"></i>目前尚無交換器流量資料
+                            </div>
+                            <div id="switchTrafficChartWrapper" class="d-none" style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="switchTrafficChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="page2" class="carousel-page hidden">
+            <div class="row g-2 h-100">
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex align-items-center flex-shrink-0">
+                            <span><i class="bi bi-lightning-charge-fill text-warning me-2"></i>Top 10 PoE 單埠供電排行 (瓦數)</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div id="poeEmpty" class="position-absolute top-50 start-50 translate-middle text-center text-white-50 d-none" style="z-index: 10;">
+                                <i class="bi bi-info-circle me-1"></i>目前無耗電設備或不支援 PoE MIB
+                            </div>
+                            <div id="poeChartWrapper" class="d-none" style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="poeChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex align-items-center flex-shrink-0">
+                            <span><i class="bi bi-cpu text-danger me-2"></i>Top 10 PoE 交換器總耗電排行 (瓦數)</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div id="poeSwitchEmpty" class="position-absolute top-50 start-50 translate-middle text-center text-white-50 d-none" style="z-index: 10;">
+                                <i class="bi bi-info-circle me-1"></i>目前尚無交換器耗電排行資料
+                            </div>
+                            <div id="poeSwitchChartWrapper" class="d-none" style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="poeSwitchChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="page3" class="carousel-page hidden">
+            <div class="row g-2 h-100">
+                <div class="col-lg-3 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex align-items-center flex-shrink-0">
+                            <span><i class="bi bi-pie-chart-fill me-2" style="color: #20c997;"></i>設備健康度佔比</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="healthPieChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-3 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex align-items-center flex-shrink-0">
+                            <span><i class="bi bi-diagram-2-fill text-info me-2"></i>全網廠牌分佈</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="brandChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-3 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex align-items-center flex-shrink-0">
+                            <span><i class="bi bi-bar-chart-steps text-success me-2"></i>全網層級分佈</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="levelChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-3 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column">
+                        <div class="card-header d-flex align-items-center flex-shrink-0">
+                            <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="穩定度指標：設備運行時間 (SysUpTime)"><i class="bi bi-hourglass-split me-2" style="color: #a78bfa;"></i>運行時間排行 (SysUpTime)</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div id="uptimeEmpty" class="position-absolute top-50 start-50 translate-middle text-center text-white-50 d-none" style="z-index: 10;">
+                                <i class="bi bi-info-circle me-1"></i>暫無開機時間快取
+                            </div>
+                            <div id="uptimeChartWrapper" class="d-none" style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="uptimeChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+		<div id="page4" class="carousel-page hidden">
+            <div class="row g-2 h-100">
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column border-danger" style="border-width: 1px;">
+                        <div class="card-header d-flex justify-content-between align-items-center flex-shrink-0" style="background-color: #2c0b0e; border-bottom: 1px solid #dc3545;">
+                            <span class="text-danger"><i class="bi bi-shield-fill-exclamation me-2"></i>全天候異常偵測守護</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 d-flex flex-column">
+                            <div class="d-flex justify-content-between align-items-center bg-black p-2 rounded border border-secondary mb-2" style="font-size: 0.85rem;">
+                                <div><span class="text-white-50">今日累積偵測：</span> <span id="anoRuns" class="text-info fw-bold fs-5">0</span> <span class="text-white-50">次</span></div>
+                                <div><span class="text-white-50">最後執行：</span> <span id="anoLastRun" class="text-warning fw-bold">系統啟動中</span></div>
+                                <div id="anoStatusBadge"><span class="badge bg-secondary">連線中...</span></div>
+                            </div>
+                            <div class="table-responsive custom-scroll flex-grow-1" style="height: 0;">
+                                <table class="table table-dark table-sm table-striped table-hover align-middle mb-0" style="font-size: 0.8rem;">
+                                    <thead class="text-secondary bg-black" style="position: sticky; top: 0;">
+                                        <tr><th width="30%">設備</th><th width="20%">孔位</th><th width="50%">異常描述</th></tr>
+                                    </thead>
+                                    <tbody id="anoTableBody">
+                                        <tr><td colspan="3" class="text-center text-white-50 py-5"><div class="spinner-border spinner-border-sm me-2"></div>同步資料中...</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column border-info" style="border-width: 1px;">
+                        <div class="card-header d-flex justify-content-between align-items-center flex-shrink-0" style="background-color: #052c65; border-bottom: 1px solid #0dcaf0;">
+                            <span class="text-info fw-bold"><i class="bi bi-cpu-fill me-2 text-info"></i>Top 10 交換器 CPU 負載排行 (%)</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div id="noCpuDataMsg" class="position-absolute top-50 start-50 translate-middle text-center text-white-50 d-none" style="z-index: 10;">
+                                <i class="bi bi-info-circle me-1"></i>目前尚無 CPU 負載資料 (請等待背景輪詢)
+                            </div>
+                            <div id="cpuChartWrapper" class="d-none" style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="cpuChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+		<div id="page5" class="carousel-page hidden">
+            <div class="row g-2 h-100">
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex flex-column border-info" style="border-width: 1px;">
+                        <div class="card-header d-flex align-items-center flex-shrink-0" style="background-color: #0c4a6e; border-bottom: 1px solid #0ea5e9;">
+                            <span class="text-info fw-bold"><i class="bi bi-pie-chart-fill me-2"></i>最近 5 分鐘內網高耗能排行 Top 10 (排除特殊防禦層)</span>
+                        </div>
+                        <div class="card-body p-2 flex-grow-1 position-relative">
+                            <div id="flowEmpty" class="position-absolute top-50 start-50 translate-middle text-center text-white-50 d-none" style="z-index: 10;">
+                                <i class="bi bi-info-circle me-1"></i>目前暫無內網相關流量快取
+                            </div>
+                            <div id="flowChartWrapper" class="d-none" style="position: absolute; top:10px; bottom:10px; left:10px; right:10px;">
+                                <canvas id="internalFlowChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-lg-6 h-100">
+                    <div class="card shadow-sm h-100 d-flex align-items-center justify-content-center text-white-50" style="border-style: dashed; background-color: rgba(45, 55, 72, 0.3);">
+                        <div class="text-center">
+                            <i class="bi bi-plus-circle fs-2 mb-2 text-secondary"></i>
+                            <div class="small text-secondary">預留未來核心功能區塊</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+		
+    </div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100" id="toastPlacement"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    Chart.defaults.color = '#cbd5e0';
+    Chart.defaults.font.family = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+    const chartColors = ['#0dcaf0', '#20c997', '#ffc107', '#fd7e14', '#dc3545', '#6f42c1', '#d63384', '#e83e8c', '#6610f2', '#198754'];
+
+    let topTrafficChart = null, healthPieChart = null;
+    let switchTrafficChartInstance = null; 
+    let poeChartInstance = null, poeSwitchChartInstance = null; 
+    let brandChartInstance = null, levelChartInstance = null, uptimeChartInstance = null; 
+    let cpuChartInstance = null; 
+	let internalFlowChartInstance = null; // 👈 新增這一行
+    let allTrafficData = [], deviceLevelMap = {};
+    let globalIfNames = {}; 
+
+    let currentCarouselPage = 1;
+    let carouselInterval;
+
+    function startCarousel() {
+        carouselInterval = setInterval(() => {
+            let next = currentCarouselPage + 1;
+            if (next > 5) next = 1; // 👈 從 4 改成 5
+            switchPage(next);
+        }, 10000); 
+    }
+
+    function switchPage(pageNum) {
+        currentCarouselPage = pageNum;
+		
+        for (let i = 1; i <= 5; i++) { // 👈 從 4 改成 5
+            let pg = document.getElementById('page' + i);
+            let dot = document.getElementById('dot' + i);
+            if (i === pageNum) {
+                pg.classList.remove('hidden'); pg.classList.add('active');
+                dot.classList.add('active');
+            } else {
+                pg.classList.remove('active'); pg.classList.add('hidden');
+                dot.classList.remove('active');
+            }
+        }
+        clearInterval(carouselInterval);
+        startCarousel();
+    }
+	
+    let anomalyPollingTimer = null;
+
+    function fetchAnomalyStatus() {
+        fetch('/api/anomalies').then(res => res.json()).then(res => {
+            if (res.success) {
+                document.getElementById('anoRuns').innerText = res.runs || 0;
+                document.getElementById('anoLastRun').innerText = new Date().toLocaleTimeString('zh-TW', {hour12: false});
+                
+                let tbody = document.getElementById('anoTableBody');
+                let badge = document.getElementById('anoStatusBadge');
+                let d = res.data;
+
+                if (d.length === 0) {
+                    badge.innerHTML = '<span class="badge bg-success p-2"><i class="bi bi-shield-check me-1"></i>全網安全</span>';
+                    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-success py-5 fw-bold"><i class="bi bi-check-circle-fill me-1 fs-5"></i><br>目前未偵測到任何私接 Hub 或迴圈。</td></tr>';
+                } else {
+                    badge.innerHTML = `<span class="badge bg-danger blink-danger p-2"><i class="bi bi-exclamation-triangle-fill me-1"></i>發現 ${d.length} 項異常</span>`;
+                    let html = '';
+                    d.forEach(item => {
+                        let sevBadge = item.severity === 'danger' ? '<span class="badge bg-danger">危險</span>' : '<span class="badge bg-warning text-dark">警告</span>';
+                        let aliasHtml = item.alias ? `<br><span class="text-white-50" style="font-size:0.7rem;">(${item.alias})</span>` : '';
+                        html += `<tr>
+                                    <td><div class="text-info fw-bold text-truncate" style="max-width: 130px;" title="${item.sysName}">${item.sysName}</div><div class="text-white-50" style="font-size:0.7rem;">${item.ip}</div></td>
+                                    <td><span class="text-warning">${item.port}</span>${aliasHtml}</td>
+                                    <td>${sevBadge} <span class="${item.severity === 'danger' ? 'text-danger fw-bold' : 'text-light'}">${item.desc}</span></td>
+                                 </tr>`;
+                    });
+                    tbody.innerHTML = html;
+                }
+            }
+        });
+    }
+
+	// ✅ 取代舊的 changeAnomalyPolling，改為向後端請求排程頻率
+    function initAnomalyPolling() {
+        fetch('/api/settings/anomaly').then(res => res.json()).then(data => {
+            let mins = data.success ? data.interval : 5; // 預設 5 分鐘
+            if (anomalyPollingTimer) clearInterval(anomalyPollingTimer);
+            anomalyPollingTimer = setInterval(fetchAnomalyStatus, mins * 60000);
+            fetchAnomalyStatus(); 
+        }).catch(err => {
+            if (anomalyPollingTimer) clearInterval(anomalyPollingTimer);
+            anomalyPollingTimer = setInterval(fetchAnomalyStatus, 300000); // 失敗時退回 5 分鐘
+            fetchAnomalyStatus();
+        });
+    }
+
+    function cleanStr(val) { return (!val) ? "" : String(val).replace('"', '').replace('\n', ' ').replace('\r', ' ').trim(); }
+
+    function formatBps(bits) {
+        if (bits >= 1000000000) return (bits / 1000000000).toFixed(1) + ' Gbps';
+        if (bits >= 1000000) return (bits / 1000000).toFixed(1) + ' Mbps';
+        if (bits >= 1000) return (bits / 1000).toFixed(1) + ' Kbps';
+        return bits + ' bps';
+    }
+
+    function fetchDashboardData() {
+        document.getElementById('last-update-time').innerText = new Date().toLocaleTimeString('zh-TW', {hour12: false});
+        
+        Promise.all([
+            fetch('/api/dashboard/stats').then(res => res.json()),
+            fetch('/api/devices').then(res => res.json())
+        ])
+        .then(([data, devices]) => {
+            if(data.success) {
+                deviceLevelMap = {};
+                let brandCounts = {};
+                let levelCounts = {};
+                let uniquePoe = {}; 
+                let uptimeList = [];
+
+                devices.forEach(d => {
+                    let devName = d.name || d.ip;
+                    deviceLevelMap[devName] = parseInt(d.level) || 99;
+
+                    let b = (d.brand || 'Unknown').trim();
+                    brandCounts[b || 'Unknown'] = (brandCounts[b || 'Unknown'] || 0) + 1;
+                    let lvl = parseInt(d.level) || 3;
+                    levelCounts[lvl] = (levelCounts[lvl] || 0) + 1;
+
+                    if (d.snmp_raw && d.snmp_raw !== '{}') {
+                        try {
+                            let rawData = JSON.parse(d.snmp_raw);
+                            let ifNames = rawData[4] || {};
+                            
+                            let uptimeDict = rawData[22];
+                            if (uptimeDict && uptimeDict["0"]) {
+                                let ticks = parseInt(uptimeDict["0"]);
+                                if (!isNaN(ticks) && ticks > 0) {
+                                    let days = parseFloat((ticks / (100 * 60 * 60 * 24)).toFixed(1));
+                                    uptimeList.push({ device: devName, days: days, rawTicks: ticks });
+                                }
+                            }
+
+                            let isPoeSwitch = (d.is_poe === 1 || d.is_poe === true || d.is_poe === '1' || String(d.is_poe).toUpperCase() === 'Y');
+
+                            if (isPoeSwitch) {
+                                [18, 19, 20].forEach(idx => {
+                                    let dict = rawData[idx];
+                                    if (!dict || typeof dict !== 'object') return;
+                                    
+                                    Object.keys(dict).forEach(suffix => {
+                                        let mw = parseInt(dict[suffix]);
+                                        if (!isNaN(mw) && mw > 100 && mw < 95000 && mw !== 1500) {
+                                            let portIdx = suffix.split('.').pop();
+                                            let portName = ifNames[portIdx] ? cleanStr(ifNames[portIdx]) : `Port ${portIdx}`;
+                                            let key = devName + '_' + portName;
+                                            
+                                            if (!uniquePoe[key] || mw > uniquePoe[key].power * 1000) {
+                                                uniquePoe[key] = {
+                                                    device: devName, port: portName,
+                                                    power: parseFloat((mw / 1000.0).toFixed(1)),
+                                                    displayLabel: `${devName} (${portName})`
+                                                };
+                                            }
+                                        }
+                                    });
+                                });
+
+                                let dlinkPoe = rawData[21];
+                                if (dlinkPoe && typeof dlinkPoe === 'object') {
+                                    Object.keys(dlinkPoe).forEach(suffix => {
+                                        let rawVal = parseFloat(dlinkPoe[suffix]);
+                                        if (!isNaN(rawVal) && rawVal > 0) {
+                                            let w = rawVal > 100 ? parseFloat((rawVal / 1000).toFixed(1)) : rawVal;
+                                            if (w > 0.1 && w < 95.0) {
+                                                let portIdx = suffix.split('.').pop();
+                                                let portName = ifNames[portIdx] ? cleanStr(ifNames[portIdx]) : `Port ${portIdx}`;
+                                                let key = devName + '_' + portName;
+                                                if (!uniquePoe[key] || w > uniquePoe[key].power) {
+                                                    uniquePoe[key] = {
+                                                        device: devName, port: portName, power: w,
+                                                        displayLabel: `${devName} (${portName})`
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                        } catch(e){}
+                    }
+                });
+
+                document.getElementById('stat-total').innerText = data.health.total;
+                document.getElementById('stat-up').innerText = data.health.up;
+                document.getElementById('stat-warning').innerText = data.health.warning;
+                document.getElementById('stat-down').innerText = data.health.down;
+
+                renderPieChart(data.health);
+
+                allTrafficData = data.all_traffic || data.top_traffic || [];
+                updateDeviceDropdown();
+                updateTrafficCharts(); 
+
+                let brandData = Object.keys(brandCounts).map(k => ({name: k, value: brandCounts[k]})).sort((a,b) => b.value - a.value);
+                let levelData = Object.keys(levelCounts).map(k => ({name: 'Level ' + k, value: levelCounts[k]})).sort((a,b) => a.name.localeCompare(b.name));
+                renderBrandChart(brandData);
+                renderLevelChart(levelData);
+
+                renderCpuChart(data.top_cpu || []);
+
+                let topPoePorts = Object.values(uniquePoe).sort((a, b) => b.power - a.power).slice(0, 10);
+                if (topPoePorts.length === 0) {
+                    document.getElementById('poeChartWrapper').classList.add('d-none');
+                    document.getElementById('poeEmpty').classList.remove('d-none');
+                } else {
+                    document.getElementById('poeEmpty').classList.add('d-none');
+                    document.getElementById('poeChartWrapper').classList.remove('d-none');
+                    renderPoeChart(topPoePorts);
+                }
+
+                let switchPoeTotals = {};
+                Object.values(uniquePoe).forEach(p => {
+                    switchPoeTotals[p.device] = (switchPoeTotals[p.device] || 0) + p.power;
+                });
+                let topPoeSwitches = Object.keys(switchPoeTotals).map(dev => ({
+                    device: dev, power: parseFloat(switchPoeTotals[dev].toFixed(1))
+                })).sort((a, b) => b.power - a.power).slice(0, 10);
+
+                if (topPoeSwitches.length === 0) {
+                    document.getElementById('poeSwitchChartWrapper').classList.add('d-none');
+                    document.getElementById('poeSwitchEmpty').classList.remove('d-none');
+                } else {
+                    document.getElementById('poeSwitchEmpty').classList.add('d-none');
+                    document.getElementById('poeSwitchChartWrapper').classList.remove('d-none');
+                    renderPoeSwitchChart(topPoeSwitches);
+                }
+
+                let topUptime = uptimeList.sort((a, b) => b.rawTicks - a.rawTicks).slice(0, 10);
+                if (topUptime.length === 0) {
+                    document.getElementById('uptimeChartWrapper').classList.add('d-none');
+                    document.getElementById('uptimeEmpty').classList.remove('d-none');
+                } else {
+                    document.getElementById('uptimeEmpty').classList.add('d-none');
+                    document.getElementById('uptimeChartWrapper').classList.remove('d-none');
+                    renderUptimeChart(topUptime);
+                }
+
+                // ⚡ 核心對接點：緊接在 Uptime 判斷完成後，發動 InfluxDB 流量圖更新
+                fetch('/api/flow/top5')
+                    .then(res => res.json())
+                    .then(res => {
+                        if (res.status === "success" && res.data && res.data.length > 0) {
+                            document.getElementById('flowEmpty').classList.add('d-none');
+                            document.getElementById('flowChartWrapper').classList.remove('d-none');
+                            
+                            const ctx = document.getElementById('internalFlowChart').getContext('2d');
+                            if (internalFlowChartInstance) internalFlowChartInstance.destroy();
+                            
+                            internalFlowChartInstance = new Chart(ctx, {
+								type: 'pie',
+								data: {
+									labels: res.data.map(item => item.ip),
+									datasets: [{
+										data: res.data.map(item => item.traffic_mb),
+										backgroundColor: chartColors,
+										borderWidth: 1,
+										borderColor: '#2d3748'
+									}]
+								},
+								options: {
+									responsive: true, 
+									maintainAspectRatio: false,
+									plugins: {
+										legend: {
+											position: 'right',
+											labels: { color: '#cbd5e0', font: { size: 10 } }
+										},
+										// 🎯 核心升級：終極智慧型資安流量提示框
+										tooltip: {
+											callbacks: {
+												label: function(context) {
+													const value = context.raw || 0;
+													
+													// 1. 動態計算當前畫面上 Top 10 的流量總加總
+													const dataset = context.dataset.data;
+													const total = dataset.reduce((a, b) => a + b, 0);
+													
+													// 2. 精準換算該 IP 佔整體內網吃頻寬大戶的百分比 (%)
+													const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+													
+													// 3. 完美輸出第二行：同時具備 MB 單位與 % 百分比
+													return ` 流量消耗: ${value} MB (${percentage}%)`;
+												}
+											}
+										}
+									}
+								}
+							});
+                        } else {
+                            document.getElementById('flowChartWrapper').classList.add('d-none');
+                            document.getElementById('flowEmpty').classList.remove('d-none');
+                        }
+                    }).catch(err => console.error("💔 InfluxDB 流量 API 熔斷或連線失敗:", err));
+            }
+        })
+        .catch(err => console.error("Error fetching dashboard data:", err));
+    }
+
+function updateDeviceDropdown() {
+        const btn = document.getElementById('deviceTrafficFilterBtn');
+        const menu = document.getElementById('deviceTrafficFilterMenu');
+        
+        // 💡 防呆機制：如果按鈕不存在 (未登入狀態)，直接跳出，不處理下拉選單渲染
+        if (!btn || !menu) return; 
+
+        const currentVal = btn.getAttribute('data-value') || 'ALL';
+        
+        const uniqueDevices = [...new Set(allTrafficData.map(t => t.device))];
+        uniqueDevices.sort((a, b) => {
+            let lvlA = deviceLevelMap[a] || 99, lvlB = deviceLevelMap[b] || 99;
+            if (lvlA !== lvlB) return lvlA - lvlB;
+            return a.localeCompare(b);
+        });
+        
+        let optionsHtml = `<li><a class="dropdown-item ${currentVal === 'ALL' ? 'active' : ''}" href="javascript:void(0)" onclick="selectDeviceFilter('ALL', '全網 Top 10', this)">全網 Top 10</a></li>`;
+        let validVal = (currentVal === 'ALL');
+        
+        uniqueDevices.forEach(dev => {
+            let lvl = deviceLevelMap[dev];
+            let lvlLabel = (lvl && lvl !== 99) ? `[Lv.${lvl}] ` : '';
+            let displayText = `${lvlLabel}${dev}`;
+            let isActive = currentVal === dev ? 'active' : '';
+            if (currentVal === dev) validVal = true;
+            optionsHtml += `<li><a class="dropdown-item ${isActive}" href="javascript:void(0)" onclick="selectDeviceFilter('${dev}', '${displayText}', this)">${displayText}</a></li>`;
+        });
+        menu.innerHTML = optionsHtml;
+        if (!validVal) selectDeviceFilter('ALL', '全網 Top 10');
+        else if (currentVal !== 'ALL') btn.innerHTML = `${(deviceLevelMap[currentVal] && deviceLevelMap[currentVal] !== 99) ? `[Lv.${deviceLevelMap[currentVal]}] ` : ''}${currentVal}`;
+    }
+
+    function selectDeviceFilter(val, displayText, elem) {
+        const btn = document.getElementById('deviceTrafficFilterBtn');
+        const menu = document.getElementById('deviceTrafficFilterMenu');
+        
+        if (btn) {
+            btn.setAttribute('data-value', val);
+            btn.innerHTML = displayText;
+        }
+        if (elem && menu) {
+            menu.querySelectorAll('.dropdown-item').forEach(item => item.classList.remove('active'));
+            elem.classList.add('active');
+        }
+        updateTrafficCharts(); 
+    }
+
+    function updateTrafficCharts() {
+        const btn = document.getElementById('deviceTrafficFilterBtn');
+        // 💡 防呆機制：如果按鈕不存在，預設回傳 'ALL' (全網資料)
+        const filter = btn ? (btn.getAttribute('data-value') || 'ALL') : 'ALL';
+        
+        let filteredPortData = (filter !== 'ALL') ? allTrafficData.filter(t => t.device === filter) : allTrafficData;
+        filteredPortData.sort((a, b) => b.total_bps - a.total_bps);
+        renderBarChart(filteredPortData.slice(0, 10));
+
+        let switchTrafficMap = {};
+        allTrafficData.forEach(t => {
+            if (!switchTrafficMap[t.device]) {
+                switchTrafficMap[t.device] = { device: t.device, in_bps: 0, out_bps: 0, total_bps: 0 };
+            }
+            switchTrafficMap[t.device].in_bps += t.in_bps;
+            switchTrafficMap[t.device].out_bps += t.out_bps;
+            switchTrafficMap[t.device].total_bps += t.total_bps;
+        });
+        let topSwitchTraffic = Object.values(switchTrafficMap).sort((a, b) => b.total_bps - a.total_bps).slice(0, 10);
+        renderSwitchTrafficChart(topSwitchTraffic);
+    }
+
+    function renderPieChart(health) {
+        const ctx = document.getElementById('healthPieChart').getContext('2d');
+        if (healthPieChart) healthPieChart.destroy();
+        healthPieChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: { labels: ['正常 (Up)', 'SNMP異常 (Warning)', '斷線 (Down)'], datasets: [{ data: [health.up, health.warning, health.down], backgroundColor: ['#20c997', '#ffc107', '#dc3545'], borderColor: '#2d3748', borderWidth: 2 }] },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { color: '#cbd5e0', font: {size: 10} } } }, layout: { padding: { bottom: 10 } }, cutout: '65%' }
+        });
+    }
+
+    function renderBarChart(topTraffic) {
+        const ctx = document.getElementById('topTrafficChart').getContext('2d');
+        if (topTrafficChart) topTrafficChart.destroy();
+
+        if (topTraffic.length === 0) {
+            document.getElementById('topTrafficChart').style.display = 'none';
+            if (!document.getElementById('noDataMsg')) document.getElementById('topTrafficChart').parentElement.innerHTML += '<div id="noDataMsg" class="position-absolute top-50 start-50 translate-middle text-center text-white-50">目前尚無流量數據供分析</div>';
+            return;
+        } else {
+            document.getElementById('topTrafficChart').style.display = 'block';
+            let msg = document.getElementById('noDataMsg'); if (msg) msg.remove();
+        }
+
+        topTrafficChart = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: topTraffic.map(t => `${t.device}\n(${t.port})`), datasets: [{ label: '📥 接收 (Rx)', data: topTraffic.map(t => t.in_bps), backgroundColor: '#20c997', borderRadius: 2 }, { label: '📤 傳送 (Tx)', data: topTraffic.map(t => t.out_bps), backgroundColor: '#ff9800', borderRadius: 2 }] },
+            options: { responsive: true, maintainAspectRatio: false, layout: { padding: { bottom: 15 } }, interaction: { mode: 'index', intersect: false }, plugins: { legend: { position: 'top', labels: { color: '#cbd5e0' } }, tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': ' + formatBps(c.raw); } } } }, scales: { x: { stacked: true, ticks: { color: '#a0aec0', font: {size: 10} }, grid: { display: false } }, y: { stacked: true, ticks: { color: '#a0aec0', font: {size: 10}, callback: function(v) { return formatBps(v); } }, grid: { color: '#4a5568' } } } }
+        });
+    }
+
+    function renderSwitchTrafficChart(topSwitchTraffic) {
+        const ctx = document.getElementById('switchTrafficChart').getContext('2d');
+        if (switchTrafficChartInstance) switchTrafficChartInstance.destroy();
+
+        if (topSwitchTraffic.length === 0) {
+            document.getElementById('switchTrafficChartWrapper').classList.add('d-none');
+            document.getElementById('noSwitchDataMsg').classList.remove('d-none');
+            return;
+        } else {
+            document.getElementById('noSwitchDataMsg').classList.add('d-none');
+            document.getElementById('switchTrafficChartWrapper').classList.remove('d-none');
+        }
+
+        switchTrafficChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: topSwitchTraffic.map(t => t.device),
+                datasets: [
+                    { label: '📥 整機接收總和', data: topSwitchTraffic.map(t => t.in_bps), backgroundColor: '#8b5cf6', borderRadius: 2 },
+                    { label: '📤 整機傳送總和', data: topSwitchTraffic.map(t => t.out_bps), backgroundColor: '#d63384', borderRadius: 2 }
+                ]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false, layout: { padding: { bottom: 15 } },
+                interaction: { mode: 'index', intersect: false },
+                plugins: { legend: { position: 'top', labels: { color: '#cbd5e0' } }, tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': ' + formatBps(c.raw); } } } },
+                scales: {
+                    x: { stacked: true, ticks: { color: '#a0aec0', font: {size: 10} }, grid: { display: false } },
+                    y: { stacked: true, ticks: { color: '#a0aec0', font: {size: 10}, callback: function(v) { return formatBps(v); } }, grid: { color: '#4a5568' } }
+                }
+            }
+        });
+    }
+
+    function renderPoeChart(poeData) {
+        const ctx = document.getElementById('poeChart').getContext('2d');
+        if (poeChartInstance) poeChartInstance.destroy();
+        poeChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: poeData.map(d => d.displayLabel), datasets: [{ label: '耗電量 (W)', data: poeData.map(d => d.power), backgroundColor: '#ffc107', borderRadius: 3, barPercentage: 0.6 }] },
+            options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#4a5568' }, title: { display: true, text: '瓦數 (W)', color: '#adb5bd' }, ticks: { color: '#a0aec0' } }, y: { grid: { display: false }, ticks: { color: '#a0aec0', font: { size: 10 } } } } }
+        });
+    }
+
+    function renderPoeSwitchChart(switchData) {
+        const ctx = document.getElementById('poeSwitchChart').getContext('2d');
+        if (poeSwitchChartInstance) poeSwitchChartInstance.destroy();
+        poeSwitchChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: switchData.map(d => d.device), datasets: [{ label: '總耗電量 (W)', data: switchData.map(d => d.power), backgroundColor: '#fd7e14', borderRadius: 3, barPercentage: 0.6 }] },
+            options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#4a5568' }, title: { display: true, text: '總瓦數 (W)', color: '#adb5bd' }, ticks: { color: '#a0aec0' } }, y: { grid: { display: false }, ticks: { color: '#a0aec0', font: { size: 10 } } } } }
+        });
+    }
+
+    function renderUptimeChart(uptimeData) {
+        const ctx = document.getElementById('uptimeChart').getContext('2d');
+        if (uptimeChartInstance) uptimeChartInstance.destroy();
+        uptimeChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: uptimeData.map(d => d.device), datasets: [{ label: '連線運行時間 (天)', data: uptimeData.map(d => d.days), backgroundColor: '#a78bfa', borderRadius: 3, barPercentage: 0.6 }] },
+            options: { responsive: true, maintainAspectRatio: false, indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#4a5568' }, beginAtZero: true, title: { display: true, text: '天數 (Days)', color: '#adb5bd', font:{size: 10} }, ticks: { color: '#a0aec0', font:{size: 9} } }, y: { grid: { display: false }, ticks: { color: '#a0aec0', font: { size: 10 } } } } }
+        });
+    }
+
+    function renderBrandChart(brandData) {
+        const ctx = document.getElementById('brandChart').getContext('2d');
+        if (brandChartInstance) brandChartInstance.destroy();
+        brandChartInstance = new Chart(ctx, {
+            type: 'doughnut',
+            data: { labels: brandData.map(d => d.name), datasets: [{ data: brandData.map(d => d.value), backgroundColor: chartColors, borderWidth: 1, borderColor: '#2d3748' }] },
+            options: { responsive: true, maintainAspectRatio: false, cutout: '60%', plugins: { legend: { position: 'bottom', labels: { color: '#cbd5e0', boxWidth: 10, font: { size: 9 } } } }, layout: { padding: { bottom: 5 } } }
+        });
+    }
+
+    function renderLevelChart(levelData) {
+        const ctx = document.getElementById('levelChart').getContext('2d');
+        if (levelChartInstance) levelChartInstance.destroy();
+        levelChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: { labels: levelData.map(d => d.name), datasets: [{ label: '設備數量', data: levelData.map(d => d.value), backgroundColor: '#20c997', borderRadius: 3, barPercentage: 0.6 }] },
+            options: { 
+                responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+                plugins: { legend: { display: false } }, 
+                scales: { x: { grid: { color: '#4a5568' }, beginAtZero: true, ticks: { stepSize: 1, color: '#a0aec0', font: { size: 9 } } }, y: { grid: { display: false }, ticks: { color: '#a0aec0', font: { size: 10 } } } } 
+            }
+        });
+    }
+
+    function renderCpuChart(cpuData) {
+        const ctx = document.getElementById('cpuChart').getContext('2d');
+        if (cpuChartInstance) cpuChartInstance.destroy();
+
+        if (!cpuData || cpuData.length === 0 || cpuData.every(d => d.cpu === 0)) {
+            document.getElementById('cpuChartWrapper').classList.add('d-none');
+            document.getElementById('noCpuDataMsg').classList.remove('d-none');
+            return;
+        } else {
+            document.getElementById('noCpuDataMsg').classList.add('d-none');
+            document.getElementById('cpuChartWrapper').classList.remove('d-none');
+        }
+
+        cpuChartInstance = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: cpuData.map(d => d.device),
+                datasets: [{
+                    label: 'CPU 負載 (%)',
+                    data: cpuData.map(d => d.cpu),
+                    backgroundColor: cpuData.map(d => d.cpu >= 80 ? '#dc3545' : (d.cpu >= 60 ? '#ffc107' : '#0dcaf0')),
+                    borderRadius: 3,
+                    barPercentage: 0.6
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(c) { return '負載: ' + c.raw + '%'; } } } },
+                scales: {
+                    x: { grid: { color: '#4a5568' }, max: 100, title: { display: true, text: '使用率 (%)', color: '#adb5bd', font: {size: 10} }, ticks: { color: '#a0aec0', font: {size: 9} } },
+                    y: { grid: { display: false }, ticks: { color: '#a0aec0', font: { size: 10 } } }
+                }
+            }
+        });
+    }
+
+	document.addEventListener("DOMContentLoaded", () => {
+        initAnomalyPolling(); // ✅ 改為呼叫這個新的初始化函式
+        showToast('📡 正在載入全網數據，請稍候...', 'info');
+        fetchDashboardData();
+        setInterval(fetchDashboardData, 30000);
+        startCarousel();
+    });
+</script>
+{% endblock %}

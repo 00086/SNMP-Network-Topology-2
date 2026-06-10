@@ -1,0 +1,582 @@
+{% extends 'layout.html' %}
+{% block title %}全網實時運作與稽核日誌中心 - 智慧網管平台{% endblock %}
+
+{% block head %}
+<style>
+	/* 💡 強制將日誌表格內的每一列文字放大一級 */
+    .table td, .table th {
+        font-size: 0.95rem !important; 
+        padding: 0.5rem 0.6rem !important; 
+        vertical-align: middle !important; 
+    }
+    
+    /* 💡 讓狀態徽章 (例如 SUCCESS / FAILED) 的字體也按比例跟著變大 */
+    .table td .badge {
+        font-size: 0.85rem !important;
+        padding: 0.4em 0.6em !important;
+    }
+	
+	/* 💡 單獨將第一欄（通常是時間戳記）的文字再加大一級，並加粗 */
+    .table td:first-child {
+        font-size: 1.2rem !important; /* 比其他欄位的 0.95rem 再大一級 */
+        font-weight: bold !important;  /* 稍微加粗，讓時間軸視覺更清晰 */
+        letter-spacing: 0.5px;         /* 稍微拉開一點字距，數字會更好看 */
+    }
+    
+	.table td:nth-child(3) {
+        font-size: 1.2rem !important; /* 比其他欄位的 0.95rem 再大一級 */
+        font-weight: bold !important;  /* 稍微加粗，讓時間軸視覺更清晰 */
+        letter-spacing: 0.5px;         /* 稍微拉開一點字距，數字會更好看 */
+    }
+	
+    /* 💡 如果您的時間戳記是在 "第二欄"，請將上面的 :first-child 改成 :nth-child(2) 即可 */
+
+    :root {
+        --bg-body: #1a202c; --bg-card: #2d3748; --border-color: #4a5568;
+        --text-main: #cbd5e1; --text-muted: #a0aec0;
+        --bg-input: #1a202c;
+        --table-th-bg: #2a4365; --table-th-text: #63b3ed;
+        --table-td-bg: #1a202c; --table-td-hover: #2c3e50;
+        --top-banner-bg: #2d3748; --status-bar-bg: #11151c;
+    }
+
+    body.light-mode {
+        --bg-body: #f8f9fa; --bg-card: #ffffff; --border-color: #dee2e6;
+        --text-main: #212529; --text-muted: #6c757d;
+        --bg-input: #ffffff;
+        --table-th-bg: #e9ecef; --table-th-text: #0d6efd;
+        --table-td-bg: #ffffff; --table-td-hover: #f1f3f5;
+        --top-banner-bg: #ffffff; --status-bar-bg: #f8f9fa;
+    }
+
+    body { overflow: hidden !important; background-color: var(--bg-body) !important; color: var(--text-main); transition: background-color 0.3s ease, color 0.3s ease; }
+    .main-wrapper { margin-top: -16px; height: calc(100vh - 44px); display: flex; flex-direction: column; padding: 4px 15px 25px 15px; }
+    
+    .log-card { background-color: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; display: flex; flex-direction: column; height: 100%; box-shadow: 0 4px 6px rgba(0,0,0,0.1); overflow: hidden; transition: background-color 0.3s ease, border-color 0.3s ease; }
+    .top-banner { background-color: var(--top-banner-bg) !important; border-color: var(--border-color) !important; transition: all 0.3s ease; }
+    .filter-bar { background-color: var(--bg-card); padding: 12px 15px; border-bottom: 1px solid var(--border-color); border-radius: 8px 8px 0 0; }
+    .status-bar { background-color: var(--status-bar-bg) !important; border-color: var(--border-color) !important; color: var(--text-muted) !important; }
+    .footer-bar { background-color: var(--bg-card) !important; border-color: var(--border-color) !important; }
+    
+    .table-container { flex-grow: 1; overflow-y: auto; padding: 0; background-color: var(--table-td-bg); }
+    
+    .table-custom { margin-bottom: 0; font-size: 0.95rem; border-collapse: separate; border-spacing: 0; width: 100%; }
+    .table-custom th { background-color: var(--table-th-bg) !important; color: var(--table-th-text) !important; position: sticky; top: 0; z-index: 10; border-bottom: 2px solid var(--border-color) !important; white-space: nowrap; padding: 12px 14px; font-size: 1rem; transition: background-color 0.3s ease; }
+    .table-custom tbody tr td { background-color: var(--table-td-bg) !important; color: var(--text-main) !important; padding: 10px 12px; border-bottom: 1px solid var(--border-color) !important; vertical-align: middle; transition: background-color 0.3s ease; }
+    .table-custom tbody tr:hover td { background-color: var(--table-td-hover) !important; }
+    
+    .table-container::-webkit-scrollbar { width: 6px; }
+    .table-container::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+
+    .form-select-custom, .form-control-custom { background-color: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); font-size: 0.9rem; transition: all 0.3s ease; }
+    .form-select-custom:focus, .form-control-custom:focus { background-color: var(--bg-input); border-color: #0dcaf0; color: var(--text-main); box-shadow: none; }
+    body.light-mode .form-select-custom, body.light-mode .form-control-custom { border: 1px solid #ced4da; }
+    
+    .status-badge { padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 0.8rem; border: 1px solid transparent; }
+    .status-success { background-color: rgba(32, 201, 151, 0.1); color: #20c997; border-color: #20c997; }
+    .status-failed { background-color: rgba(220, 53, 69, 0.1); color: #dc3545; border-color: #dc3545; }
+    
+    .action-badge { color: #ffc107; font-weight: bold; }
+    body.light-mode .action-badge { color: #d97706; }
+    
+    .details-cell { font-family: 'Consolas', monospace; font-size: 0.9rem; color: var(--text-muted); word-break: break-all; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid p-0">
+    <div class="main-wrapper">
+        
+        <div class="d-flex justify-content-between align-items-center mb-3 p-2 rounded shadow-sm flex-shrink-0 top-banner border">
+            <h5 class="m-0 fw-bold text-warning"><i class="bi bi-shield-lock-fill me-2"></i>全網實時運作與稽核日誌中心</h5>
+            <div class="d-flex align-items-center">
+                <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm me-2" onclick="toggleTheme()"><i class="bi bi-moon-stars-fill"></i> 深淺切換</button>
+                <button class="btn btn-sm btn-success fw-bold" onclick="openExportModal()"><i class="bi bi-file-earmark-arrow-down me-1"></i>匯出紀錄...</button>
+            </div>
+        </div>
+
+        <div class="log-card">
+            <div class="filter-bar flex-shrink-0">
+                <div class="row g-2 align-items-end">
+                    <div class="col-lg col-md-4">
+                        <label class="form-label mb-1" style="font-size: 0.85rem; color: var(--text-muted);"><i class="bi bi-search me-1"></i>全文檢索</label>
+                        <input type="text" id="search-keyword" class="form-control form-control-custom" placeholder="關鍵字、IP、說明..." onkeypress="if(event.key==='Enter') executeSearch()">
+                    </div>
+                    
+                    <div class="col-lg col-md-4">
+                        <label class="form-label mb-1" style="font-size: 0.85rem; color: var(--text-muted);"><i class="bi bi-hdd-network me-1"></i>設備過濾</label>
+                        <select id="search-device" class="form-select form-select-custom">
+                            <option value="">-- 全部設備 --</option>
+                        </select>
+                    </div>
+                    
+                    <div class="col-lg col-md-4">
+                        <label class="form-label mb-1" style="font-size: 0.85rem; color: var(--text-muted);"><i class="bi bi-person-badge me-1"></i>操作權限</label>
+                        <select id="search-role" class="form-select form-select-custom">
+                            <option value="">-- 全部角色 --</option>
+                        </select>
+                    </div>
+                    
+                    <div class="col-lg col-md-4">
+                        <label class="form-label mb-1" style="font-size: 0.85rem; color: var(--text-muted);"><i class="bi bi-gear me-1"></i>行為模組過濾</label>
+                        <select id="search-action" class="form-select form-select-custom">
+                            <option value="">-- 全部紀錄 --</option>
+                        </select>
+                    </div>
+                    
+                    <div class="col-lg col-md-4">
+                        <label class="form-label mb-1" style="font-size: 0.85rem; color: var(--text-muted);"><i class="bi bi-bar-chart me-1"></i>狀態</label>
+                        <select id="search-status" class="form-select form-select-custom">
+                            <option value="">-- 全部 --</option>
+                            <option value="SUCCESS">SUCCESS</option>
+                            <option value="FAILED">FAILED</option>
+                        </select>
+                    </div>
+                    
+                    <div class="col-lg col-md-4">
+                        <label class="form-label text-info fw-bold mb-1" style="font-size: 0.85rem;"><i class="bi bi-hourglass-split me-1"></i>時間範圍</label>
+                        <select id="search-time" class="form-select form-select-custom border-info">
+                            <option value="15m" selected>最近 15 分鐘 (高速快取)</option>
+                            <option value="30m">最近 30 分鐘</option>
+                            <option value="1h">最近 1 小時</option>
+                            <option value="6h">最近 6 小時</option>
+                            <option value="24h">最近 24 小時</option>
+                            <option value="7d">最近 7 天</option>
+                            <option value="30d">最近 30 天</option>
+                            <option value="all">全部時間 (跨庫搜索)</option>
+                        </select>
+                    </div>
+                    
+                    <div class="col-lg col-md-12 d-flex gap-2">
+                        <button class="btn btn-info flex-grow-1 fw-bold shadow-sm" onclick="executeSearch()"><i class="bi bi-funnel-fill me-1"></i> 執行</button>
+                        <button class="btn btn-outline-secondary shadow-sm px-3 fw-bold" onclick="resetSearch()" title="重置為初始狀態"><i class="bi bi-arrow-counterclockwise"></i> 重置</button>
+                    </div>
+                </div>
+			</div>
+
+            <div class="px-3 py-2 flex-shrink-0 border-bottom d-flex justify-content-between align-items-center status-bar" style="font-size: 0.95rem;">
+                <span><i class="bi bi-database me-1 text-warning"></i>核心狀態：正在檢索 audit_hot 熱庫數據...</span>
+                <span id="record-count" class="badge bg-secondary text-light shadow-sm" style="font-size: 0.9rem; padding: 5px 10px;">目前累計：0 筆紀錄</span>
+            </div>
+
+            <div class="table-container">
+                <table class="table table-custom table-hover">
+                    <thead>
+                        <tr>
+                            <th width="15%"><i class="bi bi-calendar-event me-1"></i>軌跡時間</th>
+                            <th width="10%"><i class="bi bi-person-fill-lock me-1"></i>權限</th>
+                            <th width="12%"><i class="bi bi-gear-fill me-1"></i>行為模組</th>
+                            <th width="15%"><i class="bi bi-bullseye me-1"></i>影響範圍</th>
+                            <th width="8%"><i class="bi bi-bar-chart-fill me-1"></i>狀態</th>
+                            <th width="40%"><i class="bi bi-card-text me-1"></i>實時運作與詳細文字說明 (Details)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="log-table-body">
+                        <tr><td colspan="6" class="text-center py-5" style="color: var(--text-muted);">正在載入系統日誌...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="border-top px-3 py-2 flex-shrink-0 d-flex justify-content-between align-items-center footer-bar" style="height: 48px;">
+                <div id="page-info" class="fw-bold" style="font-size: 0.9rem; color: var(--text-muted);">PAGE 1 OF 1 (每頁 50 筆)</div>
+                <div id="pagination-controls" class="btn-group btn-group-sm shadow-sm"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="exportLogsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content bg-dark text-white border-secondary shadow-lg">
+      <div class="modal-header border-secondary py-2">
+        <h5 class="modal-title text-success fw-bold"><i class="bi bi-file-earmark-arrow-down me-2"></i>匯出稽核日誌</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+            <label class="form-label text-info fw-bold">欲匯出的時間範圍</label>
+            <select id="exportTimeRange" class="form-select bg-black text-white border-secondary">
+                <option value="1d">最近 1 天 (24小時)</option>
+                <option value="1w">最近 1 週</option>
+                <option value="1m">最近 1 個月</option>
+                <option value="6m">最近 6 個月</option>
+                <option value="1y">最近 1 年</option>
+                <option value="custom" selected>自訂區間 (同當前網頁搜尋結果)</option>
+            </select>
+        </div>
+        <div class="mb-4">
+            <label class="form-label text-info fw-bold">資料匯出格式</label>
+            <select id="exportFormat" class="form-select bg-black text-white border-secondary">
+                <option value="csv">CSV 報表 (Excel 可直接開啟)</option>
+                <option value="txt">TXT 報表 (純文字易讀排版)</option>
+                <option value="json">JSON 數據 (供外部系統拋轉對接)</option>
+            </select>
+        </div>
+        <div class="alert mb-0" style="font-size: 0.85rem; background-color: #11151c !important; color: #ffffff !important; border: 1px solid #4a5568 !important; box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);">
+            <i class="bi bi-info-circle-fill me-1 text-info"></i> 系統將依據您上方的選擇，以及當前設定的「權限、模組、狀態」過濾條件進行精準匯出。此操作軌跡將被系統嚴格紀錄。
+        </div>
+      </div>
+      <div class="modal-footer border-secondary py-1">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+        <button type="button" class="btn btn-sm btn-success fw-bold px-3" onclick="executeExportLogs()" id="btn-confirm-export">確認並下載</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function toggleTheme() {
+        document.body.classList.toggle('light-mode');
+        window.logFrontendAction("前端瀏覽軌跡", "切換日誌主題", `管理員在日誌中心切換了介面主題色彩。`);
+    }
+
+    function getFiltersDescription() {
+        let kw = document.getElementById('search-keyword').value || '無';
+		// 💡 取得設備名稱
+        let dev = document.getElementById('search-device').options[document.getElementById('search-device').selectedIndex].text;
+        let role = document.getElementById('search-role').options[document.getElementById('search-role').selectedIndex].text;
+        let action = document.getElementById('search-action').options[document.getElementById('search-action').selectedIndex].text;
+        let status = document.getElementById('search-status').options[document.getElementById('search-status').selectedIndex].text;
+        let time = document.getElementById('search-time').options[document.getElementById('search-time').selectedIndex].text;
+        return `[關鍵字: ${kw} | 權限: ${role} | 模組: ${action} | 狀態: ${status} | 時間: ${time}]`;
+    }
+
+    let allLogsData = [];
+    let currentPage = 1;
+    const rowsPerPage = 50;
+
+    function executeSearch() {
+        let filterDesc = getFiltersDescription();
+        window.logFrontendAction("前端瀏覽軌跡", "日誌系統檢索", `管理員啟動了資安日誌檢索過濾器，查詢條件為：${filterDesc}。`);
+        loadLogs();
+    }
+
+    function resetSearch() {
+        document.getElementById('search-keyword').value = '';
+		document.getElementById('search-device').value = ''; // 💡 重置設備選單
+        document.getElementById('search-role').value = '';
+        document.getElementById('search-action').value = '';
+        document.getElementById('search-status').value = '';
+        document.getElementById('search-time').value = '15m';
+        window.logFrontendAction("前端瀏覽軌跡", "重置檢索條件", "管理員點擊了「重置」按鈕，將日誌檢索條件還原為預設狀態 (最近 15 分鐘)。");
+        loadLogs();
+    }
+
+    function loadLogs() {
+        let tbody = document.getElementById('log-table-body');
+        tbody.innerHTML = `<tr><td colspan="6" class="text-center text-info py-5"><div class="spinner-border spinner-border-sm me-2"></div>正在檢索數據...</td></tr>`;
+        
+        const payload = {
+            keyword: document.getElementById('search-keyword').value,
+			device: document.getElementById('search-device').value, // 💡 新增這行
+            role: document.getElementById('search-role').value,
+            action: document.getElementById('search-action').value,
+            status: document.getElementById('search-status').value,
+            time_range: document.getElementById('search-time').value,
+            limit: 999999
+        };
+
+        fetch('/api/audit-logs/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                allLogsData = data.data;
+                currentPage = 1;
+                document.getElementById('record-count').innerText = `檢索完成：共 ${allLogsData.length} 筆紀錄`;
+                renderTablePage();
+            } else {
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-5">載入失敗：${data.error}</td></tr>`;
+            }
+        })
+        .catch(err => {
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-5">連線異常：${err.message}</td></tr>`;
+        });
+    }
+
+    function renderTablePage() {
+        let tbody = document.getElementById('log-table-body');
+        let html = '';
+
+        if (allLogsData.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center py-5" style="color: var(--text-muted);">查無符合條件之紀錄。</td></tr>`;
+            renderPagination();
+            return;
+        }
+
+        let startIndex = (currentPage - 1) * rowsPerPage;
+        let endIndex = startIndex + rowsPerPage;
+        let pageData = allLogsData.slice(startIndex, endIndex);
+
+        pageData.forEach(log => {
+            let statusHtml = log.result === 'SUCCESS' 
+                ? '<span class="status-badge status-success">SUCCESS</span>' 
+                : '<span class="status-badge status-failed">FAILED</span>';
+            
+            let roleHtml = log.username === 'SystemEngine' 
+                ? `<span class="badge bg-secondary text-light">${log.username}</span>`
+                : `<span class="badge bg-primary text-light">${log.username}</span>`;
+                
+            let actionIcon = "⚙️";
+            if (log.action.includes("HTTP")) actionIcon = "🌐";
+            if (log.action.includes("前端") || log.action.includes("手動") || log.action.includes("設定")) actionIcon = "✋";
+                
+            html += `
+                <tr>
+                    <td class="text-info fw-bold" style="font-family: monospace;">${log.timestamp}</td>
+                    <td>${roleHtml}</td>
+                    <td><span class="action-badge">${actionIcon} ${log.action}</span></td>
+                    <td class="text-truncate" style="max-width: 200px;" title="${log.target}">${log.target}</td>
+                    <td>${statusHtml}</td>
+                    <td class="details-cell">${log.details}</td>
+                </tr>
+            `;
+        });
+        
+        tbody.innerHTML = html;
+        renderPagination();
+    }
+
+    function renderPagination() {
+        let totalPages = Math.ceil(allLogsData.length / rowsPerPage) || 1;
+        let pageInfo = document.getElementById('page-info');
+        let controls = document.getElementById('pagination-controls');
+
+        pageInfo.innerText = `PAGE ${currentPage} OF ${totalPages} (每頁 50 筆)`;
+
+        let pHtml = '';
+        pHtml += `<button class="btn btn-outline-secondary ${currentPage === 1 ? 'disabled' : ''}" onclick="changePage(1)"><i class="bi bi-chevron-bar-left"></i></button>`;
+        pHtml += `<button class="btn btn-outline-secondary ${currentPage === 1 ? 'disabled' : ''}" onclick="changePage(${currentPage - 1})"><i class="bi bi-chevron-left"></i></button>`;
+
+        let startP = Math.max(1, currentPage - 5);
+        let endP = Math.min(totalPages, startP + 9);
+        if (endP - startP < 9) { startP = Math.max(1, endP - 9); }
+
+        for (let i = startP; i <= endP; i++) {
+            if (i === currentPage) {
+                pHtml += `<button class="btn btn-info fw-bold text-dark disabled">${i}</button>`;
+            } else {
+                pHtml += `<button class="btn btn-outline-secondary" onclick="changePage(${i})">${i}</button>`;
+            }
+        }
+
+        pHtml += `<button class="btn btn-outline-secondary ${currentPage === totalPages ? 'disabled' : ''}" onclick="changePage(${currentPage + 1})"><i class="bi bi-chevron-right"></i></button>`;
+        pHtml += `<button class="btn btn-outline-secondary ${currentPage === totalPages ? 'disabled' : ''}" onclick="changePage(${totalPages})"><i class="bi bi-chevron-bar-right"></i></button>`;
+
+        controls.innerHTML = pHtml;
+    }
+
+    function changePage(page) {
+        let totalPages = Math.ceil(allLogsData.length / rowsPerPage) || 1;
+        if (page < 1 || page > totalPages) return;
+        currentPage = page;
+        renderTablePage();
+    }
+
+    function openExportModal() {
+        var exportModal = new bootstrap.Modal(document.getElementById('exportLogsModal'));
+        exportModal.show();
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+        let exportBtn = document.querySelector('button.btn-success');
+        if (exportBtn) {
+            exportBtn.setAttribute('onclick', 'openExportModal()');
+            exportBtn.removeAttribute('data-bs-toggle');
+        }
+    });
+
+    async function executeExportLogs() {
+        let btn = document.getElementById('btn-confirm-export');
+        let originalHtml = btn.innerHTML;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>處理中...';
+        btn.classList.add('disabled');
+
+        let timeRangeEl = document.getElementById('exportTimeRange');
+        let timeRange = timeRangeEl.value;
+        let timeRangeText = timeRangeEl.options[timeRangeEl.selectedIndex].text;
+        let format = document.getElementById('exportFormat').value;
+
+        let keyword = document.getElementById('search-keyword') ? document.getElementById('search-keyword').value : '';
+        let role = document.getElementById('search-role') ? document.getElementById('search-role').value : '';
+        let action = document.getElementById('search-action') ? document.getElementById('search-action').value : '';
+        let status = document.getElementById('search-status') ? document.getElementById('search-status').value : '';
+        
+        let actualTimeRange = timeRange;
+        if (timeRange === 'custom') {
+            actualTimeRange = document.getElementById('search-time') ? document.getElementById('search-time').value : 'all';
+            timeRangeText = document.getElementById('search-time').options[document.getElementById('search-time').selectedIndex].text;
+        }
+
+        let url = `/api/audit-logs/search`;
+        const payload = {
+            keyword: keyword,
+			device: device, // 💡 新增這行
+            role: role,
+            action: action,
+            status: status,
+            time_range: actualTimeRange,
+            limit: 999999
+        };
+
+        try {
+            let response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            let result = await response.json();
+            let data = result.data || result; 
+
+            if (!data || data.length === 0) {
+                alert('查無符合條件的資料可供匯出！');
+                btn.innerHTML = originalHtml; btn.classList.remove('disabled');
+                return;
+            }
+
+            let timestamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+            let filename = `System_Audit_Logs_${timestamp}.${format}`; // 💡 替換 ISMS
+            let blobData;
+
+            if (format === 'json') {
+                blobData = new Blob([JSON.stringify(data, null, 2)], {type: "application/json;charset=utf-8"});
+            } 
+            else if (format === 'csv') {
+                let csvContent = '\uFEFF'; 
+                csvContent += "軌跡時間,權限角色,行為模組,影響範圍,狀態,詳細文字說明\n";
+                data.forEach(row => {
+                    let rTime = `"${row.timestamp || ''}"`;
+                    let rRole = `"${row.username || ''}"`;
+                    let rAction = `"${row.action || ''}"`;
+                    let rTarget = `"${row.target || ''}"`;
+                    let rStatus = `"${row.result || ''}"`;
+                    let rDetails = `"${(row.details || '').replace(/"/g, '""').replace(/\n/g, ' ')}"`;
+                    csvContent += `${rTime},${rRole},${rAction},${rTarget},${rStatus},${rDetails}\n`;
+                });
+                blobData = new Blob([csvContent], {type: "text/csv;charset=utf-8"});
+            } 
+            else if (format === 'txt') {
+                let txtContent = `=== 網路拓樸智能管理平台 - 系統稽核日誌匯出 (${timestamp}) ===\n`; // 💡 替換 ISMS
+                txtContent += `條件: 權限=${role||'全部'}, 模組=${action||'全部'}, 區間=${timeRangeText}\n`;
+                txtContent += `總計: ${data.length} 筆紀錄\n\n`;
+                txtContent += `=================================================================\n`;
+                data.forEach(row => {
+                    txtContent += `[${row.timestamp || ''}] ${row.username || ''} | ${row.action || ''} | ${row.target || ''} | ${row.result || ''}\n`;
+                    txtContent += `詳細說明: ${row.details || ''}\n`;
+                    txtContent += `-----------------------------------------------------------------\n`;
+                });
+                blobData = new Blob([txtContent], {type: "text/plain;charset=utf-8"});
+            }
+
+            let downloadUrl = URL.createObjectURL(blobData);
+            let a = document.createElement("a");
+            a.href = downloadUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(downloadUrl);
+
+            let modalInst = bootstrap.Modal.getInstance(document.getElementById('exportLogsModal'));
+            if (modalInst) modalInst.hide();
+
+            if(typeof window.showToast === 'function') {
+                window.showToast(`✅ 稽核日誌資料安全匯出成功！<br><span style="font-size:0.85rem; font-weight:normal;">⏱️ 時間範圍：<b>${timeRangeText}</b><br>📊 成功下載：<b>${data.length}</b> 筆敏感軌跡明細</span>`, "success");
+            }
+
+            let actionDetails = `管理員執行了【系統稽核日誌資料匯出】，匯出格式為 [${format.toUpperCase()}]，涵蓋時間區間為 [${timeRangeText}]，共計匯出 ${data.length} 筆敏感軌跡紀錄。`;
+            fetch('/api/audit-logs/client', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: "前端介面操作", target: "匯出稽核紀錄", details: actionDetails, username: 'SystemUser' })
+            }).catch(e => {});
+
+        } catch (e) {
+            console.error(e);
+            alert("匯出失敗：" + e.message);
+        } finally {
+            btn.innerHTML = originalHtml; 
+            btn.classList.remove('disabled');
+        }
+    }
+
+// 💡 動態載入「行為模組」與「操作權限」雙選單
+    function loadFilters() {
+        // 呼叫我們剛剛在 routes.py 寫的新 API
+        fetch('/api/audit-logs/filters')
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                const actionSelect = document.getElementById('search-action');
+                const roleSelect = document.getElementById('search-role');
+                
+                // 1. 渲染行為模組選單
+                if (actionSelect) {
+                    const currentAct = actionSelect.value;
+                    actionSelect.innerHTML = '<option value="">-- 全部紀錄 --</option>';
+                    
+                    for (const [category, actions] of Object.entries(data.grouped_actions)) {
+                        const optgroup = document.createElement('optgroup');
+                        optgroup.label = category;
+                        actions.forEach(act => {
+                            const opt = document.createElement('option');
+                            opt.value = act; opt.textContent = act;
+                            optgroup.appendChild(opt);
+                        });
+                        actionSelect.appendChild(optgroup);
+                    }
+                    if (currentAct) actionSelect.value = currentAct;
+                }
+
+                // 2. 渲染操作權限選單
+                if (roleSelect) {
+                    const currentRole = roleSelect.value;
+                    roleSelect.innerHTML = '<option value="">-- 全部角色 --</option>';
+                    
+                    data.roles.forEach(role => {
+                        const opt = document.createElement('option');
+                        opt.value = role; opt.textContent = role;
+                        roleSelect.appendChild(opt);
+                    });
+                    if (currentRole) roleSelect.value = currentRole;
+                }
+            }
+        })
+        .catch(err => console.error("無法載入過濾器選單:", err));
+    }
+
+	// 💡 新增函式：動態向系統取得所有設備清單，並注入下拉選單
+    function loadDevices() {
+        fetch('/api/devices')
+        .then(res => res.json())
+        .then(data => {
+            const deviceSelect = document.getElementById('search-device');
+            if (deviceSelect && Array.isArray(data)) {
+                data.forEach(dev => {
+                    if (dev.ip) {
+                        const opt = document.createElement('option');
+                        opt.value = dev.ip;
+                        // 顯示格式：設備名稱 (IP)
+                        opt.textContent = dev.name ? `${dev.name} (${dev.ip})` : dev.ip;
+                        deviceSelect.appendChild(opt);
+                    }
+                });
+            }
+        })
+        .catch(err => console.error("無法載入設備清單:", err));
+    }
+
+    // 更新網頁初始化行為
+	// 💡 網頁載入時，載入過濾器並讀取表格資料
+    window.onload = function() {
+        loadFilters();
+        loadDevices(); // 💡 確保網頁載入時去抓取設備清單
+        loadLogs();
+    };
+</script>
+{% endblock %}

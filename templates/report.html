@@ -1,0 +1,341 @@
+{% extends 'layout.html' %}
+{% block title %}歷史流量報表 - 網路拓樸管理系統{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+    body { background-color: #1a202c; color: #e2e8f0; }
+    .card { background-color: #2d3748; border: 1px solid #4a5568; border-radius: 8px; }
+    .card-header { background-color: #2a4365; border-bottom: 1px solid #4a5568; color: #63b3ed; font-weight: bold; }
+    .form-select, .form-control { background-color: #1a202c; color: #e2e8f0; border: 1px solid #4a5568; }
+    .form-select:focus, .form-control:focus { background-color: #1a202c; color: #e2e8f0; border-color: #63b3ed; box-shadow: 0 0 0 0.2rem rgba(99, 179, 237, 0.25); }
+    ::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; }
+	
+	/* 💡 新增：報表全螢幕專用樣式 */
+    .report-fullscreen {
+        position: fixed !important;
+        top: 0; left: 0;
+        width: 100vw !important;
+        height: 100vh !important;
+        z-index: 1050;
+        margin: 0;
+        border-radius: 0;
+        display: flex;
+        flex-direction: column;
+    }
+    .report-fullscreen .card-body {
+        flex-grow: 1;
+        height: auto !important;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-2">
+    <h4 class="mb-3 text-info fw-bold">
+        <i class="bi bi-graph-up me-2"></i>設備歷史流量趨勢圖 
+        <span id="mainTitleRange" class="text-white-50 fs-6">(最近 15 分鐘)</span>
+    </h4>
+    
+<div class="row g-2 mb-3 align-items-end">
+        <div class="col-md-3">
+            <label class="form-label text-white-50 small mb-1">目標設備</label>
+            <select id="deviceSelect" class="form-select shadow-sm" onchange="onDeviceChange()">
+                <option value="">載入設備中...</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label text-white-50 small mb-1">連接埠 (Port)</label>
+            <select id="portSelect" class="form-select shadow-sm" onchange="renderChart()" disabled>
+                <option value="">請先選擇設備</option>
+            </select>
+        </div>
+        <div class="col-md-6">
+            <label class="text-white-50 small mb-1">時間範圍</label>
+            <div class="d-flex align-items-center">
+                <select id="reportTimeRange" class="form-select bg-dark text-white border-secondary me-2" style="max-width: 220px;" onchange="toggleCustomTimeDiv('reportTimeRange', 'reportCustomDiv'); fetchTrafficData();">
+                    <option value="15m" selected>最近 15 分鐘</option>
+                    <option value="30m">最近 30 分鐘</option>
+                    <option value="1h">最近 1 小時</option>
+                    <option value="6h">最近 6 小時</option>
+                    <option value="24h">最近 24 小時</option>
+                    <option value="7d">最近 7 天</option>
+					<option value="30d">最近 1 個月 (熱庫高精度)</option>
+					<option value="180d">最近 半年 (溫庫中精度)</option>
+					<option value="1y">最近 1 年 (冷庫趨勢)</option>
+					<option value="3y">最近 3 年 (冷庫法規)</option>
+                    <option value="custom">自訂區間...</option>
+                </select>
+                <button class="btn btn-outline-info" onclick="forceRefreshData()" title="立即重新載入"><i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+            <div id="reportCustomDiv" class="d-none align-items-center mt-2">
+                <input type="datetime-local" id="reportStart" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width: 220px;" onchange="fetchTrafficData()">
+                <span class="mx-1 text-white-50">~</span>
+                <input type="datetime-local" id="reportEnd" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width: 220px;" onchange="fetchTrafficData()">
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow" id="reportCard">
+        <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <div>
+                <span id="chartTitle" class="fs-6">流量趨勢分析</span>
+                <span class="badge bg-secondary ms-2">即時讀取資料庫</span>
+            </div>
+            <div>
+                <button type="button" class="btn btn-sm btn-outline-info fw-bold" onclick="toggleFullscreenReport()" title="全螢幕切換">
+                    <i id="fullscreenIconReport" class="bi bi-arrows-fullscreen"></i>
+                </button>
+            </div>
+        </div>
+        <div class="card-body position-relative" style="height: 65vh;">
+            <div id="emptyMsg" class="position-absolute top-50 start-50 translate-middle text-center text-white-50">
+                <i class="bi bi-bar-chart me-2 fs-4"></i><br>請由上方選擇設備與連接埠
+            </div>
+            <canvas id="trafficChart" style="display: none;"></canvas>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let trafficChartInstance = null;
+    let currentTrafficData = {};
+    let globalIfNames = {};
+    let globalIfAliases = {}; 
+    let currentTitleRangeText = '(最近 15 分鐘)'; 
+    let lastLoggedQuery = ""; // 防止相同條件重複洗頻
+
+    function init() {
+        let now = new Date();
+        let yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        yesterday.setMinutes(yesterday.getMinutes() - yesterday.getTimezoneOffset());
+        
+        document.getElementById('reportEnd').value = now.toISOString().slice(0, 16);
+        document.getElementById('reportStart').value = yesterday.toISOString().slice(0, 16);
+
+        fetch('/api/devices').then(res=>res.json()).then(devs => {
+            let sel = document.getElementById('deviceSelect');
+            sel.innerHTML = '<option value="">-- 請選擇設備 --</option>';
+            devs.forEach(d => {
+                if(d.status !== 'down' && d.visible === 1) {
+                    let opt = document.createElement('option');
+                    opt.value = d.ip;
+                    opt.text = `${d.name || d.ip} (${d.ip})`;
+                    opt.dataset.raw = d.snmp_raw || '{}';
+                    sel.appendChild(opt);
+                }
+            });
+        });
+    }
+
+    function onDeviceChange() {
+        let sel = document.getElementById('deviceSelect');
+        let ip = sel.value;
+        let pSel = document.getElementById('portSelect');
+
+        if(!ip) {
+            pSel.innerHTML = '<option value="">請先選擇設備</option>';
+            pSel.disabled = true;
+            if(trafficChartInstance) trafficChartInstance.destroy();
+            document.getElementById('trafficChart').style.display = 'none';
+            document.getElementById('emptyMsg').style.display = 'block';
+            document.getElementById('emptyMsg').innerHTML = '<i class="bi bi-bar-chart me-2 fs-4"></i><br>請由上方選擇設備與連接埠';
+            return;
+        }
+        
+        let opt = sel.options[sel.selectedIndex];
+        try {
+            let raw = JSON.parse(opt.dataset.raw);
+            globalIfNames = raw[4] || {};
+            globalIfAliases = raw[9] || {}; 
+        } catch(e) { 
+            globalIfNames = {}; 
+            globalIfAliases = {};
+        }
+
+        pSel.innerHTML = '<option value="">-- 請選擇連接埠 --</option>';
+        
+        let ports = Object.keys(globalIfNames).filter(idx => {
+            let n = globalIfNames[idx].replace(/"/g, '').toLowerCase();
+            return !n.includes('vlan') && !n.includes('loop') && !n.includes('tun') && !n.includes('null') && !n.includes('cpu');
+        });
+        
+        ports.sort((a,b) => parseInt(a) - parseInt(b));
+
+        ports.forEach(pIdx => {
+            let opt = document.createElement('option');
+            opt.value = pIdx;
+            let pName = globalIfNames[pIdx].replace(/"/g, '').trim();
+            // 💡 這裡呼叫 utils.js 裡的 decodeHexIfNeeded
+            let pAlias = globalIfAliases[pIdx] ? decodeHexIfNeeded(globalIfAliases[pIdx]) : '';
+            opt.text = pAlias ? `${pName} (${pAlias})` : pName;
+            pSel.appendChild(opt);
+        });
+        
+        pSel.disabled = false;
+        fetchTrafficData();
+    }
+
+    function forceRefreshData() {
+        // 清除防呆紀錄，讓重新整理按鈕一定能發出稽核軌跡
+        lastLoggedQuery = "";
+        fetchTrafficData();
+    }
+
+    function fetchTrafficData() {
+        let ip = document.getElementById('deviceSelect').value;
+        if(!ip) return; 
+
+        // 💡 這裡呼叫 utils.js 裡的 buildTimeQueryString
+        let timeQuery = buildTimeQueryString('reportTimeRange', 'reportStart', 'reportEnd');
+        if (!timeQuery) return; 
+
+        let rangeSelect = document.getElementById('reportTimeRange');
+        let rangeText = rangeSelect.options[rangeSelect.selectedIndex].text;
+        
+        if (rangeSelect.value === 'custom') {
+            let start = document.getElementById('reportStart').value;
+            let end = document.getElementById('reportEnd').value;
+            currentTitleRangeText = `(${start.replace('T', ' ')} ~ ${end.replace('T', ' ')})`;
+        } else {
+            currentTitleRangeText = `(${rangeText})`;
+        }
+        document.getElementById('mainTitleRange').innerText = currentTitleRangeText;
+
+        let apiUrl = `/api/traffic/${ip}?${timeQuery}`;
+
+        fetch(apiUrl).then(res=>res.json()).then(data => {
+            if(data.success) {
+                currentTrafficData = data.data;
+                renderChart();
+            }
+        });
+    }
+
+    function renderChart() {
+        let pSel = document.getElementById('portSelect');
+        let pIdx = pSel.value;
+        if(!pIdx) return;
+        
+        let displayLabel = pSel.options[pSel.selectedIndex].text;
+        document.getElementById('chartTitle').innerText = `${displayLabel} - 歷史流量趨勢 ${currentTitleRangeText}`;
+
+        // ==========================================
+        // 🌟 ISMS 稽核埋點：紀錄歷史流量調閱軌跡
+        // ==========================================
+        let dSel = document.getElementById('deviceSelect');
+        let devText = dSel.options[dSel.selectedIndex].text;
+        let timeCleanText = currentTitleRangeText.replace(/[()]/g, ''); // 移除括號讓文字更乾淨
+        
+        // 組合當前查詢條件，防止同一個畫面不斷重新渲染洗頻
+        let currentQuery = `${devText}|${displayLabel}|${timeCleanText}`;
+
+        if (lastLoggedQuery !== currentQuery && !displayLabel.includes('請選擇連接埠')) {
+            if (typeof window.logFrontendAction === 'function') {
+                window.logFrontendAction(
+                    "前端介面操作", 
+                    "調閱歷史流量報表", 
+                    `管理員調閱了歷史流量走勢圖。目標設備：【 ${devText} 】，指定連接埠：【 ${displayLabel} 】，篩選區間：【 ${timeCleanText} 】。`
+                );
+            }
+            lastLoggedQuery = currentQuery;
+        }
+        // ==========================================
+
+        if(!currentTrafficData[pIdx] || currentTrafficData[pIdx].labels.length === 0) {
+            document.getElementById('trafficChart').style.display = 'none';
+            document.getElementById('emptyMsg').style.display = 'block';
+            document.getElementById('emptyMsg').innerHTML = `<i class="bi bi-clock-history me-2 fs-4 text-warning"></i><br>此時間區間內，該連接埠找不到任何歷史流量資料`;
+            if (trafficChartInstance) trafficChartInstance.destroy();
+            return;
+        }
+        
+        let d = currentTrafficData[pIdx];
+        document.getElementById('emptyMsg').style.display = 'none';
+        document.getElementById('trafficChart').style.display = 'block';
+
+        const ctx = document.getElementById('trafficChart').getContext('2d');
+        if (trafficChartInstance) trafficChartInstance.destroy();
+        
+        Chart.defaults.color = '#cbd5e0';
+        Chart.defaults.font.family = 'system-ui, -apple-system, sans-serif';
+
+        // 💡 將數據轉換為上下鏡像 (上傳 Tx 轉為負數)
+        let maxDownload = d.max_out_bps || []; 
+        let maxUpload = (d.max_in_bps || []).map(v => -v);
+        let avgDownload = d.avg_out_bps || []; 
+        let avgUpload = (d.avg_in_bps || []).map(v => -v);
+
+        trafficChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: { 
+                labels: d.labels, 
+                datasets: [ 
+                    { label: '📥 瞬間峰值 (Max Rx)', data: maxDownload, borderColor: 'transparent', backgroundColor: 'rgba(32, 201, 151, 0.15)', fill: true, tension: 0.3, pointRadius: 0 }, 
+                    { label: '📤 瞬間峰值 (Max Tx)', data: maxUpload, borderColor: 'transparent', backgroundColor: 'rgba(13, 202, 240, 0.15)', fill: true, tension: 0.3, pointRadius: 0 },
+                    { label: '📥 平均接收 (Avg Rx)', data: avgDownload, borderColor: '#20c997', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 2, hitRadius: 8 }, 
+                    { label: '📤 平均傳送 (Avg Tx)', data: avgUpload, borderColor: '#0dcaf0', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 2, hitRadius: 8 }
+                ] 
+            },
+            options: {
+                animation: false, 
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: { 
+                    legend: { position: 'bottom', labels: {color: '#fff'} }, 
+                    // 💡 提示框自動將負數轉回正數顯示
+                    tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': ' + formatBps(Math.abs(c.raw)); } } } 
+                },
+                scales: { 
+                    x: { ticks: { color: '#adb5bd', font: { size: 11 }, maxTicksLimit: 12 }, grid: { display: false } }, 
+                    y: { ticks: { color: '#adb5bd', font: { size: 11 }, callback: function(v) { return formatBps(Math.abs(v)); } }, grid: { color: '#4a5568' } } 
+                }
+            },
+            // 💡 補齊漂亮的黃色十字游標線 (Crosshair)
+            plugins: [{
+                id: 'crosshair',
+                afterDraw: function(chart) {
+                    if (chart.tooltip?.opacity > 0 && chart.tooltip.dataPoints && chart.tooltip.dataPoints.length > 0) {
+                        const x = chart.tooltip.caretX;
+                        const yCoords = chart.tooltip.dataPoints.map(dp => dp.element.y);
+                        const minY = Math.min(...yCoords);
+                        const maxY = Math.max(...yCoords);
+                        const ctx = chart.ctx;
+                        ctx.save(); ctx.beginPath(); ctx.moveTo(x, minY); ctx.lineTo(x, maxY); ctx.lineWidth = 1.5;
+                        ctx.strokeStyle = '#ffe066'; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.restore();
+                    }
+                }
+            }]
+        });
+    }
+	
+	// ==========================================
+    // 💡 報表全螢幕縮放控制函式
+    // ==========================================
+    function toggleFullscreenReport() {
+        let card = document.getElementById('reportCard');
+        let icon = document.getElementById('fullscreenIconReport');
+        
+        if (card.classList.contains('report-fullscreen')) {
+            card.classList.remove('report-fullscreen');
+            icon.classList.remove('bi-fullscreen-exit'); 
+            icon.classList.add('bi-arrows-fullscreen');
+            document.body.style.overflow = 'auto'; // 恢復網頁滾動
+        } else {
+            card.classList.add('report-fullscreen');
+            icon.classList.remove('bi-arrows-fullscreen'); 
+            icon.classList.add('bi-fullscreen-exit');
+            document.body.style.overflow = 'hidden'; // 鎖定網頁背景滾動
+        }
+        
+        // 延遲重繪圖表，確保滿版填滿
+        if (trafficChartInstance) { 
+            setTimeout(() => trafficChartInstance.resize(), 300); 
+        }
+    }
+
+    document.addEventListener("DOMContentLoaded", init);
+</script>
+{% endblock %}

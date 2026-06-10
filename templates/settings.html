@@ -1,0 +1,1150 @@
+{% extends 'layout.html' %}
+{% block title %}全域系統設定中心 - 智慧網管平台{% endblock %}
+
+{% block head %}
+<style>
+	
+	/* 🌟 修復深色模式下輸入框提示字 (placeholder) 隱形的問題 */
+    .form-control::placeholder { color: #64748b !important; opacity: 1 !important; }
+	
+    :root {
+        --bg-body: #1a202c; --bg-card: #2d3748; --border-color: #4a5568;
+        --text-main: #e2e8f0; --text-muted: #a0aec0;
+        --bg-input: #1a202c; --accent-color: #0dcaf0;
+        --header-bg-1: #2a4365; --header-text-1: #63b3ed;
+        --header-bg-2: #3b2a1a; --header-text-2: #ffc107;
+        --alert-bg: #212529; --alert-text: #adb5bd;
+        --label-warn: #ffc107;
+    }
+
+    body.light-mode {
+        --bg-body: #f8f9fa; --bg-card: #ffffff; --border-color: #dee2e6;
+        --text-main: #212529; --text-muted: #6c757d;
+        --bg-input: #ffffff; --accent-color: #0d6efd;
+        --header-bg-1: #e9ecef; --header-text-1: #0d6efd;
+        --header-bg-2: #fff3cd; --header-text-2: #856404;
+        --alert-bg: #f8f9fa; --alert-text: #495057;
+        --label-warn: #d97706; 
+    }
+
+    body { 
+        overflow: hidden !important; 
+        background-color: var(--bg-body) !important; 
+        color: var(--text-main); 
+        transition: background-color 0.3s ease, color 0.3s ease; 
+    }
+    
+    .main-wrapper { 
+        margin-top: -16px;
+        height: calc(100vh - 90px); 
+        display: flex; 
+        flex-direction: column; 
+        padding: 4px 15px 0px 15px; 
+    }
+    
+    .top-banner {
+        background-color: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 6px 18px;
+        margin-bottom: 10px; 
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+    }
+    
+    .row-full-height {
+        flex-grow: 1;
+        overflow: hidden;
+        margin-bottom: 0;
+    }
+
+    .custom-gap {
+        --bs-gutter-x: 8px;
+        --bs-gutter-y: 8px;
+    }
+
+    .card-settings { 
+        background-color: var(--bg-card); 
+        border: 1px solid var(--border-color); 
+        border-radius: 8px; 
+        height: 100%; 
+        display: flex;
+        flex-direction: column;
+        overflow: hidden; 
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+
+    /* 💡 2x2 網格佈局 (四宮格) */
+    .settings-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr); 
+        grid-template-rows: repeat(2, 1fr);    
+        gap: 8px;
+        height: 100%;
+        overflow: hidden;
+    }
+
+    .setting-block {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        background-color: rgba(0,0,0,0.15);
+        overflow: hidden; 
+    }
+    body.light-mode .setting-block { background-color: rgba(0,0,0,0.02); }
+    
+    /* 顏色邊框定義 */
+    .setting-block.border-primary { border-left: 4px solid #0d6efd; }
+    .setting-block.border-info { border-left: 4px solid #0dcaf0; }
+    .setting-block.border-success { border-left: 4px solid #198754; }
+    .setting-block.border-warning { border-left: 4px solid #ffc107; }
+    .setting-block.border-danger { border-left: 4px solid #dc3545; }
+
+    .block-title {
+        font-size: 0.95rem;
+        font-weight: bold;
+        padding: 6px 12px;
+        background-color: rgba(255,255,255,0.05);
+        border-bottom: 1px solid var(--border-color);
+        flex-shrink: 0;
+    }
+    body.light-mode .block-title { background-color: rgba(0,0,0,0.05); }
+
+    .block-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px 15px;
+    }
+    .block-content::-webkit-scrollbar { width: 6px; }
+    .block-content::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+    
+    .card-header-custom-1, .card-header-custom-2 { 
+        border-bottom: 1px solid var(--border-color); 
+        font-weight: bold; 
+        padding: 8px 15px;
+        font-size: 1.05rem;
+        display: flex;
+        align-items: center;
+        min-height: 42px;
+    }
+    .card-header-custom-1 { background-color: var(--header-bg-1); color: var(--header-text-1); }
+    .card-header-custom-2 { background-color: var(--header-bg-2); color: var(--header-text-2); }
+    
+    .form-switch .form-check-input { width: 2.5em; height: 1.2em; background-color: var(--border-color); border-color: var(--border-color); cursor: pointer; }
+    .form-switch .form-check-input:checked { background-color: var(--accent-color); border-color: var(--accent-color); }
+    
+    .form-check-label { font-size: 0.95rem; font-weight: bold; cursor: pointer; color: var(--text-main); }
+    .text-secondary-custom { color: var(--text-muted) !important; }
+    
+    .setting-desc { font-size: 0.85rem; color: var(--text-muted); margin-top: 4px; display: block; line-height: 1.4; }
+    
+    .form-select-custom, .form-control-custom { background-color: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); }
+    .form-select-custom:focus, .form-control-custom:focus { background-color: var(--bg-input); border-color: var(--accent-color); color: var(--text-main); box-shadow: none; }
+    body.light-mode .form-select-custom, body.light-mode .form-control-custom { border: 1px solid #ced4da; }
+    
+    .alert-custom { background-color: var(--alert-bg); color: var(--alert-text); border: 1px solid var(--border-color); font-size: 0.95rem; line-height: 1.5; }
+    .text-warn-custom { color: var(--label-warn) !important; }
+
+    @media (max-width: 992px) {
+        .settings-grid {
+            grid-template-columns: 1fr;
+            grid-template-rows: auto;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid p-0">
+    <div class="main-wrapper">
+        
+        <div class="top-banner">
+            <h5 class="m-0 fw-bold" style="color: var(--accent-color);"><i class="bi bi-gear-fill me-2" style="color: var(--text-muted);"></i>全域系統設定中心</h5>
+            <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm" onclick="toggleTheme()"><i class="bi bi-moon-stars-fill"></i> 深淺切換</button>
+        </div>
+
+		<div class="row custom-gap row-full-height pb-2">            
+            
+            <div class="col-lg-6 h-100">
+                <div class="card card-settings">
+                    <div class="card-header-custom-1 flex-shrink-0"><i class="bi bi-cpu-fill me-2"></i>核心排程與網路通訊</div>
+                    <div class="card-body p-2" style="overflow: hidden;">
+                        
+                        <div class="settings-grid">
+                            
+							<div class="setting-block border-info">
+                                <div class="block-title text-info"><i class="bi bi-shield-lock me-2"></i>系統防護與流量網段定義</div>
+                                <div class="block-content">
+                                    <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">系統授權登入白名單</label>
+                                    <input type="text" id="allowed-ips" class="form-control form-control-custom form-control-sm mb-2" placeholder="例如: 192.168.1.0/24">
+                                    
+                                    <label class="form-label text-info fw-bold mb-1 mt-2" style="font-size:0.85rem;">內網流量統計網段 (包含)</label>
+									<textarea id="flow-internal-nets" class="form-control form-control-custom form-control-sm mb-2 custom-scroll" rows="2" placeholder="例如: 10.0.0.0/8, 192.168.0.0/16, 2001:db8::/32"></textarea>
+
+									<label class="form-label text-warning fw-bold mb-1 mt-1" style="font-size:0.85rem;">特殊防禦隔離網段 (排除)</label>
+									<input type="text" id="flow-exclude-nets" class="form-control form-control-custom form-control-sm mb-3" placeholder="例如: 192.168.10.0/24, fe80::/10">
+
+                                    <span class="setting-desc mb-3">設定可存取系統之來源，以及大數據判定為「內網」的範圍與黑名單 (支援 CIDR，多組請以逗號分隔)。</span>
+                                    <button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm" onclick="saveNetworkSettings()"><i class="bi bi-save me-1"></i>儲存網段定義</button>
+                                </div>
+                            </div>
+
+                            <div class="setting-block border-success">
+                                <div class="block-title text-success"><i class="bi bi-clock-history me-2"></i>系統時間同步 (NTP)</div>
+                                <div class="block-content">
+                                    <input type="text" id="ntp-servers" class="form-control form-control-custom form-control-sm mb-2" placeholder="多筆以逗號分隔">
+                                    <div class="input-group input-group-sm mb-2">
+                                        <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">校時週期</span>
+                                        <input type="number" id="ntp-interval" class="form-control form-control-custom text-center fw-bold" value="60" min="1">
+                                        <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">分鐘</span>
+                                    </div>
+                                    <span class="setting-desc mb-3">確保系統與日誌時間之一致性 (資安基本要求)。自動過濾非法網域與 IP。</span>
+                                    <div class="d-flex gap-2">
+                                        <button class="btn btn-outline-success btn-sm flex-grow-1 fw-bold shadow-sm" onclick="saveNtpSettings()">儲存校時設定</button>
+                                        <button class="btn btn-outline-warning btn-sm fw-bold shadow-sm px-3" onclick="forceNtpSync()"><i class="bi bi-clock-history"></i> 手動校時</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="setting-block border-warning">
+                                <div class="block-title text-warning"><i class="bi bi-speedometer2 me-2"></i>背景排程引擎設定</div>
+                                <div class="block-content">
+                                    <div class="mb-3">
+                                        <label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">效能與流量輪詢間隔 (Polling)</label>
+                                        <select id="polling-interval" class="form-select form-select-custom form-select-sm mb-1">
+                                            <option value="1">1 分鐘 (高負載/極高精準)</option>
+                                            <option value="2">2 分鐘</option>
+                                            <option value="3">3 分鐘 (建議值)</option>
+                                            <option value="4">4 分鐘</option>
+                                            <option value="5">5 分鐘 (低負載)</option>
+                                        </select>
+                                        <span class="setting-desc mb-2">設定背景 SNMP 引擎向全網設備撈取流量計數器的頻率。</span>
+                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('polling')">儲存輪詢設定</button>
+                                    </div>
+                                    <hr class="border-secondary my-3">
+                                    <div class="mb-2">
+                                        <label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">自動拓樸掃描間隔 (Topo-Scan)</label>
+                                        <select id="toposcan-interval" class="form-select form-select-custom form-select-sm mb-1">
+                                            <option value="0">完全關閉 (僅允許手動掃描)</option>
+                                            <option value="15">每 15 分鐘</option>
+                                            <option value="30">每 30 分鐘</option>
+                                            <option value="60">每 1 小時</option>
+                                            <option value="120">每 2 小時 (建議值)</option>
+                                            <option value="240">每 4 小時</option>
+                                        </select>
+                                        <span class="setting-desc mb-2">設定背景守護行程自動追蹤 LLDP/FDB 鄰居異動的頻率。開啟過密可能影響設備 CPU 負載。</span>
+                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('toposcan')">儲存拓樸排程</button>
+                                    </div>
+									<hr class="border-secondary my-3">
+                                    <div class="mb-2">
+                                        <label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">全天候異常偵測頻率 (Anomaly-Scan)</label>
+                                        <select id="anomaly-interval" class="form-select form-select-custom form-select-sm mb-1">
+                                            <option value="1">每 1 分鐘 (高頻率)</option>
+                                            <option value="2">每 2 分鐘</option>
+                                            <option value="3">每 3 分鐘</option>
+                                            <option value="4">每 4 分鐘</option>
+                                            <option value="5">每 5 分鐘 (建議值)</option>
+                                        </select>
+                                        <span class="setting-desc mb-2">設定戰情室更新異常事件 (如 MAC 迴圈、私接 HUB) 的刷新週期。</span>
+                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('anomaly')">儲存偵測排程</button>
+                                    </div>
+									<hr class="border-secondary my-3">
+                                    <div class="mb-2">
+                                        <div class="d-flex align-items-center mb-2">
+                                            <div class="form-check form-switch m-0">
+                                                <input class="form-check-input" type="checkbox" id="autobackup_enabled">
+                                                <label class="form-check-label text-warning fw-bold ms-2" for="autobackup_enabled">啟用每日自動備份</label>
+                                            </div>
+                                        </div>
+                                        <div class="input-group input-group-sm mb-2">
+                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">執行時間</span>
+                                            <input type="time" id="autobackup_time" class="form-control form-control-custom text-center fw-bold" value="02:00">
+                                        </div>
+                                        <div class="input-group input-group-sm mb-2">
+                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">備份範圍</span>
+                                            <select id="autobackup_scope" class="form-select form-select-custom">
+                                                <option value="all">L1~L4 全網設備</option>
+                                                <option value="visible">僅顯示中的設備</option>
+                                            </select>
+                                        </div>
+                                        <span class="setting-desc mb-2">設定系統於每日指定時間，於背景自動啟動多核心並發備份。</span>
+                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveAutoBackupSettings()"><i class="bi bi-cloud-arrow-down"></i> 儲存自動備份排程</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="setting-block border-danger">
+                                <div class="block-title text-danger"><i class="bi bi-bell-fill me-2"></i>Ntfy 主動告警推播</div>
+                                <div class="block-content">
+                                    <div class="d-flex align-items-center mb-3">
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" id="ntfy_enabled">
+                                            <label class="form-check-label text-danger ms-2" for="ntfy_enabled">開啟 Ntfy 主動斷線告警</label>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">伺服器網址</label>
+                                        <input type="text" class="form-control form-control-custom form-control-sm mb-1" id="ntfy_url" placeholder="例如: http://localhost:8080/your_topic">
+                                        <span class="setting-desc">請填寫完整的自建 ntfy 伺服器網址與訂閱 Topic 名稱。</span>
+                                    </div>
+
+                                    <div class="mb-3">
+                                        <label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">重覆推播間隔</label>
+                                        <select id="ntfy_interval" class="form-select form-select-custom form-select-sm mb-1" title="重覆推播間隔">
+                                            <option value="1">間隔 1 分鐘</option>
+                                            <option value="2">間隔 2 分鐘</option>
+                                            <option value="3">間隔 3 分鐘</option>
+                                            <option value="4">間隔 4 分鐘</option>
+                                            <option value="5" selected>間隔 5 分鐘 (建議值)</option>
+                                        </select>
+                                        <span class="setting-desc">設定設備持續斷線時，每次發送推播的等待時間。</span>
+                                    </div>									
+
+                                    <div class="mb-4">
+                                        <label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">最大推播次數</label>
+                                        <select id="ntfy_count" class="form-select form-select-custom form-select-sm mb-1" title="最大推播次數">
+                                            <option value="1">最多 1 次</option>
+                                            <option value="2">最多 2 次</option>
+                                            <option value="3" selected>最多 3 次 (建議值)</option>
+                                        </select>
+                                        <span class="setting-desc">限制同一異常事件的最大通知次數，避免手機遭無效洗版。</span>
+                                    </div>
+
+                                    <div class="d-flex gap-2">
+                                        <button class="btn btn-outline-danger btn-sm flex-grow-1 fw-bold shadow-sm" onclick="saveNtfySettings()">儲存推播設定</button>
+                                        <button type="button" class="btn btn-danger btn-sm fw-bold shadow-sm px-3" onclick="testPushAlert()"><i class="bi bi-bell-fill"></i> 測試</button>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-6 h-100">
+                <div class="card card-settings">
+                    <div class="card-header-custom-2 flex-shrink-0"><i class="bi bi-shield-check me-2"></i>系統安全、防禦與維運政策</div>
+                    <div class="card-body p-2" style="overflow: hidden;">
+                        
+                        <div class="settings-grid">
+                            
+                            <div class="setting-block border-primary">
+                                <div class="block-title text-primary"><i class="bi bi-person-lock me-2"></i>基於角色之權限控制 (RBAC)</div>
+                                <div class="block-content">
+                                    <div class="d-flex align-items-center mb-3">
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" id="rbacToggleSwitch">
+                                            <label class="form-check-label text-primary ms-2" for="rbacToggleSwitch">啟動管理員角色隔離驗證</label>
+                                        </div>
+                                    </div>
+                                    <span class="setting-desc mb-3">
+                                        開啟後，系統全面激活權限矩陣。測試或本機部署時可暫時關閉此開關以避免頻繁輸入帳密。<br><br>
+                                        <span class="text-danger fw-bold"><i class="bi bi-exclamation-triangle-fill"></i> 警告：正式內網環境必須維持開啟！</span>
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div class="setting-block border-success">
+                                <div class="block-title text-success"><i class="bi bi-card-checklist me-2"></i>系統稽核政策開關</div>
+                                <div class="block-content">
+                                    <div class="alert alert-custom p-2 mb-3" style="font-size: 0.8rem;">
+                                        <i class="bi bi-info-circle-fill me-1" style="color: var(--accent-color);"></i> <b>Level 1 高風險操作</b> (如配置異動) 屬強制合規，預設 100% 紀錄無法關閉。
+                                    </div>
+
+                                    <div class="form-check form-switch mb-1">
+                                        <input class="form-check-input" type="checkbox" id="audit_engine_bg">
+                                        <label class="form-check-label ms-1" style="font-size:0.85rem;" for="audit_engine_bg">【Level 2】背景引擎例行運作紀錄</label>
+                                    </div>
+                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄「多核心並行輪詢完成」等純背景資訊。關閉可減少無效日誌量。</span>
+
+                                    <div class="form-check form-switch mb-1">
+                                        <input class="form-check-input" type="checkbox" id="audit_net_scan">
+                                        <label class="form-check-label ms-1" style="font-size:0.85rem;" for="audit_net_scan">【Level 2】主動網路探測紀錄</label>
+                                    </div>
+                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄「LLDP/全網拓樸掃描」等探測行為。建議開啟防惡意掃描。</span>
+
+                                    <div class="form-check form-switch mb-1">
+                                        <input class="form-check-input" type="checkbox" id="audit_ui_action">
+                                        <label class="form-check-label text-warn-custom ms-1" style="font-size:0.85rem;" for="audit_ui_action">【Level 3】前端介面行為軌跡</label>
+                                    </div>
+                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄重要動作(如變更版面/匯出)。<b class="text-warn-custom">高資安環境建議開啟。</b></span>
+
+                                    <div class="form-check form-switch mb-1">
+                                        <input class="form-check-input" type="checkbox" id="audit_ui_view">
+                                        <label class="form-check-label text-secondary-custom ms-1" style="font-size:0.85rem;" for="audit_ui_view">【Level 3】前端瀏覽軌跡</label>
+                                    </div>
+                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">無差別紀錄純讀取行為。<b>資料量極大，平時建議關閉。</b></span>
+
+                                    <button class="btn btn-outline-success btn-sm w-100 fw-bold shadow-sm mt-1" onclick="saveAuditSettings()">套用稽核政策</button>
+                                </div>
+                            </div>
+
+                            <div class="setting-block border-warning">
+                                <div class="block-title text-warning" style="background: linear-gradient(135deg, rgba(74,63,18,0.3), rgba(45,38,10,0.3)); border-bottom-color: rgba(255,193,7,0.5);"><i class="bi bi-bug-fill me-2"></i>系統進階除錯雷達</div>
+                                <div class="block-content">
+                                    <div class="d-flex align-items-center mb-3">
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" id="debugModeSwitch">
+                                            <label class="form-check-label text-warning ms-2" for="debugModeSwitch">啟動終端機即時除錯日誌</label>
+                                        </div>
+                                    </div>
+									<span class="setting-desc mb-3">
+                                        開啟後，系統進行「流量輪詢」與「拓樸搜尋」時，會在背景終端機即時印出每台設備的處理進度，有助於工程追蹤。<br><br>
+                                        <span class="text-danger fw-bold"><i class="bi bi-exclamation-triangle-fill"></i> 注意：平時建議維持關閉狀態，以免大量紀錄影響系統效能。</span>
+                                    </span>
+                                    
+                                    <hr class="border-secondary my-3">
+                                    <div class="d-flex align-items-center mb-3">
+                                        <div class="form-check form-switch m-0">
+                                            <input class="form-check-input" type="checkbox" id="trapServiceSwitch">
+                                            <label class="form-check-label text-warning ms-2" for="trapServiceSwitch">啟動 UDP 162 SNMP Trap 監聽服務</label>
+                                        </div>
+                                    </div>
+                                    <span class="setting-desc mb-2">
+                                        開啟後，主動告警引擎將全天候補捉實體核心交換器的網孔震盪（Port Flapping）與斷線事件；若您正在調整機房線路、面臨 Trap 洗版風暴，可將此開關暫時關閉以凍結通知。
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div class="setting-block border-info d-flex flex-column h-100">
+                                <div class="block-title text-info flex-shrink-0"><i class="bi bi-people-fill me-2"></i>系統帳號與權限管理</div>
+                                <div class="block-content d-flex flex-column justify-content-center align-items-center text-center flex-grow-1 p-3">
+                                    <i class="bi bi-person-lines-fill mb-2 text-info" style="font-size: 2.8rem; opacity: 0.7;"></i>
+                                    <span class="setting-desc px-2 mb-3 fw-bold">管理登入帳號、重設密碼與指派 RBAC 權限角色 (Admin, Operator, Auditor)。</span>
+                                    <button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm py-2" onclick="openUserMgmtModal()"><i class="bi bi-sliders2 me-1"></i>開啟帳號管理面板</button>
+                                </div>
+                            </div>
+
+                        </div>
+
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="userMgmtModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content bg-dark text-white border-info shadow-lg">
+      <div class="modal-header border-info py-2">
+        <h5 class="modal-title text-info fw-bold"><i class="bi bi-people-fill me-2"></i>系統帳號與權限管理</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body p-0">
+        <div class="p-3 border-bottom border-secondary" style="background-color: #1a202c;">
+            <h6 class="fw-bold text-warning mb-2"><i class="bi bi-person-plus-fill me-1"></i>新增使用者</h6>
+            <div class="row g-2 align-items-end">
+                <div class="col-md-2">
+                    <label class="form-label text-secondary small mb-1 fw-bold">登入帳號</label>
+                    <input type="text" id="newUsername" class="form-control form-control-custom form-control-sm" placeholder="輸入帳號">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label text-secondary small mb-1 fw-bold">初始密碼</label>
+                    <input type="password" id="newPassword" class="form-control form-control-custom form-control-sm" placeholder="輸入密碼">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label text-secondary small mb-1 fw-bold">確認密碼</label>
+                    <input type="password" id="newPasswordConfirm" class="form-control form-control-custom form-control-sm" placeholder="再次輸入密碼">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label text-secondary small mb-1 fw-bold">系統角色</label>
+                    <select id="newRole" class="form-select form-select-custom form-select-sm text-info fw-bold">
+                        <option value="operator">Operator (維運員)</option>
+                        <option value="admin">Admin (管理員)</option>
+                        <option value="auditor">Auditor (唯讀查核)</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-success btn-sm w-100 fw-bold shadow-sm" onclick="createUser()"><i class="bi bi-plus-lg"></i> 建立</button>
+                </div>
+            </div>
+        </div>
+        <div class="p-3" style="max-height: 400px; overflow-y: auto;">
+            <table class="table table-dark table-hover mb-0" style="font-size: 0.9rem;">
+                <thead>
+                    <tr>
+                        <th width="5%">ID</th>
+                        <th width="20%">登入帳號</th>
+                        <th width="20%">系統角色</th>
+                        <th width="15%">狀態</th>
+                        <th width="40%">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="usersTableBody">
+                    <tr><td colspan="5" class="text-center text-muted">載入中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal fade" id="changePasswordModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+  <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-content bg-dark text-white border-warning shadow-lg">
+      <div class="modal-header border-warning py-2">
+        <h6 class="modal-title text-warning fw-bold"><i class="bi bi-key-fill me-2"></i>更改密碼</h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="cpUserId">
+        <div class="py-2 px-2 mb-3 text-center rounded border border-info fw-bold shadow-sm" style="background-color: rgba(13, 202, 240, 0.12); color: #0dcaf0; font-size: 0.9rem; letter-spacing: 1px;" id="cpTargetUser"></div>
+        <div class="mb-2">
+            <label class="form-label small text-secondary mb-1 fw-bold">舊密碼 <span class="text-white-50" style="font-size: 0.7rem;">(Admin可輸入自己密碼授權)</span></label>
+            <input type="password" id="cpOldPassword" class="form-control form-control-custom form-control-sm" placeholder="輸入舊密碼">
+        </div>
+        <div class="mb-2">
+            <label class="form-label small text-secondary mb-1 fw-bold">新密碼</label>
+            <input type="password" id="cpNewPassword" class="form-control form-control-custom form-control-sm" placeholder="輸入新密碼">
+        </div>
+        <div class="mb-3">
+            <label class="form-label small text-secondary mb-1 fw-bold">確認新密碼</label>
+            <input type="password" id="cpConfirmPassword" class="form-control form-control-custom form-control-sm" placeholder="再次輸入新密碼">
+        </div>
+        <button class="btn btn-warning btn-sm w-100 fw-bold text-dark" onclick="submitPasswordChange()"><i class="bi bi-save me-1"></i>確認修改</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // =======================================================
+    // 📱 測試推播發送 (優化版：全面改用非阻塞式吐司通知)
+    // =======================================================
+	function testPushAlert() {
+        // 💡 呼叫全域 UI 提示，讓管理員知道系統正在嘗試與地端 Ntfy 通訊
+        if(typeof window.showToast === 'function') window.showToast(`⏳ 正在發送測試訊號至地端推播主機...`, "info");
+
+		fetch('/api/test_push', { method: 'POST' })
+		.then(res => res.json())
+		.then(data => {
+			if(data.status === "success") {
+                // 💡 成功時，右下角直接彈出綠色吐司，完全不用點擊「確定」按鈕
+                if(typeof window.showToast === 'function') {
+                    window.showToast("✅ 測試指令已成功送出！請檢查手機 Ntfy 頻道。", "success");
+                }
+			} else {
+                if(typeof window.showToast === 'function') {
+                    window.showToast(`❌ 傳送失敗：${data.message}`, "danger");
+                }
+			}
+		})
+		.catch(err => {
+            if(typeof window.showToast === 'function') {
+                window.showToast("❌ 網路請求失敗，請確認地端伺服器或聯網狀態。", "danger");
+            }
+        });
+	}
+    
+    function toggleTheme() {
+        document.body.classList.toggle('light-mode');
+    }
+	
+	function saveAutoBackupSettings() {
+        const payload = {
+            time: document.getElementById('autobackup_time').value,
+            scope: document.getElementById('autobackup_scope').value
+        };
+
+        fetch('/api/settings/autobackup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => {
+            if (!res.ok) throw new Error("伺服器回應 500 內部死鎖錯誤");
+            return res.json();
+        })
+        .then(data => {
+            if(data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ 自動備份排程參數已成功儲存並生效！`, "success");
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 儲存失敗: ${data.message}`, "danger");
+            }
+        })
+        .catch(err => {
+            if(typeof window.showToast === 'function') window.showToast(`❌ 連線失敗: ${err.message}`, "danger");
+        });
+    }
+	
+	function loadSettings() {
+		fetch('/api/settings/anomaly').then(res => res.json()).then(data => {
+            if(data.success) document.getElementById('anomaly-interval').value = data.interval;
+        });
+		
+        // 🌟 更新版：徹底移除所有的 192.50 客製化預設值，還原為乾淨狀態
+        fetch('/api/settings/allowed_ips').then(res => res.json()).then(data => {
+            if(data.success) {
+                document.getElementById('allowed-ips').value = data.ips || '';
+                // 💡 修正為 /24
+                document.getElementById('flow-internal-nets').value = data.flow_internal_nets || '10.0.0.0/8, 172.16.0.0/12, 192.168.1.0/24';
+                document.getElementById('flow-exclude-nets').value = data.flow_exclude_nets || '';
+            }
+        });
+
+        fetch('/api/settings/ntp').then(res => res.json()).then(data => {
+            if(data.success) {
+                document.getElementById('ntp-servers').value = data.servers;
+                document.getElementById('ntp-interval').value = data.interval;
+            }
+        });
+        
+        fetch('/api/settings/polling').then(res => res.json()).then(data => {
+            if(data.success) document.getElementById('polling-interval').value = data.interval;
+        });
+        
+        fetch('/api/settings/toposcan').then(res => res.json()).then(data => {
+            if(data.success) document.getElementById('toposcan-interval').value = data.interval;
+        });
+        
+        fetch('/api/settings/audit').then(res => res.json()).then(data => {
+            if(data.success) {
+                document.getElementById('audit_engine_bg').checked = data.data.audit_engine_bg;
+                document.getElementById('audit_net_scan').checked = data.data.audit_net_scan;
+                document.getElementById('audit_ui_action').checked = data.data.audit_ui_action;
+                document.getElementById('audit_ui_view').checked = data.data.audit_ui_view;
+            }
+        });
+		
+		fetch('/api/settings/ntfy').then(res => res.json()).then(data => {
+			if(data.success) {
+				let chk = document.getElementById('ntfy_enabled');
+				let urlInput = document.getElementById('ntfy_url');
+                let intervalSel = document.getElementById('ntfy_interval');
+                let countSel = document.getElementById('ntfy_count');
+                
+				if(chk) chk.checked = data.ntfy_enabled;
+				if(urlInput) urlInput.value = data.ntfy_url;
+                if(intervalSel && data.ntfy_interval) intervalSel.value = data.ntfy_interval;
+                if(countSel && data.ntfy_count) countSel.value = data.ntfy_count;
+			}
+		});
+		
+		fetch('/api/settings/autobackup').then(res => res.json()).then(data => {
+            if(data.success) {
+                let chk = document.getElementById('autobackup_enabled');
+                let timeInput = document.getElementById('autobackup_time');
+                let scopeSel = document.getElementById('autobackup_scope');
+                if(chk) chk.checked = data.enabled;
+                if(timeInput) timeInput.value = data.time;
+                if(scopeSel) scopeSel.value = data.scope;
+            }
+        });
+
+        // 讀取 RBAC 狀態
+        fetch('/api/settings/get').then(res => res.json()).then(data => {
+            if(data.success && document.getElementById('rbacToggleSwitch')) {
+                document.getElementById('rbacToggleSwitch').checked = data.rbac_enabled !== false; 
+            }
+        }).catch(e => console.log('RBAC load pass'));
+    }
+
+    function saveNetworkSettings() {
+        // 💡 取得畫面上輸入的數值
+        const payload = {
+            ips: document.getElementById('allowed-ips').value,
+            flow_internal_nets: document.getElementById('flow-internal-nets').value,
+            flow_exclude_nets: document.getElementById('flow-exclude-nets').value
+        };
+        
+        // 發送 API 給後端儲存
+        fetch('/api/settings/allowed_ips', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => {
+            if (!res.ok) throw new Error("伺服器回應 500 內部錯誤");
+            return res.json();
+        })
+        .then(data => {
+            if (data.success) {
+                // 🌟 精準觸發系統右下角的標準吐司通知機制
+                if (typeof window.showToast === 'function') {
+                    window.showToast("✅ 系統防護與網段定義已成功儲存並即時生效！", "success");
+                } else {
+                    alert("✅ 系統防護與網段定義已成功儲存並即時生效！");
+                }
+            } else {
+                if (typeof window.showToast === 'function') {
+                    window.showToast(`❌ 儲存失敗: ${data.message}`, "danger");
+                }
+            }
+        })
+        .catch(err => {
+            console.error("Save Error:", err);
+            if (typeof window.showToast === 'function') {
+                window.showToast(`❌ 儲存連線失敗: ${err.message}`, "danger");
+            }
+        });
+    }
+
+	// 🌟 全新補齊：處理 NTP 時間伺服器與週期的儲存發送，並帶起右下角吐司
+    function saveNtpSettings() {
+        const payload = {
+            servers: document.getElementById('ntp-servers').value,
+            interval: document.getElementById('ntp-interval').value
+        };
+
+        // 💡 發起連線前，先給右下角一個讀取中的友善提示
+        if(typeof window.showToast === 'function') window.showToast(`⏳ 正在儲存設定並嘗試向 NTP 伺服器同步時間...`, "info");
+
+        fetch('/api/settings/ntp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => {
+            if (!res.ok) throw new Error("伺服器回應 500 內部校時卡死");
+            return res.json();
+        })
+        .then(data => {
+            if (data.success) {
+                // 智慧判定：參數存成功了，但順便觸發的外部校時到底有沒有過？
+                if (data.sync_success) {
+                    if (typeof window.showToast === 'function') {
+                        window.showToast(`✅ 校時設定儲存成功！並已完成系統時間校正。`, "success");
+                    }
+                } else {
+                    // 萬一網路校時失敗，給黃色警告吐司，但提示參數已留存
+                    if (typeof window.showToast === 'function') {
+                        window.showToast(`⚠️ 設定已儲存，但 NTP 網路校時未回應: ${data.sync_msg}`, "warning");
+                    }
+                }
+            } else {
+                if (typeof window.showToast === 'function') {
+                    window.showToast(`❌ 儲存失敗: ${data.message}`, "danger");
+                }
+            }
+        })
+        .catch(err => {
+            if (typeof window.showToast === 'function') {
+                window.showToast(`❌ 通訊失敗: ${err.message}`, "danger");
+            }
+        });
+    }
+
+    function forceNtpSync() {
+        if(typeof window.showToast === 'function') window.showToast(`⏳ 正在向時間伺服器要求同步，請稍候...`, "success");
+        fetch('/api/settings/ntp/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        }).then(res => res.json()).then(data => {
+            if(data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ ${data.message}`, "success");
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 校時失敗: ${data.message}`, "danger");
+            }
+        });
+    }
+
+    function saveEngineSettings(type) {
+        const val = document.getElementById(type + '-interval').value;
+        fetch('/api/settings/' + type, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ interval: val })
+        }).then(res => res.json()).then(data => {
+            if(data.success && typeof window.showToast === 'function') window.showToast(`✅ ${type === 'polling' ? '輪詢' : '拓樸'}設定已成功儲存並即時生效！`, "success");
+        });
+    }
+
+    function saveAuditSettings() {
+        const payload = {
+            audit_engine_bg: document.getElementById('audit_engine_bg').checked,
+            audit_net_scan: document.getElementById('audit_net_scan').checked,
+            audit_ui_action: document.getElementById('audit_ui_action').checked,
+            audit_ui_view: document.getElementById('audit_ui_view').checked
+        };
+        
+        fetch('/api/settings/audit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(res => res.json()).then(data => {
+            if(data.success) {
+                if (data.changed) {
+                    if(typeof window.showToast === 'function') window.showToast(`🛡️ 系統稽核政策已更新！新的監控規則已生效。`, "success");
+                } else {
+                    if(typeof window.showToast === 'function') window.showToast(`ℹ️ 政策未作任何實質變更。`, "warning");
+                }
+            }
+        });
+    }
+
+    window.onload = loadSettings;
+	
+	function saveNtfySettings() {
+		const payload = {
+			ntfy_url: document.getElementById('ntfy_url').value,
+            ntfy_interval: document.getElementById('ntfy_interval').value,
+            ntfy_count: document.getElementById('ntfy_count').value
+		};
+
+		fetch('/api/settings/ntfy', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload)
+		})
+        .then(res => {
+            if (!res.ok) throw new Error("伺服器回應 500 內部死鎖錯誤");
+            return res.json();
+        })
+        .then(data => {
+			if(data.success) {
+				if(typeof window.showToast === 'function') window.showToast(`✅ Ntfy 告警推播設定已成功儲存並生效！`, "success");
+			} else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 儲存失敗: ${data.message}`, "danger");
+            }
+		})
+        .catch(err => {
+            if(typeof window.showToast === 'function') window.showToast(`❌ 連線失敗: ${err.message}`, "danger");
+        });
+	}
+	
+	// =======================================================
+    // 🌟 系統進階除錯雷達 與 RBAC 開關監聽
+    // =======================================================
+    document.addEventListener("DOMContentLoaded", function() {
+        
+        // 🐞 1. Debug Radar 控制邏輯
+        const debugSwitch = document.getElementById('debugModeSwitch');
+        if (debugSwitch) {
+            fetch('/api/get_debug_status')
+                .then(res => res.json())
+                .then(data => {
+                    if(data.status === 'success') {
+                        debugSwitch.checked = data.debug_mode;
+                    }
+                })
+                .catch(err => console.error("無法取得除錯模式狀態:", err));
+
+            debugSwitch.addEventListener('change', function() {
+                const isEnabled = this.checked;
+                fetch('/api/toggle_debug_mode', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enable: isEnabled })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        if (typeof window.showToast === 'function') {
+                            window.showToast(data.msg, isEnabled ? 'warning' : 'success');
+                        }
+                    } else {
+                        alert("設定失敗: " + data.msg);
+                        this.checked = !isEnabled;
+                    }
+                })
+                .catch(err => {
+                    console.error("切換除錯模式出錯:", err);
+                    this.checked = !isEnabled;
+                });
+            });
+        }
+		
+		// 📥 新增：2. Trap 服務主動防禦雷達控制邏輯
+        const trapSwitch = document.getElementById('trapServiceSwitch');
+        if (trapSwitch) {
+            // 頁面初始化：向剛剛寫好的 API 查詢目前狀態
+            fetch('/api/get_trap_status')
+                .then(res => res.json())
+                .then(data => {
+                    if(data.status === 'success') {
+                        trapSwitch.checked = data.trap_enabled;
+                    }
+                })
+                .catch(err => console.error("無法同步 Trap 狀態:", err));
+
+            // 監聽按鈕切換
+            trapSwitch.addEventListener('change', function() {
+                const isEnabled = this.checked;
+                fetch('/api/toggle_trap_service', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enable: isEnabled })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        if (typeof window.showToast === 'function') {
+                            // 呼叫您寫好的完美非阻塞式吐司提示
+                            window.showToast(data.msg, isEnabled ? 'success' : 'warning');
+                        }
+                    } else {
+                        alert("設定失敗: " + data.msg);
+                        this.checked = !isEnabled;
+                    }
+                })
+                .catch(err => {
+                    console.error("切換 Trap 模式出錯:", err);
+                    this.checked = !isEnabled;
+                });
+            });
+        }
+
+        // 🛡️ 2.1 RBAC 開關控制邏輯
+        const rbacSwitch = document.getElementById('rbacToggleSwitch');
+        if (rbacSwitch) {
+            rbacSwitch.addEventListener('change', function() {
+                const isEnabled = this.checked;
+                fetch('/api/settings/toggle_rbac', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: isEnabled })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        if (typeof window.showToast === 'function') window.showToast(data.msg, 'success');
+                        
+                        // 💡 新增防護機制：若開啟 RBAC 且目前未登入，強制踢回登入畫面
+                        const currentUser = "{{ session.get('username', '') }}";
+                        if (isEnabled && currentUser === '') {
+                            // 留 1.5 秒讓使用者看清楚 Toast 成功提示，隨後立刻重導向
+                            setTimeout(() => {
+                                window.location.href = '/login';
+                            }, 1500); 
+                        }
+                    } else {
+                        alert("設定失敗: " + data.msg);
+                        this.checked = !isEnabled;
+                    }
+                })
+                .catch(err => {
+                    console.error(err);
+                    this.checked = !isEnabled;
+                });
+            });
+        }
+		
+		// 📥 3. Ntfy 告警服務主動控制邏輯 (常駐獨立監聽，免按儲存)
+        const ntfySwitch = document.getElementById('ntfy_enabled');
+        if (ntfySwitch) {
+            ntfySwitch.addEventListener('change', function() {
+                const isEnabled = this.checked;
+                fetch('/api/settings/toggle_ntfy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enable: isEnabled })
+                })
+                .then(res => {
+                    if (!res.ok) throw new Error("後台通訊拒絕");
+                    return res.json();
+                })
+                .then(data => {
+                    if (data.status === 'success') {
+                        if (typeof window.showToast === 'function') {
+                            window.showToast(data.msg, isEnabled ? 'success' : 'warning');
+                        }
+                    } else {
+                        if (typeof window.showToast === 'function') window.showToast(`❌ 設定失敗: ${data.msg}`, 'danger');
+                        this.checked = !isEnabled;
+                    }
+                })
+                .catch(err => {
+                    console.error("切換 Ntfy 模式出錯:", err);
+                    if (typeof window.showToast === 'function') window.showToast(`❌ 網路異常，無法同步開關狀態`, 'danger');
+                    this.checked = !isEnabled;
+                });
+            });
+        }
+		
+		// 📥 4. 自動備份服務主動控制邏輯 (常駐獨立監聽，免按儲存)
+        const backupSwitch = document.getElementById('autobackup_enabled');
+        if (backupSwitch) {
+            backupSwitch.addEventListener('change', function() {
+                const isEnabled = this.checked;
+                fetch('/api/settings/toggle_autobackup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: isEnabled })
+                })
+                .then(res => {
+                    if (!res.ok) throw new Error("後台通訊拒絕");
+                    return res.json();
+                })
+                .then(data => {
+                    if (data.status === 'success') {
+                        if (typeof window.showToast === 'function') {
+                            window.showToast(data.msg, isEnabled ? 'success' : 'warning');
+                        }
+                    } else {
+                        if (typeof window.showToast === 'function') window.showToast(`❌ 設定失敗: ${data.msg}`, 'danger');
+                        this.checked = !isEnabled;
+                    }
+                })
+                .catch(err => {
+                    console.error("切換自動備份模式出錯:", err);
+                    if (typeof window.showToast === 'function') window.showToast(`❌ 網路異常，無法同步開關狀態`, 'danger');
+                    this.checked = !isEnabled;
+                });
+            });
+        }
+    });
+	
+	// =======================================================
+    // 👥 RBAC 使用者管理邏輯
+    // =======================================================
+    let userModalInstance = null;
+
+    function openUserMgmtModal() {
+        if (!userModalInstance) {
+            userModalInstance = new bootstrap.Modal(document.getElementById('userMgmtModal'));
+        }
+        userModalInstance.show();
+        loadUsersTable();
+    }
+
+    function loadUsersTable() {
+        fetch('/api/users')
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    const tbody = document.getElementById('usersTableBody');
+                    let html = '';
+                    data.data.forEach(user => {
+                        let roleBadge = user.role === 'admin' ? '<span class="badge bg-danger">Admin (管理員)</span>' : 
+                                        (user.role === 'operator' ? '<span class="badge bg-success">Operator (維運員)</span>' : '<span class="badge bg-secondary">Auditor (查核員)</span>');
+                        
+                        let statusHtml = user.status === 1 ? `<span class="badge bg-primary text-light">啟用中</span>` : `<span class="badge bg-dark text-white-50 border">已停用</span>`;
+                        let toggleStatusBtn = user.status === 1 
+                            ? `<button class="btn btn-sm btn-outline-warning ms-1" style="font-size: 0.75rem;" onclick="updateUser(${user.id}, 'update_status', {status: 0})" title="停用帳號"><i class="bi bi-pause-circle"></i></button>`
+                            : `<button class="btn btn-sm btn-outline-success ms-1" style="font-size: 0.75rem;" onclick="updateUser(${user.id}, 'update_status', {status: 1})" title="啟用帳號"><i class="bi bi-play-circle"></i></button>`;
+
+                        html += `
+                            <tr>
+                                <td>${user.id}</td>
+                                <td class="fw-bold text-info">${user.username}</td>
+                                <td>
+                                    <select class="form-select form-select-sm bg-dark text-white border-secondary d-inline-block w-auto" style="font-size: 0.8rem;" onchange="updateUser(${user.id}, 'update_role', {role: this.value})">
+                                        <option value="admin" ${user.role === 'admin' ? 'selected' : ''}>Admin</option>
+                                        <option value="operator" ${user.role === 'operator' ? 'selected' : ''}>Operator</option>
+                                        <option value="auditor" ${user.role === 'auditor' ? 'selected' : ''}>Auditor</option>
+                                    </select>
+                                </td>
+                                <td>${statusHtml}</td>
+                                <td>
+                                    <button class="btn btn-sm btn-outline-info" style="font-size: 0.75rem;" onclick="resetPasswordPrompt(${user.id}, '${user.username}')"><i class="bi bi-key-fill"></i> 改密碼</button>
+                                    ${user.username !== 'admin' ? toggleStatusBtn : ''}
+                                    ${user.username !== 'admin' ? `<button class="btn btn-sm btn-outline-danger ms-1" style="font-size: 0.75rem;" onclick="deleteUser(${user.id}, '${user.username}')"><i class="bi bi-trash-fill"></i></button>` : ''}
+                                </td>
+                            </tr>
+                        `;
+                    });
+                    tbody.innerHTML = html;
+                }
+            })
+            .catch(err => alert("載入帳號清單失敗：" + err));
+    }
+
+    function createUser() {
+        const username = document.getElementById('newUsername').value.trim();
+        const password = document.getElementById('newPassword').value;
+        const confirmPassword = document.getElementById('newPasswordConfirm').value;
+        const role = document.getElementById('newRole').value;
+
+        if (!username || !password) {
+            if(typeof window.showToast === 'function') window.showToast("❌ 請填寫完整的帳號與密碼！", "warning"); 
+            return;
+        }
+        if (password !== confirmPassword) {
+            if(typeof window.showToast === 'function') window.showToast("❌ 兩次輸入的密碼不一致，請重新確認！", "danger"); 
+            return;
+        }
+
+        fetch('/api/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password, role })
+        }).then(res => res.json()).then(data => {
+            if (data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ ${data.message}`, 'success');
+                document.getElementById('newUsername').value = '';
+                document.getElementById('newPassword').value = '';
+                document.getElementById('newPasswordConfirm').value = '';
+                loadUsersTable();
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 建立失敗：${data.message}`, 'danger');
+            }
+        });
+    }
+
+    function updateUser(userId, action, payloadData) {
+        let payload = Object.assign({ action: action }, payloadData);
+        fetch(`/api/users/${userId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(res => res.json()).then(data => {
+            if (data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ ${data.message}`, 'success');
+                loadUsersTable();
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 更新失敗：${data.message}`, 'danger');
+                loadUsersTable(); 
+            }
+        });
+    }
+
+    // 💡 [UI升級] 呼叫精美的 Modal 取代舊有的 prompt()
+    let changePwdModalInstance = null;
+    function resetPasswordPrompt(userId, username) {
+        document.getElementById('cpUserId').value = userId;
+        document.getElementById('cpTargetUser').innerText = `目標帳號：${username}`;
+        document.getElementById('cpOldPassword').value = '';
+        document.getElementById('cpNewPassword').value = '';
+        document.getElementById('cpConfirmPassword').value = '';
+        
+        if (!changePwdModalInstance) {
+            changePwdModalInstance = new bootstrap.Modal(document.getElementById('changePasswordModal'));
+        }
+        changePwdModalInstance.show();
+    }
+
+    function submitPasswordChange() {
+        const userId = document.getElementById('cpUserId').value;
+        const oldPwd = document.getElementById('cpOldPassword').value;
+        const newPwd = document.getElementById('cpNewPassword').value;
+        const confirmPwd = document.getElementById('cpConfirmPassword').value;
+
+        if (!oldPwd || !newPwd || !confirmPwd) {
+            if(typeof window.showToast === 'function') window.showToast("❌ 舊密碼、新密碼與確認密碼皆為必填！", "warning"); 
+            return;
+        }
+        if (newPwd !== confirmPwd) {
+            if(typeof window.showToast === 'function') window.showToast("❌ 新密碼與確認密碼不一致，請重新輸入！", "danger"); 
+            return;
+        }
+
+        updateUser(userId, 'reset_password', { old_password: oldPwd, password: newPwd });
+        changePwdModalInstance.hide();
+    }
+
+    function deleteUser(userId, username) {
+        if (confirm(`⚠️ 確定要永久刪除使用者 [${username}] 嗎？此操作無法復原！`)) {
+            fetch(`/api/users/${userId}`, { method: 'DELETE' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        if(typeof window.showToast === 'function') window.showToast(`🗑️ 成功刪除帳號: ${username}`, 'success');
+                        loadUsersTable();
+                    } else {
+                        if(typeof window.showToast === 'function') window.showToast(`❌ 刪除失敗：${data.message}`, 'danger');
+                    }
+                });
+        }
+    }
+</script>
+{% endblock %}

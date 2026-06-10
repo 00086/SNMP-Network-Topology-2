@@ -1,0 +1,220 @@
+<script>
+// 💡 防呆機制：確保通報函數絕對存在，不再受限於其他檔案的載入順序
+if (typeof window.logFrontendAction !== 'function') {
+    window.logFrontendAction = function(action, target, details) {
+        fetch('/api/audit-logs/client', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action, target: target, details: details, username: 'SystemUser' })
+        }).catch(e => console.error(e));
+    };
+}
+
+function bindLeftClickEvent() {
+    document.getElementById("detailContent").innerHTML = '<p class="text-white-50">點擊圖形可查看詳細資訊。</p>';
+    
+    network.on("click", function (params) {
+        var detailDiv = document.getElementById("detailContent");
+
+        if (params.nodes.length > 0) {
+            var nodeId = params.nodes[0];
+            var nodeData = nodesDataSet.get(nodeId);
+            
+            // 🎤 稽核埋點：紀錄單純左鍵點擊節點查閱
+            window.logFrontendAction(
+                "前端瀏覽軌跡", 
+                `檢視節點 [${nodeId}]`, 
+                `管理員點擊選取了網路設備 [ ${nodeData ? (nodeData.sysName || '') : ''} ] (IP: ${nodeData ? nodeData.ip : nodeId})，調閱其實體對接狀態與屬性面板資訊。`
+            );
+
+            var connectedEdges = edgesDataSet.get({ filter: function(item) { return item.from === nodeId || item.to === nodeId; }});
+            connectedEdges.sort((a, b) => {
+                let portA = (a.from === nodeId) ? a.from_port : a.to_port;
+                let portB = (b.from === nodeId) ? b.from_port : b.to_port;
+                return String(portA).localeCompare(String(portB), undefined, {numeric: true, sensitivity: 'base'});
+            });
+
+            var portListHtml = '';
+            if (connectedEdges.length > 0) {
+                portListHtml = connectedEdges.map(e => {
+                    var peerId = (e.from === nodeId) ? e.to : e.from;
+                    var peerNode = nodesDataSet.get(peerId);
+                    var peerName = peerNode ? (peerNode.sysName || peerId) : peerId;
+                    
+                    var speedVal = e.speed || 1000;
+                    var speedStr = speedVal >= 10000 ? (speedVal/1000)+'G' : (speedVal >= 1000 ? (speedVal/1000)+'G' : speedVal+'M');
+                    var badgeClass = speedVal >= 10000 ? 'bg-info text-dark' : (speedVal >= 1000 ? 'bg-success text-white' : 'bg-orange'); 
+                    
+                    var localPort = (e.from === nodeId) ? e.from_port : e.to_port;
+                    var remotePort = (e.from === nodeId) ? e.to_port : e.from_port;
+                    var hoverTitle = `本機端: ${localPort}  ⟷  遠端設備: ${peerName} (${remotePort})`;
+                    
+                    return `<div class="d-flex justify-content-between align-items-center border-bottom border-secondary pb-1 mb-1" style="font-size:0.78rem;">
+                                <div class="text-truncate me-1" style="max-width:88%;" title="${hoverTitle}">
+                                    <span class="text-warning">${localPort}</span> 
+                                    <i class="bi bi-arrow-left-right text-white-50 px-1"></i> 
+                                    <span class="text-info">${peerName}</span> <span class="text-white-50">(${remotePort})</span>
+                                </div>
+                                <span class="badge ${badgeClass} p-1">${speedStr}</span>
+                            </div>`;
+                }).join('');
+                
+                portListHtml = `<hr class="border-secondary my-2"><div class="text-warning fw-bold mb-1" style="font-size:0.85rem;"><i class="bi bi-usb-plug me-1"></i>實體對接狀態:</div><div class="port-list-container custom-scroll" style="max-height: 250px; overflow-y: auto;">${portListHtml}</div>`;
+            }
+
+            var statusBadge = '';
+            if (nodeData.status === 'down') statusBadge = `<span class="badge blink-danger ms-2"><i class="bi bi-x-circle-fill me-1"></i>徹底斷線</span>`;
+            else if (nodeData.status === 'warning') statusBadge = `<span class="badge blink-warning ms-2"><i class="bi bi-exclamation-circle-fill me-1"></i>SNMP異常 (Ping通)</span>`; 
+            else statusBadge = `<span class="badge bg-success ms-2">正常</span>`;
+
+            detailDiv.innerHTML = `
+                <div class="card bg-dark border-secondary text-white p-2 mb-2 shadow-sm">
+                    <div class="d-flex align-items-center mb-2">
+                        <h5 class="text-warning fw-bold m-0"><i class="bi bi-hdd-network me-1"></i>節點屬性</h5>
+                        ${statusBadge}
+                    </div>
+                    <div style="font-size:0.85rem;">
+                        <div class="row g-1 mb-1">
+                            <div class="col-7 text-truncate" title="${nodeData.ip}"><b>IP:</b> ${nodeData.ip}</div>
+                            <div class="col-5 text-truncate" title="${nodeData.sysName}"><b>名稱:</b> ${nodeData.sysName}</div>
+                        </div>
+                        <div class="row g-1 mb-1">
+                            <div class="col-7 text-truncate" title="${nodeData.brand || 'Unknown'} / ${nodeData.model || ''}"><b>廠牌:</b> <span class="text-warning">${nodeData.brand || 'Unknown'}</span> / ${nodeData.model || ''}</div>
+                            <div class="col-5 text-truncate" title="${nodeData.location || '無資料'}"><b>位置:</b> ${nodeData.location || '無資料'}</div>
+                        </div>
+                    </div>
+                    ${portListHtml}
+                    
+                    <div class="row g-2 mt-3">
+                        <div class="col-6">
+                            <button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm py-1" onclick="openNodeTrafficModal('${nodeId}')" style="font-size: 0.8rem;">
+                                <i class="bi bi-bar-chart-fill me-1"></i>全埠流量
+                            </button>
+                        </div>
+                        <div class="col-6">
+                            <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm py-1" onclick="openNodeMetricsModal('${nodeId}', 'cpu')" style="font-size: 0.8rem;">
+                                <i class="bi bi-cpu me-1"></i>CPU/記憶體
+                            </button>
+                        </div>
+                        ${(nodeData.is_poe == 1 || nodeData.is_poe === '1') ? `
+                        <div class="col-6">
+                            <button class="btn btn-outline-success btn-sm w-100 fw-bold shadow-sm py-1" onclick="openNodeMetricsModal('${nodeId}', 'poe')" style="font-size: 0.8rem;">
+                                <i class="bi bi-lightning-charge me-1"></i>PoE 趨勢
+                            </button>
+                        </div>` : ''}
+                        
+                        ${(nodeData.has_sensor == 1 || nodeData.has_sensor === '1') ? `
+                        <div class="col-6">
+                            <button class="btn btn-outline-danger btn-sm w-100 fw-bold shadow-sm py-1" onclick="openNodeMetricsModal('${nodeId}', 'temp')" style="font-size: 0.8rem;">
+                                <i class="bi bi-thermometer-half me-1"></i>溫度軌跡
+                            </button>
+                        </div>` : ''}
+                    </div>
+
+                    <div class="mt-2 pt-2 border-top border-secondary">
+                        <button class="btn btn-outline-primary btn-sm w-100 fw-bold shadow-sm py-1" onclick="triggerDeviceBackup('${nodeData.ip}')" style="font-size: 0.8rem;">
+                            <i class="bi bi-cloud-download me-1"></i>立即備份設定檔
+                        </button>
+                    </div>
+
+                    <div class="text-center mt-2 text-white-50" style="font-size:0.75rem;">💡 設備上按「右鍵」開啟虛擬面板與SNMP原始資料</div>
+                </div>
+            `;
+            
+        } else if (params.edges.length > 0) {
+            var edgeData = edgesDataSet.get(params.edges[0]);
+            var speedVal = edgeData.speed || 1000;
+            
+            let speedColorClass = 'text-orange'; let speedText = speedVal + "M";
+            if (speedVal >= 10000) { speedColorClass = 'text-info'; speedText = (speedVal / 1000) + "G"; } 
+            else if (speedVal >= 1000) { speedColorClass = 'text-success'; speedText = (speedVal / 1000) + "G"; }
+
+            var fromNode = nodesDataSet.get(edgeData.from);
+            var toNode = nodesDataSet.get(edgeData.to);
+            var isEdgeDown = (fromNode && fromNode.status === 'down') || (toNode && toNode.status === 'down');
+            
+            let speedLabel = `<span class="${speedColorClass} fw-bold">${speedText}</span>`;
+            if (isEdgeDown) { speedLabel = "<span class='text-danger fw-bold'>設備徹底斷線，連線中斷</span>"; } 
+            else if ((fromNode && fromNode.status === 'warning') || (toNode && toNode.status === 'warning')) { speedLabel += " <span class='text-light-yellow' style='font-size:0.85rem;'>(連線中，但SNMP被阻擋)</span>"; }
+
+            var fromName = fromNode ? fromNode.sysName : edgeData.from;
+            var toName = toNode ? toNode.sysName : edgeData.to;
+
+            // 🎤 稽核埋點：紀錄點擊拓樸連線線路 (純瀏覽軌跡)
+            window.logFrontendAction(
+                "前端純瀏覽軌跡", 
+                "檢視線路分析", 
+                `管理員選取了拓樸鏈路連線 [ ${fromName} ⟷ ${toName} ]，調閱其鏈路即時速率與雙向埠口對接報告。`
+            );
+
+            detailDiv.innerHTML = `
+                <div class="card bg-dark border-secondary text-white p-2 shadow-sm">
+                    <div class="text-info fw-bold mb-1" style="font-size:0.95rem;"><i class="bi bi-link-45deg me-1"></i>連線分析</div>
+                    <div style="font-size:0.85rem;" class="mb-2"><b>速率:</b> ${speedLabel}</div>
+                    
+                    <div class="bg-black p-2 rounded border border-secondary mb-2" style="font-size:0.8rem;">
+                        <div class="text-white-50 mb-1"><i class="bi bi-diagram-2 me-1"></i>兩端對接資訊:</div>
+                        <div class="d-flex align-items-center justify-content-between mb-1">
+                            <span class="text-info text-truncate" style="max-width:40%;" title="${fromName}">${fromName}</span>
+                            <i class="bi bi-arrow-right text-white-50"></i>
+                            <span class="text-warning text-truncate" style="max-width:50%; text-align:right;" title="${edgeData.from_port}">${edgeData.from_port}</span>
+                        </div>
+                        <div class="d-flex align-items-center justify-content-between">
+                            <span class="text-info text-truncate" style="max-width:40%;" title="${toName}">${toName}</span>
+                            <i class="bi bi-arrow-right text-white-50"></i>
+                            <span class="text-warning text-truncate" style="max-width:50%; text-align:right;" title="${edgeData.to_port}">${edgeData.to_port}</span>
+                        </div>
+                    </div>
+                    <button class="btn btn-outline-info w-100 mt-2 fw-bold shadow-sm" onclick="openEdgeTrafficModal('${edgeData.id}')"><i class="bi bi-graph-up me-1"></i>開啟線路歷史頻寬趨勢</button>
+                </div>
+            `;
+        } else {
+            detailDiv.innerHTML = '<p class="text-white-50">點擊圖形可查看詳細資訊。</p>';
+        }
+    });
+}
+
+// 💡 觸發立即備份的 API 呼叫函式 (全面改用無干擾 Toast 提示)
+async function triggerDeviceBackup(ip) {
+    if (!ip) return;
+
+    // 1. 取消 confirm 確認框，直接顯示開始備份的 Toast 提示
+    if (typeof window.showToast === 'function') {
+        window.showToast(`🚀 正在對 ${ip} 發送備份指令，請稍候...`, 'info');
+    }
+
+    try {
+        let response = await fetch('/api/device/backup_now', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip: ip })
+        });
+        
+        // 權限被擋處理
+        if (response.status === 401 || response.status === 403) {
+            if (typeof window.showToast === 'function') {
+                window.showToast(`❌ 權限不足，拒絕存取！請確認您是否具備管理員權限。`, 'danger');
+            }
+            return;
+        }
+
+        let result = await response.json();
+        
+        // 2. 依據結果顯示成功或失敗的 Toast 提示
+        if(result.status === 'success') {
+            if (typeof window.showToast === 'function') {
+                window.showToast(`✅ ${ip} ${result.message}`, 'success');
+            }
+        } else {
+            if (typeof window.showToast === 'function') {
+                window.showToast(`❌ ${ip} 備份失敗: ${result.message}`, 'danger');
+            }
+        }
+    } catch(err) {
+        if (typeof window.showToast === 'function') {
+            window.showToast(`❌ ${ip} 網路請求失敗，無法連線至後端伺服器！`, 'danger');
+        }
+        console.error(err);
+    }
+}
+</script>

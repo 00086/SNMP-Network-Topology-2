@@ -1,0 +1,299 @@
+{% extends 'layout.html' %}
+{% block title %}拓樸圖檢視 - 網路拓樸管理系統{% endblock %}
+{% block head %}
+<script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+    body { overflow: hidden !important; }
+    
+    /* 💡 1. 強制左側卡片與右側面板「完美等高」，並開啟 Flex 垂直排列 */
+    #topology-card, .info-box { 
+        height: calc(100vh - 90px) !important; 
+        display: flex; 
+        flex-direction: column; 
+    }
+    
+    /* 💡 2. 左側拓樸圖：自動填滿卡片剩下的垂直空間 */
+    #mynetwork { 
+        width: 100%; 
+        flex-grow: 1; 
+        min-height: 0 !important; 
+        border-radius: 10px; 
+        background-color: #ffffff; 
+        transition: background-color 0.3s ease; 
+        outline: none; 
+        margin-top: 10px;
+    }
+    
+    /* 💡 3. 右側屬性區：顏色修正為與系統一致的深灰主題 */
+    .info-box { 
+        background-color: #2d3748 !important; 
+        color: white; 
+        border-radius: 10px; 
+        padding: 15px; 
+    }
+    
+    /* 💡 4. 詳細資訊內容區：溢出時產生捲軸 */
+    #detailContent { 
+        overflow-y: auto; 
+        flex-grow: 1; 
+        min-height: 0 !important; 
+        padding-right: 0px; 
+        margin-right: 0px; 
+        overflow-x: hidden; 
+    }
+    #detailContent::-webkit-scrollbar { width: 6px; }
+    #detailContent::-webkit-scrollbar-thumb { background: #6c757d; border-radius: 3px; }
+    
+    /* 💡 5. 實體對接狀態小框框：限制最大高度 190px */
+    .port-list-container { 
+        background-color: #1a202c !important; 
+        border-radius: 5px; 
+        padding: 8px; 
+        margin-top: 5px;
+        max-height: 190px !important;  
+        overflow-y: auto !important;   
+    }
+    .port-list-container::-webkit-scrollbar { width: 5px; }
+    .port-list-container::-webkit-scrollbar-thumb { background: #6c757d; border-radius: 3px; }
+
+    /* --- 以下保留原有的其他按鈕與表格樣式 --- */
+    .btn-group-sm > .btn, .btn-sm { padding: 0.2rem 0.5rem; font-size: 0.82rem; }
+    .input-group-text { padding: 0.2rem 0.5rem; font-size: 0.75rem; }
+    .btn-grid-on { background-color: #6c757d !important; color: #ffffff !important; border-color: #6c757d !important; }
+    .btn-grid-off { background-color: #ffffff !important; border: 1px solid #dee2e6 !important; color: #6c757d !important; }
+    .text-orange { color: #fd7e14 !important; }
+    .bg-orange { background-color: #fd7e14 !important; color: white !important; }
+    .text-light-yellow { color: #ffe066 !important; }
+    @keyframes blink { 0% {opacity: 1;} 50% {opacity: 0.3;} 100% {opacity: 1;} }
+    .blink-danger { animation: blink 1.2s infinite; background-color: #dc3545; color: white;}
+    .blink-warning { animation: blink 1.5s infinite; background-color: #ffe066 !important; color: black !important;}
+    .legend-badge { display: inline-flex; align-items: center; white-space: nowrap; font-size: 0.75rem; margin-right: 8px; margin-bottom: 2px; }
+    .legend-circle { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; flex-shrink: 0; }
+    .dropdown-menu { z-index: 1050 !important; }
+    .snmp-tab-btn { color: #adb5bd !important; background-color: transparent !important; border-color: transparent !important; font-weight: bold; }
+    .snmp-tab-btn:hover { color: #ffffff !important; border-color: #6c757d #6c757d transparent !important; }
+    .nav-tabs .nav-link.snmp-tab-btn.active { color: #ffe066 !important; background-color: #000000 !important; border-color: #6c757d #6c757d #000000 !important; }
+    .search-table th, .search-table td { vertical-align: middle; padding: 4px 8px !important; font-size: 0.8rem; border-color: #444; }
+    .search-table .badge { font-size: 0.75rem; font-weight: normal; }
+    .dense-table th, .dense-table td { vertical-align: middle; padding: 3px 8px !important; font-size: 0.78rem !important; border-color: #444; white-space: nowrap !important; }
+    .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #6c757d; border-radius: 3px; }
+    .custom-scroll::-webkit-scrollbar-track { background: #1a202c; }
+	
+/* ==========================================
+       🎛️ 虛擬硬體面板 (Visual Front Panel) - 終極硬體樣板版
+       ========================================== */
+    .virtual-chassis {
+        background: linear-gradient(to bottom, #4a4a4a 0%, #2b2b2b 100%);
+        border: 2px solid #1a1a1a; border-radius: 6px;
+        box-shadow: inset 0 1px 1px rgba(255,255,255,0.2), 0 4px 10px rgba(0,0,0,0.7);
+        padding: 0; display: flex; flex-direction: row; align-items: stretch; justify-content: space-between; position: relative; overflow: hidden;
+    }
+    .chassis-ear {
+        width: 24px; background: #333; border-right: 1px solid #111; border-left: 1px solid #555;
+        display: flex; flex-direction: column; justify-content: space-around; align-items: center; padding: 20px 0;
+    }
+    .screw { width: 10px; height: 10px; background: #999; border-radius: 50%; box-shadow: inset 0 -1px 2px rgba(0,0,0,0.8); }
+    
+    .chassis-body {
+        display: flex; flex-direction: column; gap: 6px; flex-grow: 1; padding: 16px; overflow-x: auto;
+    }
+    .chassis-row {
+        display: flex; flex-wrap: nowrap; gap: 4px; justify-content: flex-start;
+    }
+    .logic-row {
+        margin-top: 6px; padding-top: 10px; border-top: 2px solid #444; border-radius: 1px;
+    }
+    
+    /* 💡 RJ-45 實體網孔 (黑色塑膠體 + 深色真實立體插孔) */
+    .rj45-port {
+        width: 36px; height: 46px;
+        background: #222; border: 1px solid #111; border-radius: 3px;
+        display: flex; flex-direction: column; align-items: center; position: relative; box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+    }
+    .rj45-port::before {
+        content: ''; position: absolute; top: 12px; left: 6px; right: 6px; height: 16px;
+        background: #000; border-radius: 2px 2px 0 0; box-shadow: inset 0 3px 5px rgba(0,0,0,1);
+    }
+    .rj45-port .port-label { position: absolute; bottom: 2px; font-size: 0.75rem; font-weight: bold; color: #fff; font-family: Tahoma, sans-serif; user-select: none; }
+    .rj45-port .port-led { width: 10px; height: 4px; border-radius: 1px; position: absolute; top: 4px; z-index: 2; box-shadow: inset 0 1px 1px rgba(0,0,0,0.8); }
+
+    /* 💡 SFP 光纖插槽 (銀色金屬殼 + 半透明黑底白字解決看不清問題) */
+    .sfp-port {
+        width: 36px; height: 46px;
+        background: linear-gradient(135deg, #e0e0e0 0%, #b8b8b8 50%, #888 100%);
+        border: 1px solid #444; border-radius: 2px;
+        display: flex; flex-direction: column; align-items: center; position: relative; box-shadow: inset 0 1px 2px rgba(255,255,255,0.9), 0 2px 4px rgba(0,0,0,0.6);
+    }
+    .sfp-port::before {
+        content: ''; position: absolute; top: 10px; left: 6px; right: 6px; height: 16px;
+        background: #111; border: 1px solid #333; border-top: 2px solid #000; box-shadow: inset 0 2px 4px rgba(0,0,0,0.9);
+    }
+    .sfp-port .port-label {
+        position: absolute; bottom: 2px; font-size: 0.75rem; font-weight: 900; color: #fff; 
+        background-color: rgba(0, 0, 0, 0.75); padding: 0 4px; border-radius: 3px; /* 💡 加入半透明黑底，字體瞬間清晰 */
+        font-family: Tahoma, sans-serif; z-index: 2; user-select: none;
+    }
+    .sfp-port .port-led { width: 10px; height: 4px; border-radius: 1px; position: absolute; top: 4px; z-index: 2; box-shadow: inset 0 1px 1px rgba(0,0,0,0.8); }
+
+    /* 共用燈號發光特效 */
+    .led-down { background: #222; }
+    .led-1g { background: #39ff14; box-shadow: 0 0 8px #39ff14, inset 0 1px 2px rgba(255,255,255,0.8); }
+    .led-100m { background: #ff9900; box-shadow: 0 0 8px #ff9900, inset 0 1px 2px rgba(255,255,255,0.8); }
+    .led-10g { background: #00eeff; box-shadow: 0 0 8px #00eeff, inset 0 1px 2px rgba(255,255,255,0.8); }
+	
+	/* 💡 實體故障警報：LED 閃爍紅燈特效 */
+    @keyframes blink-red {
+        0% { background: #ff0000; box-shadow: 0 0 10px #ff0000; }
+        50% { background: #440000; box-shadow: none; }
+        100% { background: #ff0000; box-shadow: 0 0 10px #ff0000; }
+    }
+    .led-error {
+        animation: blink-red 0.8s infinite;
+        border: 1px solid #770000;
+    }
+
+    /* 💡 PoE 總負載預算儀表板樣式 */
+    .poe-budget-container {
+        background: #1a1a1a; border: 1px solid #333; border-radius: 4px; padding: 10px; margin-top: 10px;
+    }
+    .poe-progress { height: 12px; background-color: #333; border-radius: 6px; overflow: hidden; margin-top: 5px; }
+    .poe-bar-safe { background: linear-gradient(90deg, #28a745, #39ff14); }
+    .poe-bar-warn { background: linear-gradient(90deg, #ffc107, #fd7e14); }
+    .poe-bar-danger { background: linear-gradient(90deg, #dc3545, #ff0000); animation: pulse-danger 1s infinite alternate; }
+    @keyframes pulse-danger { from { opacity: 0.8; } to { opacity: 1; box-shadow: 0 0 8px red; } }
+</style>
+
+{% endblock %}
+
+{% block content %}
+<div class="row g-3">
+    <div class="col-lg-9">
+        <div class="card p-3" id="topology-card" style="transition: all 0.3s ease;">
+            <div class="d-flex flex-nowrap justify-content-between align-items-center mb-2 gap-1">
+                <h5 class="m-0 fw-bold text-secondary text-nowrap flex-shrink-0" id="topology-title" style="font-size: 1.1rem;"><i class="bi bi-globe2 me-1"></i>即時架構拓樸圖</h5>
+                
+                <div class="d-flex flex-nowrap align-items-center justify-content-end gap-1 flex-shrink-1">
+                    <button class="btn btn-sm btn-warning fw-bold shadow-sm px-2 text-nowrap" onclick="openGlobalSearch()" title="全網尋址"><i class="bi bi-search"></i></button>
+
+                    <div class="btn-group btn-group-sm shadow-sm">
+                        <button class="btn btn-success text-white dropdown-toggle px-2 text-nowrap" data-bs-toggle="dropdown" title="匯出"><i class="bi bi-download"></i></button>
+                        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow">
+                            <li><h6 class="dropdown-header">靜態圖檔儲存</h6></li>
+                            <li><a class="dropdown-item" href="#" onclick="exportPNG()"><i class="bi bi-image me-2"></i>匯出 4K 高畫質 PNG</a></li>
+                            <li><a class="dropdown-item text-warning fw-bold" href="#" onclick="exportHTML()"><i class="bi bi-browser-chrome me-2"></i>匯出 HTML (離線互動版)</a></li>
+                            <li><a class="dropdown-item" href="#" onclick="exportSVG()"><i class="bi bi-vector-pen me-2"></i>匯出純淨向量 SVG</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><h6 class="dropdown-header">稽核審查文件</h6></li>
+                            <li><a class="dropdown-item text-info" href="#" onclick="exportPDF()"><i class="bi bi-file-earmark-pdf me-2"></i>產出 4K PDF 報表</a></li>
+                        </ul>
+                    </div>
+
+                    <div class="btn-group btn-group-sm shadow-sm">
+                        <button class="btn btn-grid-on px-2" onclick="toggleGrid()" id="btn-grid" title="顯示/隱藏磁吸網格"><i class="bi bi-grid-3x3"></i></button>
+                        <button class="btn btn-outline-secondary fw-bold px-2" onclick="alignNodes()" id="btn-align" title="強制依層級對齊Y軸"><i class="bi bi-distribute-vertical"></i></button>
+                        <button class="btn btn-outline-secondary px-2" onclick="toggleDarkMode()" id="btn-theme" title="切換深/淺色模式"><i class="bi bi-moon-stars-fill"></i></button>
+                        <button class="btn btn-secondary text-white px-2" style="font-size: 0.75rem;" onclick="toggleShowIP()" id="btn-show-ip" title="顯示/隱藏IP">IP</button>
+                        <button class="btn btn-secondary text-white px-2" style="font-size: 0.75rem;" onclick="toggleShowName()" id="btn-show-name" title="顯示/隱藏名稱">名稱</button>
+                        <button class="btn btn-outline-secondary px-2" onclick="toggleShowLocation()" id="btn-show-location" title="顯示/隱藏位置"><i class="bi bi-geo-alt"></i></button>
+                        <button class="btn btn-outline-secondary border-start px-2" onclick="toggleFlow()" id="btn-show-flow" title="動態資料流"><i class="bi bi-activity"></i></button>
+                        <button class="btn btn-outline-secondary border-start px-2" onclick="toggleNodeTraffic()" id="btn-show-traffic-labels" title="於節點旁顯示即時總吞吐量"><i class="bi bi-speedometer2"></i></button>
+                    </div>
+
+                    <div class="btn-group btn-group-sm shadow-sm">
+                        <span class="input-group-text bg-dark text-white border-secondary px-1" style="font-size: 0.75rem;">版面</span>
+                        <button class="btn fw-bold px-2" onclick="manageSlot(1, 'load')" id="btn-load-1">1</button>
+                        <button class="btn fw-bold px-2" onclick="manageSlot(2, 'load')" id="btn-load-2">2</button>
+                        <button class="btn fw-bold px-2" onclick="manageSlot(3, 'load')" id="btn-load-3">3</button>
+                        <button class="btn btn-secondary text-white dropdown-toggle border-secondary px-2" style="background:#5c636a;" data-bs-toggle="dropdown" title="版面設定"><i class="bi bi-gear-fill"></i></button>
+                        <ul class="dropdown-menu dropdown-menu-dark dropdown-menu-end shadow">
+                            <li><h6 class="dropdown-header">記憶當前排列版面</h6></li>
+                            <li><a class="dropdown-item" href="#" onclick="manageSlot(1, 'save')"><i class="bi bi-save me-2"></i>覆寫至版面 1</a></li>
+                            <li><a class="dropdown-item" href="#" onclick="manageSlot(2, 'save')"><i class="bi bi-save me-2"></i>覆寫至版面 2</a></li>
+                            <li><a class="dropdown-item" href="#" onclick="manageSlot(3, 'save')"><i class="bi bi-save me-2"></i>覆寫至版面 3</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><h6 class="dropdown-header">進階版面管理</h6></li>
+                            <li><a class="dropdown-item text-warning" href="#" onclick="manageSlot(null, 'reset_view')"><i class="bi bi-arrow-clockwise me-2"></i>重置畫面 (返回自動排列)</a></li>
+                            <li><a class="dropdown-item text-danger" href="#" onclick="manageSlot(null, 'clear_current')"><i class="bi bi-eraser me-2"></i>清除當前版面記憶</a></li>
+                            <li><a class="dropdown-item text-danger" href="#" onclick="manageSlot(null, 'clear_all')"><i class="bi bi-trash3 me-2"></i>清除所有 (1~3) 記憶</a></li>
+                        </ul>
+                    </div>
+
+                    <div class="input-group input-group-sm shadow-sm" style="width: auto;">
+                        <span class="input-group-text bg-dark text-white border-secondary px-1" title="背景流量輪詢間隔"><i class="bi bi-stopwatch"></i></span>
+                        <select class="form-select bg-dark text-white border-secondary px-1" style="font-size: 0.75rem; cursor: pointer; padding-right: 20px;" id="pollingIntervalSelect" onchange="updatePollingInterval()">
+                            <option value="1">1分</option><option value="2">2分</option><option value="3">3分</option><option value="4">4分</option><option value="5">5分</option>
+                        </select>
+                    </div>
+                    
+                    <div class="input-group input-group-sm shadow-sm" style="width: auto;">
+                        <button class="btn btn-primary fw-bold px-2 text-nowrap border-end border-dark" 
+								onclick="if(typeof window.showToast === 'function') window.showToast('⏳ 正在啟動全網實體鏈路深度探測與拓樸重構，全網耗時約 1-3 分，請稍候...', 'info'); fetchSnmpData();" 
+								title="手動重新掃描全網">
+							<i class="bi bi-arrow-clockwise"></i>
+						</button>
+                        <select class="form-select bg-primary text-white border-primary px-1" style="font-size: 0.75rem; cursor: pointer; padding-right: 20px; font-weight: bold;" id="topoScanIntervalSelect" onchange="updateTopoScanInterval()" title="自動背景掃描頻率">
+                            <option value="0">手動</option>
+                            <option value="15">15分</option>
+                            <option value="30">30分</option>
+                            <option value="60">1小時</option>
+                            <option value="120">2小時</option>
+                            <option value="240">4小時</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div id="mynetwork" class="border" tabindex="0"></div>
+        </div>
+    </div>
+    <div class="col-lg-3">
+        <div class="info-box shadow d-flex flex-column">
+            <h5 class="fw-bold border-bottom pb-2 mb-2"><i class="bi bi-info-circle-fill me-2"></i>詳細屬性資訊</h5>
+            <div class="mb-3 p-2 bg-black rounded border border-secondary d-flex justify-content-start align-items-center flex-wrap gap-1" style="background-color: #1a202c !important;">
+                <div class="legend-badge"><span class="legend-circle" id="leg-10g-c"></span><span class="fw-bold" id="leg-10g-t">10G+ (藍)</span></div>
+                <div class="legend-badge"><span class="legend-circle" id="leg-1g-c"></span><span class="fw-bold" id="leg-1g-t">1G (綠)</span></div>
+                <div class="legend-badge"><span class="legend-circle" style="background-color: #fd7e14;"></span><span class="text-orange fw-bold">100M (橘)</span></div>
+                <div class="legend-badge"><span class="legend-circle" style="background-color: #ffe066;"></span><span class="fw-bold text-light-yellow">SNMP異常 (黃)</span></div>
+                <div class="legend-badge"><span class="legend-circle" style="background-color: #dc3545;"></span><span class="text-danger fw-bold">斷線 (紅)</span></div>
+            </div>
+            <div id="detailContent"></div>
+            <div class="mt-auto pt-2 border-top border-secondary text-center text-white-50" style="font-size:0.75rem;">核心引擎佈局：Vis.js Network</div>
+        </div>
+    </div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100" id="toastPlacement"></div>
+
+{% include 'topo_parts/modal_search.html' %}
+{% include 'topo_parts/modal_traffic.html' %}
+{% include 'topo_parts/event_right_click.html' %}
+{% include 'topo_parts/event_left_click.html' %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/topology_engine.js') }}?v=1.3"></script>
+<script src="{{ url_for('static', filename='js/topology_ui.js') }}?v=1.3"></script>
+
+<script>
+    // 💡 因為所有全域變數與匯出邏輯都已順利封裝至 topology_engine.js 中
+    // 這裡只需要負責觸發初始化與掛載監聽器即可！
+    
+    document.addEventListener("DOMContentLoaded", initApp);
+    document.addEventListener("DOMContentLoaded", function() {
+        let initTheme = isDarkMode ? TOPO_COLORS.dark : TOPO_COLORS.light;
+        if(document.getElementById('leg-10g-c')) {
+            document.getElementById('leg-10g-c').style.backgroundColor = initTheme.link10G;
+            document.getElementById('leg-10g-t').style.color = isDarkMode ? initTheme.link10G : '#4da6ff';
+            document.getElementById('leg-1g-c').style.backgroundColor = initTheme.link1G;
+            document.getElementById('leg-1g-t').style.color = initTheme.link1G;
+        }
+    });
+    
+    // 🚀 啟動動態線條引擎
+    if (typeof startDynamicEdges === 'function') {
+        startDynamicEdges();
+    }
+
+</script>
+{% endblock %}

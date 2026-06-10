@@ -1,0 +1,412 @@
+<div class="modal fade" id="trafficChartModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl" id="trafficChartDialog" style="margin-top: 5vh; max-width: 1200px; transition: all 0.3s ease;">
+    <div class="modal-content bg-dark text-white shadow-lg border-secondary">
+      <div class="modal-header border-secondary py-2 d-flex justify-content-between align-items-center">
+        <h5 class="modal-title text-info fw-bold" id="trafficModalTitle"><i class="bi bi-graph-up me-2"></i>流量分析圖表</h5>
+        <div class="d-flex align-items-center">
+            <select id="trafficRangeSelect" class="form-select form-select-sm bg-dark text-white border-secondary me-2" style="width: 140px;" onchange="refreshTrafficChart()">
+                <option value="15m" selected>最近 15 分鐘</option>
+                <option value="30m">最近 30 分鐘</option>
+                <option value="1h">最近 1 小時</option>
+                <option value="6h">最近 6 小時</option>
+                <option value="24h">最近 24 小時</option>
+                <option value="7d">最近 7 天</option>
+				<option value="30d">最近 1 個月 (熱庫高精度)</option>
+				<option value="180d">最近 半年 (溫庫中精度)</option>
+				<option value="1y">最近 1 年 (冷庫趨勢)</option>
+				<option value="3y">最近 3 年 (冷庫法規)</option>
+			<option value="custom">自訂區間...</option>
+            </select>
+            <div id="trafficCustomDiv" class="d-none align-items-center me-2">
+                <input type="datetime-local" id="trafficStart" class="form-control form-control-sm bg-dark text-white border-secondary me-1">
+                <span class="mx-1 text-white-50">-</span>
+                <input type="datetime-local" id="trafficEnd" class="form-control form-control-sm bg-dark text-white border-secondary me-1">
+                <button type="button" class="btn btn-sm btn-outline-warning ms-1" onclick="refreshTrafficChart()"><i class="bi bi-check2"></i></button>
+            </div>
+            
+            <button type="button" class="btn btn-sm btn-outline-info me-2 fw-bold" onclick="refreshTrafficChart()" title="重新抓取資料庫最新流量紀錄"><i class="bi bi-arrow-clockwise me-1"></i>即時更新</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary me-3 fw-bold" onclick="toggleFullscreenChart()" title="全螢幕切換"><i id="fullscreenIcon" class="bi bi-arrows-fullscreen"></i></button>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+      </div>
+      <div class="modal-body" style="padding: 1.5rem;">
+        <div id="trafficChartContainer" style="height: 60vh; position: relative; transition: height 0.3s ease;"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+    var globalTrafficModalInstance = null;
+    var trafficChartInstance = null;
+    var currentChartType = null; 
+    var currentChartTargetId = null;
+
+    const crosshairPlugin = {
+        id: 'crosshair',
+        afterDraw: function(chart) {
+            if (chart.tooltip?.opacity > 0 && chart.tooltip.dataPoints && chart.tooltip.dataPoints.length > 0) {
+                const x = chart.tooltip.caretX;
+                const yCoords = chart.tooltip.dataPoints.map(dp => dp.element.y);
+                const minY = Math.min(...yCoords);
+                const maxY = Math.max(...yCoords);
+
+                const ctx = chart.ctx;
+                ctx.save(); ctx.beginPath(); ctx.moveTo(x, minY); ctx.lineTo(x, maxY); ctx.lineWidth = 1.5;
+                ctx.strokeStyle = '#ffe066'; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.restore();
+            }
+        }
+    };
+
+    function toggleFullscreenChart() {
+        let dialog = document.getElementById('trafficChartDialog');
+        let container = document.getElementById('trafficChartContainer');
+        let icon = document.getElementById('fullscreenIcon');
+        
+        if (dialog.classList.contains('modal-fullscreen')) {
+            dialog.classList.remove('modal-fullscreen'); dialog.classList.add('modal-xl');
+            dialog.style.marginTop = '5vh'; dialog.style.maxWidth = '1200px'; container.style.height = '60vh';
+            icon.classList.remove('bi-fullscreen-exit'); icon.classList.add('bi-arrows-fullscreen');
+        } else {
+            dialog.classList.remove('modal-xl'); dialog.classList.add('modal-fullscreen');
+            dialog.style.marginTop = '0'; dialog.style.maxWidth = 'none'; container.style.height = '85vh'; 
+            icon.classList.remove('bi-arrows-fullscreen'); icon.classList.add('bi-fullscreen-exit');
+        }
+        if (trafficChartInstance) { setTimeout(() => trafficChartInstance.resize(), 300); }
+    }
+
+function toggleNodeTraffic() {
+        isShowNodeTraffic = !isShowNodeTraffic;
+        var btn = document.getElementById('btn-show-traffic-labels');
+        if (isShowNodeTraffic) { 
+            btn.classList.replace('btn-outline-secondary', 'btn-primary'); btn.classList.add('text-white');
+        } else { 
+            btn.classList.replace('btn-primary', 'btn-outline-secondary'); btn.classList.remove('text-white');
+        }
+        
+        // 🎤 稽核埋點：紀錄切換吞吐量顯示
+        if (typeof window.logFrontendAction === 'function') {
+            window.logFrontendAction(
+                "前端瀏覽軌跡", 
+                "切換顯示設定", 
+                `管理員將「節點即時總吞吐量」顯示狀態切換為：【 ${isShowNodeTraffic ? '開啟' : '關閉'} 】。`
+            );
+        }
+
+        if (network) network.redraw(); 
+    }
+
+    function fetchNodeTrafficSummary() {
+        fetch('/api/traffic_summary').then(res => res.json()).then(res => {
+            if (res.success) { 
+                nodeTrafficData = res.data; 
+                if (isShowNodeTraffic && network) network.redraw(); 
+            }
+        }).catch(e => console.error(e));
+    }
+
+    if (!window.trafficPollingStarted) {
+        fetchNodeTrafficSummary();
+        setInterval(fetchNodeTrafficSummary, 15000);
+        window.trafficPollingStarted = true;
+    }
+
+    // 💡 點擊切換時間或刷新按鈕時，觸發更新並送出 False 表示為「切換條件」
+	function refreshTrafficChart() {
+        if (currentChartType === 'node' && currentChartTargetId) openNodeTrafficModal(currentChartTargetId, false);
+        else if (currentChartType === 'edge' && currentChartTargetId) openEdgeTrafficModal(currentChartTargetId, false);
+        // 💡 將原本的 metrics 加上目前的模式參數
+        else if (currentChartType === 'metrics' && currentChartTargetId) openNodeMetricsModal(currentChartTargetId, currentMetricsMode, false); 
+    }
+
+    function buildTrafficApiUrl(ip) {
+        let range = document.getElementById('trafficRangeSelect').value;
+        let customDiv = document.getElementById('trafficCustomDiv');
+        let url = '/api/traffic/' + ip + '?range=' + range;
+        
+        if (range === 'custom') {
+            customDiv.classList.replace('d-none', 'd-flex');
+            let start = document.getElementById('trafficStart').value;
+            let end = document.getElementById('trafficEnd').value;
+            if (start && end) { url += `&start=${start}&end=${end}`; } else { return null; }
+        } else {
+            customDiv.classList.replace('d-flex', 'd-none');
+        }
+        return url;
+    }
+
+    function getTrafficModalInstance() {
+        let modalEl = document.getElementById('trafficChartModal');
+        if (!globalTrafficModalInstance) {
+            globalTrafficModalInstance = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+        }
+        return globalTrafficModalInstance;
+    }
+
+    // 💡 智慧解析當前時間區間文字 (供日誌使用)
+    function getRangeLogText() {
+        let rangeSelect = document.getElementById('trafficRangeSelect');
+        let rangeText = rangeSelect.options[rangeSelect.selectedIndex].text;
+        if (rangeSelect.value === 'custom') {
+            let st = document.getElementById('trafficStart').value.replace('T', ' ');
+            let ed = document.getElementById('trafficEnd').value.replace('T', ' ');
+            if (st && ed) rangeText = `自訂 (${st} ~ ${ed})`;
+        }
+        return rangeText;
+    }
+
+// ==========================================
+    // 設備全埠流量柱狀圖
+    // ==========================================
+    function openNodeTrafficModal(nodeId, isFirstClick = true) {
+        currentChartType = 'node'; currentChartTargetId = nodeId;
+        let node = nodesDataSet.get(nodeId); if (!node) return;
+        
+        if (isFirstClick) {
+            document.getElementById('trafficRangeSelect').value = '15m';
+            document.getElementById('trafficCustomDiv').classList.replace('d-flex', 'd-none');
+        }
+        
+        let url = buildTrafficApiUrl(node.ip); if (!url) return; 
+        let rangeText = getRangeLogText();
+        
+        if (typeof window.logFrontendAction === 'function') {
+            let actionVerb = isFirstClick ? "開啟並調閱" : "變更查詢條件並重新載入";
+            window.logFrontendAction("前端瀏覽軌跡", "檢視流量圖表", `管理員${actionVerb}了設備 [ ${node.sysName || ''} ] (IP: ${node.ip}) 的全埠吞吐量柱狀圖，查詢區間為：【 ${rangeText} 】。`);
+        }
+
+        let modal = getTrafficModalInstance();
+        document.getElementById('trafficModalTitle').innerHTML = `<i class="bi bi-bar-chart-fill me-2"></i>設備各埠總覽 (${rangeText}平均) - ${node.sysName || node.ip}`;
+        document.getElementById('trafficChartContainer').innerHTML = '<div class="text-center mt-5"><div class="spinner-border text-info"></div><p class="mt-2 text-white-50">正在從資料庫讀取最新流量資料...</p></div>';
+        
+        if (!document.getElementById('trafficChartModal').classList.contains('show')) { modal.show(); }
+
+        fetch(url).then(r=>r.json()).then(res => {
+            if(res.success && Object.keys(res.data).length > 0) {
+                let trafficData = res.data; let rawData = {};
+                try { rawData = JSON.parse(node.snmp_raw || "{}"); } catch(e){}
+                let ifNames = rawData[4] || {};
+                
+                let portStats = [];
+                for (let pIdx in trafficData) {
+                    let pData = trafficData[pIdx]; let pName = ifNames[pIdx] ? cleanStr(ifNames[pIdx]) : `P${pIdx}`;
+                    // 💡 修正：API 欄位已升級為 avg_in_bps
+                    if (pData.avg_in_bps && pData.avg_in_bps.length > 0) {
+                        let sumIn = pData.avg_in_bps.reduce((sum, val) => sum + val, 0);
+                        let sumOut = pData.avg_out_bps.reduce((sum, val) => sum + val, 0);
+                        let avgIn = Math.round(sumIn / pData.avg_in_bps.length);
+                        let avgOut = Math.round(sumOut / pData.avg_out_bps.length);
+                        let totalAvg = avgIn + avgOut;
+                        if (totalAvg > 0) { portStats.push({ name: pName, in: avgIn, out: avgOut, total: totalAvg }); }
+                    }
+                }
+                portStats.sort((a,b) => b.total - a.total);
+                if (portStats.length === 0) { document.getElementById('trafficChartContainer').innerHTML = '<div class="alert alert-dark text-center mt-5 py-4">此設備目前所有連接埠在此區間均無流量。</div>'; return; }
+
+                let labels = portStats.map(p => p.name);
+                let downloadData = portStats.map(p => p.out);
+                let uploadData = portStats.map(p => -p.in);
+
+                document.getElementById('trafficChartContainer').innerHTML = '<canvas id="trafficCanvas"></canvas>';
+                let ctx = document.getElementById('trafficCanvas').getContext('2d');
+                if (trafficChartInstance) trafficChartInstance.destroy();
+                trafficChartInstance = new Chart(ctx, {
+                    type: 'bar',
+                    data: { labels: labels, datasets: [ { label: '📥 下載 (In / Rx)', data: downloadData, backgroundColor: '#20c997' }, { label: '📤 上傳 (Out / Tx)', data: uploadData, backgroundColor: '#0dcaf0' } ] },
+                    options: {
+                        animation: { duration: 500 }, responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { position: 'bottom', labels: {color: '#fff'} }, tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': ' + formatBps(Math.abs(c.raw)); } } } },
+                        scales: { x: { stacked: true, ticks: { color: '#adb5bd', font: { size: 11 } }, grid: { display: false } }, y: { stacked: true, ticks: { color: '#adb5bd', font: { size: 11 }, callback: function(v) { return formatBps(Math.abs(v)); } }, grid: { color: '#444' } } }
+                    }
+                });
+            } else { document.getElementById('trafficChartContainer').innerHTML = '<div class="alert alert-warning text-center mt-5 py-4"><i class="bi bi-exclamation-triangle-fill me-2"></i>此區間尚無歷史流量數據。</div>'; }
+        }).catch(err => { 
+            document.getElementById('trafficChartContainer').innerHTML = `<div class="alert alert-danger text-center mt-5">取得流量資料失敗：${err.message}</div>`; 
+        });
+    }
+
+    // ==========================================
+    // 線路流量趨勢折線圖
+    // ==========================================
+    function openEdgeTrafficModal(edgeId, isFirstClick = true) {
+        currentChartType = 'edge'; currentChartTargetId = edgeId;
+        let edge = edgesDataSet.get(edgeId); let fromNode = nodesDataSet.get(edge.from); if (!fromNode) return;
+        let targetPortName = edge.from_port; let toNode = nodesDataSet.get(edge.to); let toName = toNode ? (toNode.sysName || toNode.ip) : edge.to;
+
+        if (isFirstClick) {
+            document.getElementById('trafficRangeSelect').value = '15m';
+            document.getElementById('trafficCustomDiv').classList.replace('d-flex', 'd-none');
+        }
+
+        let url = buildTrafficApiUrl(fromNode.ip); if (!url) return; 
+        let rangeText = getRangeLogText();
+
+        if (typeof window.logFrontendAction === 'function') {
+            let actionVerb = isFirstClick ? "開啟並調閱" : "變更查詢條件並重新載入";
+            window.logFrontendAction("前端瀏覽軌跡", "檢視線路歷史趨勢", `管理員${actionVerb}介面 [ ${targetPortName} (往 ${toName} IP: ${toNode ? toNode.ip : edge.to}) ] 的實體線路頻寬趨勢，查詢區間為：【 ${rangeText} 】。`);
+        }
+
+        let modal = getTrafficModalInstance();
+        document.getElementById('trafficModalTitle').innerHTML = `<i class="bi bi-graph-up me-2"></i>線路流量趨勢 (${rangeText}) - ${targetPortName} (往 ${toName})`;
+        document.getElementById('trafficChartContainer').innerHTML = '<div class="text-center mt-5"><div class="spinner-border text-info"></div><p class="mt-2 text-white-50">正在從資料庫讀取歷史流量走勢...</p></div>';
+        
+        if (!document.getElementById('trafficChartModal').classList.contains('show')) { modal.show(); }
+
+        fetch(url).then(r=>r.json()).then(res => {
+            if(res.success && Object.keys(res.data).length > 0) {
+                let trafficData = res.data; let rawData = {};
+                try { rawData = JSON.parse(fromNode.snmp_raw || "{}"); } catch(e){}
+                let ifNames = rawData[4] || {};
+                
+                let bundledPorts = (targetPortName || '').split(',').map(p => p.trim().toLowerCase());
+                let targetIdx = null;
+                let extractNum = function(str) { let m = str.match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+
+                for (let idx in ifNames) {
+                    let cleanIfName = cleanStr(ifNames[idx]).toLowerCase();
+                    if (bundledPorts.includes(cleanIfName)) { targetIdx = idx; break; }
+                    let pNum1 = extractNum(cleanIfName);
+                    for (let bp of bundledPorts) {
+                        let pNum2 = extractNum(bp);
+                        if (pNum1 && pNum2 && pNum1 === pNum2) {
+                            let isLag1 = cleanIfName.includes('lag') || cleanIfName.includes('lg') || cleanIfName.includes('po');
+                            let isLag2 = bp.includes('lag') || bp.includes('lg') || bp.includes('po');
+                            if (isLag1 === isLag2) { targetIdx = idx; break; }
+                        }
+                    }
+                    if (targetIdx) break;
+                }
+                
+                if (!targetIdx || !trafficData[targetIdx]) {
+                    document.getElementById('trafficChartContainer').innerHTML = '<div class="alert alert-dark text-center mt-5 py-4">此實體介面在此區間尚無歷史流量紀錄。</div>'; return;
+                }
+
+                let tData = trafficData[targetIdx];
+
+                // 💡 修正：移除多餘的 ctx 宣告，確保無 JS 報錯
+                document.getElementById('trafficChartContainer').innerHTML = '<canvas id="trafficCanvas"></canvas>';
+                let ctx = document.getElementById('trafficCanvas').getContext('2d');
+                if (trafficChartInstance) trafficChartInstance.destroy();
+                
+                let maxDownload = tData.max_out_bps || []; let maxUpload = (tData.max_in_bps || []).map(v => -v);
+                let avgDownload = tData.avg_out_bps || []; let avgUpload = (tData.avg_in_bps || []).map(v => -v);
+
+                trafficChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: { 
+                        labels: tData.labels, 
+                        datasets: [ 
+                            { label: '📥 瞬間峰值 (Max Rx)', data: maxDownload, borderColor: 'transparent', backgroundColor: 'rgba(32, 201, 151, 0.15)', fill: true, tension: 0.3, pointRadius: 0 }, 
+                            { label: '📤 瞬間峰值 (Max Tx)', data: maxUpload, borderColor: 'transparent', backgroundColor: 'rgba(13, 202, 240, 0.15)', fill: true, tension: 0.3, pointRadius: 0 },
+                            { label: '📥 平均接收 (Avg Rx)', data: avgDownload, borderColor: '#20c997', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 2, hitRadius: 8 }, 
+                            { label: '📤 平均傳送 (Avg Tx)', data: avgUpload, borderColor: '#0dcaf0', backgroundColor: 'transparent', fill: false, tension: 0.3, pointRadius: 0, borderWidth: 2, hitRadius: 8 }
+                        ] 
+                    },
+                    options: {
+                        animation: { duration: 500 }, responsive: true, maintainAspectRatio: false,
+                        plugins: { legend: { position: 'bottom', labels: {color: '#fff'} }, tooltip: { mode: 'index', intersect: false, callbacks: { label: function(c) { return c.dataset.label + ': ' + formatBps(Math.abs(c.raw)); } } } },
+                        scales: { x: { ticks: { color: '#adb5bd', font: { size: 11 }, maxTicksLimit: 12 }, grid: { display: false } }, y: { ticks: { color: '#adb5bd', font: { size: 11 }, callback: function(v) { return formatBps(Math.abs(v)); } }, grid: { color: '#444' } } }
+                    },
+                    plugins: [crosshairPlugin] 
+                });
+            } else { document.getElementById('trafficChartContainer').innerHTML = '<div class="alert alert-warning text-center mt-5 py-4"><i class="bi bi-exclamation-triangle-fill me-2"></i>此區間尚無歷史流量數據。</div>'; }
+        }).catch(err => { 
+            document.getElementById('trafficChartContainer').innerHTML = `<div class="alert alert-danger text-center mt-5">取得流量資料失敗：${err.message}</div>`; 
+        });
+    }
+	
+	// ==========================================
+    // 設備 CPU/記憶體/PoE/溫度 效能多功能折線圖
+    // ==========================================
+    var currentMetricsMode = 'cpu'; // 紀錄當前看的是什麼圖
+    
+    function openNodeMetricsModal(nodeId, mode = 'cpu', isFirstClick = true) {
+        currentChartType = 'metrics'; currentChartTargetId = nodeId; currentMetricsMode = mode;
+        let node = nodesDataSet.get(nodeId); if (!node) return;
+        
+        if (isFirstClick) {
+            document.getElementById('trafficRangeSelect').value = '15m';
+            document.getElementById('trafficCustomDiv').classList.replace('d-flex', 'd-none');
+        }
+        
+        let range = document.getElementById('trafficRangeSelect').value;
+        let url = `/api/metrics/${node.ip}?range=${range}`;
+        let rangeText = getRangeLogText();
+        
+        let modalTitle = `<i class="bi bi-cpu-fill me-2 text-warning"></i>系統效能趨勢`;
+        let logAction = "CPU 與記憶體效能走勢圖";
+        let loadIcon = "text-warning";
+        
+        if (mode === 'poe') { modalTitle = `<i class="bi bi-lightning-charge-fill me-2 text-success"></i>PoE 總供電消耗趨勢`; logAction = "PoE 總供電瓦數走勢圖"; loadIcon = "text-success"; }
+        else if (mode === 'temp') { modalTitle = `<i class="bi bi-thermometer-half me-2 text-danger"></i>系統核心溫度軌跡`; logAction = "系統核心溫度走勢圖"; loadIcon = "text-danger"; }
+
+        if (typeof window.logFrontendAction === 'function') {
+            let actionVerb = isFirstClick ? "開啟並調閱" : "變更查詢條件並重新載入";
+            window.logFrontendAction("前端瀏覽軌跡", "檢視效能歷史趨勢", `管理員${actionVerb}設備 [ ${node.sysName || ''} ] (IP: ${node.ip}) 的${logAction}，查詢區間為：【 ${rangeText} 】。`);
+        }
+
+        let modal = getTrafficModalInstance();
+        document.getElementById('trafficModalTitle').innerHTML = `${modalTitle} (${rangeText}) - ${node.sysName || node.ip}`;
+        document.getElementById('trafficChartContainer').innerHTML = `<div class="text-center mt-5"><div class="spinner-border ${loadIcon}"></div><p class="mt-2 text-white-50">正在從內網資料庫調閱歷史軌跡...</p></div>`;
+        if (!document.getElementById('trafficChartModal').classList.contains('show')) modal.show(); 
+
+        fetch(url).then(r=>r.json()).then(res => {
+            if(res.success && res.labels.length > 0) {
+                document.getElementById('trafficChartContainer').innerHTML = '<canvas id="trafficCanvas"></canvas>';
+                let ctx = document.getElementById('trafficCanvas').getContext('2d');
+                if (trafficChartInstance) trafficChartInstance.destroy();
+                
+                let datasets = []; let yAxisOptions = {};
+                
+                if (mode === 'cpu') {
+                    datasets = [
+                        { label: '⚙️ CPU 使用率', data: res.cpu, borderColor: '#ffc107', backgroundColor: 'rgba(255, 193, 7, 0.08)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 },
+                        { label: '🧠 記憶體使用率', data: res.memory, borderColor: '#a78bfa', backgroundColor: 'rgba(167, 139, 250, 0.08)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 }
+                    ];
+                    yAxisOptions = { min: 0, max: 100, ticks: { color: '#adb5bd', callback: function(v) { return v + '%'; } }, grid: { color: '#444' } };
+                } else if (mode === 'poe') {
+                    datasets = [
+                        { label: '⚡ PoE 總供電負載', data: res.poe, borderColor: '#20c997', backgroundColor: 'rgba(32, 201, 151, 0.08)', fill: true, tension: 0.3, pointRadius: 1, pointHoverRadius: 6, borderWidth: 2 }
+                    ];
+                    yAxisOptions = { min: 0, suggestedMax: 100, ticks: { color: '#adb5bd', callback: function(v) { return v + ' W'; } }, grid: { color: '#444' } };
+                } else if (mode === 'temp') {
+                    datasets = [
+                        { label: '🌡️ 系統核心溫度', data: res.temp, borderColor: '#dc3545', backgroundColor: 'rgba(220, 53, 69, 0.08)', fill: true, tension: 0.3, pointRadius: 1, pointHoverRadius: 6, borderWidth: 2 }
+                    ];
+                    yAxisOptions = { min: 20, suggestedMax: 80, ticks: { color: '#adb5bd', callback: function(v) { return v + ' °C'; } }, grid: { color: '#444' } };
+                }
+
+                // 💡 [微創修正] 讓 Chart.js 重新與上面組合好的效能型 datasets 與 yAxisOptions 完美咬合
+                trafficChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: { 
+                        labels: res.labels, 
+                        datasets: datasets 
+                    },
+                    options: {
+                        animation: false, 
+                        responsive: true, maintainAspectRatio: false,
+                        interaction: { mode: 'index', intersect: false }, 
+                        plugins: { 
+                            legend: { position: 'bottom', labels: {color: '#fff'} },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(c) {
+                                        // 依據不同模式動態給予提示框後綴單位
+                                        let unit = mode === 'cpu' ? '%' : (mode === 'poe' ? ' W' : ' °C');
+                                        return c.dataset.label + ': ' + c.raw + unit;
+                                    }
+                                }
+                            }
+                        },
+                        scales: { 
+                            x: { ticks: { color: '#adb5bd', font: { size: 11 }, maxTicksLimit: 12 }, grid: { display: false } }, 
+                            y: yAxisOptions 
+                        }
+                    },
+                    plugins: [crosshairPlugin] 
+                });
+            } else { document.getElementById('trafficChartContainer').innerHTML = '<div class="alert alert-dark text-center mt-5 py-4">此時間區間內尚無效能紀錄（背景輪詢正在累積首批快照）。</div>'; }
+        }).catch(err => { document.getElementById('trafficChartContainer').innerHTML = `<div class="alert alert-danger text-center mt-5">通訊失敗：${err.message}</div>`; });
+    }
+</script>

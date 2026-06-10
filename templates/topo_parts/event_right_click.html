@@ -1,0 +1,1581 @@
+<style>
+    /* 🌟 終極修正：解除 Bootstrap Tooltip 預設的 200px 寬度限制，強迫每一行文字一排到底絕對不換行！ */
+    .tooltip-inner {
+        max-width: none !important;      /* 移除最大寬度限制 */
+        white-space: nowrap !important;  /* 強制文字不准自動斷行 */
+        text-align: left !important;     /* 確保文字整齊靠左對齊 */
+        padding: 8px 12px !important;    /* 稍微增加一點內邊距讓畫面更好看 */
+    }
+</style>
+
+<div class="modal fade" id="snmpDataModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable modal-dialog-centered" style="max-width: 1200px;">
+    <div class="modal-content bg-dark text-white shadow-lg border-secondary">
+      <div class="modal-header border-secondary py-2">
+        <h6 class="modal-title text-warning fw-bold" id="snmpModalTitle"><i class="bi bi-terminal me-2"></i>SNMP 原始資料庫</h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" id="snmpModalBody" style="padding: 1rem;"></div>
+      <div class="modal-footer border-secondary py-1">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">關閉</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="portIpModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+  <div class="modal-dialog modal-dialog-centered" style="max-width: 400px;">
+    <div class="modal-content bg-dark text-white shadow-lg border-secondary">
+      <div class="modal-header border-secondary py-2 align-items-start" style="background-color: #1a202c;">
+        <div class="modal-title text-info fw-bold w-100 pe-2" id="portIpModalTitle"></div>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body p-2" id="portIpModalBody" style="max-height: 60vh; overflow-y: auto; background-color: #11151c;">
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="sshCredentialsModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+  <div class="modal-dialog modal-sm modal-dialog-centered">
+    <div class="modal-content bg-dark text-white border-info shadow-lg">
+      <div class="modal-header border-secondary py-2">
+        <h6 class="modal-title text-info fw-bold" id="sshModalTitle"><i class="bi bi-shield-lock me-2"></i>深度掃描授權</h6>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 0.85rem;" class="text-white-50 mb-3" id="sshModalDesc">此設備支援底層光學診斷。請提供具有檢視權限的 SSH 帳密（此紀錄將不會被儲存）。</p>
+        
+        <input type="text" id="temp-ssh-user" class="form-control bg-dark text-white border-secondary mb-2" placeholder="帳號 (例: fiber)">
+        <input type="password" id="temp-ssh-pass" class="form-control bg-dark text-white border-secondary mb-3" placeholder="密碼">
+        
+        <div class="d-flex gap-2">
+            <button class="btn btn-outline-secondary w-50" id="btn-ssh-skip" onclick="submitScan(false)">直接盲掃</button>
+            <button class="btn btn-info w-50 fw-bold" id="btn-ssh-submit" onclick="submitScan(true)">執行驗證</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+    let pendingScanIp = "";
+
+	// 💡 終極修正：動態抽換 HTML 內容，完美區隔 Palo Alto 與 Aruba
+    function triggerSecureScan(ip, brand, model) {
+        pendingScanIp = ip;
+        let brandStr = (brand || '').toUpperCase();
+        let modelStr = (model || '').toUpperCase();
+        
+        console.log(`[觸發掃描] 準備檢查 IP: ${ip} | 廠牌: ${brandStr} | 型號: ${modelStr}`);
+
+        let titleEl = document.getElementById('sshModalTitle');
+        let descEl = document.getElementById('sshModalDesc');
+        let userEl = document.getElementById('temp-ssh-user');
+        let passEl = document.getElementById('temp-ssh-pass');
+        let btnSubmit = document.getElementById('btn-ssh-submit');
+        let btnSkip = document.getElementById('btn-ssh-skip');
+
+        // 🌟 1. 識別是否為 Palo Alto 家族設備 (回歸 SSH 機器人流程)
+        if (brandStr.includes("PALO") || brandStr.includes("PAN") || modelStr.includes("PA-") || modelStr.includes("PAN")) {
+            if(titleEl) titleEl.innerHTML = '<i class="bi bi-shield-lock text-warning me-2"></i>Palo Alto SSH 授權';
+            if(descEl) descEl.innerHTML = '偵測到 Palo Alto 防火牆！請提供具有 CLI 檢視權限的 <span class="text-warning fw-bold">SSH 帳號與密碼</span>，供背景機器人撈取實體光學數據：';
+            
+            // 💡 恢復顯示帳號與密碼欄位！
+            if(userEl) { userEl.value = ''; userEl.style.display = 'block'; userEl.placeholder = '管理員帳號 (例: admin)'; } 
+            if(passEl) { passEl.value = ''; passEl.placeholder = '管理員密碼'; }
+            if(btnSubmit) btnSubmit.innerText = '執行掃描';
+            if(btnSkip) btnSkip.innerText = '取消';
+
+            let modalEl = document.getElementById('sshCredentialsModal');
+            if (modalEl) {
+                let sshModal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+                sshModal.show();
+            }
+        } 
+        // 🌟 2. 識別為 Aruba CX 家族設備 (走 SSH 流程)
+        else if (brandStr.includes("ARUBA") || modelStr.includes("CX8") || modelStr.includes("AOS-CX")) {
+            if(titleEl) titleEl.innerHTML = '<i class="bi bi-shield-lock text-info me-2"></i>Aruba SSH 深度授權';
+            if(descEl) descEl.innerHTML = '此設備支援底層光學診斷。請提供具有 CLI 檢視權限的 <span class="text-info fw-bold">SSH 連線帳密</span>，供背景機器人撈取實體晶片數據：';
+            
+            // 恢復顯示帳號欄位
+            if(userEl) { userEl.value = ''; userEl.style.display = 'block'; userEl.placeholder = '帳號 (例: fiber)'; }
+            if(passEl) { passEl.value = ''; passEl.placeholder = '密碼'; }
+            if(btnSubmit) btnSubmit.innerText = '執行掃描';
+            if(btnSkip) btnSkip.innerText = '跳過 SSH';
+
+            let modalEl = document.getElementById('sshCredentialsModal');
+            if (modalEl) {
+                let sshModal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+                sshModal.show();
+            }
+        } 
+        // 🌟 3. Ruckus, DELL, D-Link 等標準 SNMP 設備直接高速無聲盲掃
+        else {
+            submitScan(false);
+        }
+    }
+
+// 💡 1. 加入輕量級的「吐司訊息」產生器 (自動套用 Bootstrap 樣式)
+    function showToast(message, type="info") {
+        let toastContainer = document.getElementById('sys-toast-container');
+        if (!toastContainer) {
+            toastContainer = document.createElement('div');
+            toastContainer.id = 'sys-toast-container';
+            // 固定在畫面右上方，絕對置頂
+            toastContainer.style.cssText = 'position: fixed; top: 20px; right: 20px; z-index: 99999;';
+            document.body.appendChild(toastContainer);
+        }
+        
+        let bgClass = type === 'success' ? 'bg-success' : (type === 'error' ? 'bg-danger' : 'bg-info');
+        let toastEl = document.createElement('div');
+        toastEl.className = `toast align-items-center text-white ${bgClass} border-0 mb-2 show shadow-lg`;
+        toastEl.setAttribute('role', 'alert');
+        toastEl.innerHTML = `
+            <div class="d-flex">
+                <div class="toast-body fw-bold" style="font-size: 0.9rem;">
+                    ${message}
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('.toast').remove()"></button>
+            </div>
+        `;
+        toastContainer.appendChild(toastEl);
+        
+        // 3 秒後自動消失
+        setTimeout(() => {
+            if (document.body.contains(toastEl)) {
+                toastEl.classList.remove('show');
+                setTimeout(() => toastEl.remove(), 300);
+            }
+        }, 3000);
+    }
+
+    // 💡 2. 改寫發送掃描的函式 (移除所有 alert，並加入自動重載)
+    function submitScan(useSsh) {
+        let payload = {};
+        if (useSsh) {
+            payload.ssh_user = document.getElementById('temp-ssh-user').value;
+            payload.ssh_pass = document.getElementById('temp-ssh-pass').value;
+        }
+
+        // 關閉可能開啟的密碼 Popup 視窗
+        let modalEl = document.getElementById('sshCredentialsModal');
+        if (modalEl) {
+            let modal = bootstrap.Modal.getInstance(modalEl);
+            if(modal) modal.hide();
+        }
+
+        // 右上角彈出開始掃描的吐司訊息，不會阻擋使用者操作
+        showToast(`🚀 正在對 ${pendingScanIp} 進行深度探測，請稍候...`, 'info');
+
+        fetch(`/api/scan_node/${pendingScanIp}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(data => {
+            if(data.success) {
+                // 成功後彈出綠色吐司訊息
+                showToast("✅ 掃描完成！正在為您載入最新數據...", "success");
+                
+                // 💡 終極解法：等待 1.2 秒讓使用者看完訊息後，程式自動幫您重整畫面 (等同自動按 Ctrl+F5)
+                // 這樣重新點開右鍵時，保證 100% 都是最新光纖資料！
+                // 💡 終極解法：無閃爍原地更新
+                setTimeout(() => {
+                    // 1. 先去後端拉取剛剛掃描完的最新節點資料 (極速模式)
+                    fetch('/api/topology/fast?t=' + Date.now())
+                    .then(r => r.json())
+                    .then(res => {
+                        if (!res.empty) {
+                            // 2. 更新底層拓樸圖的記憶體資料庫
+                            if (typeof nodesDataSet !== 'undefined') {
+                                nodesDataSet.update(res.nodes); 
+                            }
+                        }
+                        // 3. 呼叫您寫好的完美重繪函式，原地抽換面板 DOM！
+                        if (typeof window.updateRightClickModalContent === 'function') {
+                            window.updateRightClickModalContent(pendingScanIp);
+                        }
+                    });
+                }, 1000);
+                
+            } else {
+                showToast("❌ 掃描失敗：" + data.message, "error");
+            }
+        })
+        .catch(err => {
+            console.error(err);
+            showToast("⚠️ 網路或伺服器發生錯誤，請檢查連線", "error");
+        });
+    }
+
+    // 💡 載入並顯示 NCM 歷史設定檔 (支援指定版本 index)
+    async function loadDeviceConfig(ip, index = 0) {
+        let codeBlock = document.getElementById('config-code-block');
+        let timeLabel = document.getElementById('config-time-label');
+        let selIdx = document.getElementById('selConfigHistoryIndex');
+        
+        if (index == 0) {
+            codeBlock.innerText = "🔄 正在向伺服器歷史檔案館拉取最新設定檔...";
+        } else {
+            codeBlock.innerText = `🔄 正在切換至第 ${parseInt(index)+1} 次歷史設定檔...`;
+        }
+        timeLabel.innerHTML = '<i class="bi bi-clock-history me-1"></i>備份時間：查詢中...';
+
+        try {
+            // 帶入選擇的 index 參數
+            let response = await fetch(`/api/device/get_config?ip=${ip}&index=${index}`);
+            
+            // 權限被擋處理
+            if (response.status === 401 || response.status === 403) {
+                timeLabel.innerHTML = '<i class="bi bi-shield-lock-fill text-danger me-1"></i>存取被拒';
+                codeBlock.innerText = "[系統提示] 權限不足！您需要有管理員或稽核員權限才能檢視設備的底層設定檔。";
+                return;
+            }
+            
+            let result = await response.json();
+
+            if (result.status === 'success') {
+                timeLabel.innerHTML = `<i class="bi bi-check-circle-fill text-success me-1"></i>備份時間：<span class="text-white">${result.backup_time}</span>`;
+                codeBlock.innerText = result.config; 
+                
+                // 🌟 關鍵升級：根據後端回傳的歷史清單，動態更新下拉選單！
+                if (selIdx && result.history_list) {
+                    selIdx.innerHTML = ''; // 清空原本寫死的選項
+                    result.history_list.forEach((timeStr, i) => {
+                        let label = i === 0 ? "最新" : (i === 1 ? "次新" : "最早");
+                        let selected = (i == index) ? "selected" : "";
+                        // 擷取月日與時分 (MM-DD HH:mm)，讓選單不會太長而影響版面
+                        let shortTime = timeStr.substring(5, 16);
+                        selIdx.innerHTML += `<option value="${i}" ${selected}>第 ${i+1} 次 (${shortTime})</option>`;
+                    });
+                }
+            } else {
+                timeLabel.innerHTML = '<i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>尚無資料';
+                codeBlock.innerText = `[系統提示] ${result.message}\n\n💡 請先在拓樸圖上對設備點擊「左鍵」，執行【立即備份設定檔】。`;
+                if (selIdx) selIdx.innerHTML = '<option value="0">無備份紀錄</option>';
+            }
+        } catch (err) {
+            codeBlock.innerText = "❌ 讀取失敗，無法與後端資料庫連線。";
+        }
+    }
+</script>
+
+<script>
+// 💡 全域防呆通報引擎
+if (typeof window.logFrontendAction !== 'function') {
+    window.logFrontendAction = function(action, target, details) {
+        fetch('/api/audit-logs/client', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action, target: target, details: details, username: 'SystemUser' })
+        }).catch(e => console.error(e));
+    };
+}
+
+async function showPortIps(event, deviceName, deviceIp, portName, ipListStr, isUplink) {
+    event.preventDefault();   
+    event.stopPropagation();
+    
+    let titleEl = document.getElementById('portIpModalTitle');
+    let bodyEl = document.getElementById('portIpModalBody');
+    let devNameDisplay = deviceName && deviceName !== 'undefined' ? deviceName : deviceIp;
+    
+    window.logFrontendAction(
+        "前端介面操作", 
+        `調閱埠位 [${portName}]`, 
+        `管理員對設備 [ ${devNameDisplay} ] (IP: ${deviceIp}) 的實體連接埠 【 ${portName} 】 點擊右鍵，查閱該孔位底下的終端 IP 與連線設備清單。`
+    );
+    
+    let ips = ipListStr ? ipListStr.split(',').filter(ip => ip.trim() !== '') : [];
+    
+    titleEl.innerHTML = `
+        <div class="d-flex flex-column w-100">
+            <div style="font-size: 1.05rem;"><i class="bi bi-hdd-network me-2"></i>${devNameDisplay}</div>
+            <div class="text-white-50 mt-1 mb-1 d-flex align-items-center" style="font-size: 0.85rem; white-space: nowrap;">
+                <span>IP: ${deviceIp}</span> <span class="mx-2">|</span> <span>介面: <span class="text-info fw-bold">${portName}</span></span>
+            </div>
+        </div>`;
+    bodyEl.innerHTML = '<div class="text-center p-4 text-white-50"><div class="spinner-border spinner-border-sm me-2"></div>正在比對設備資料庫...</div>';
+    
+    let modal = bootstrap.Modal.getInstance(document.getElementById('portIpModal')) || new bootstrap.Modal(document.getElementById('portIpModal'));
+    modal.show();
+
+    let apNodes = [];
+    let normalIps = [];
+
+    if (!isUplink && ips.length > 0) {
+        try {
+            let response = await fetch('/api/devices');
+            let allDevices = await response.json();
+
+            ips.forEach(ip => {
+                let node = allDevices.find(n => n.ip === ip);
+                let isAP = false;
+                if (node) {
+                    let devType = String(node.type || node.device_type || '').toUpperCase();
+                    let sysName = String(node.sysName || node.name || '').toUpperCase();
+                    let brand = String(node.brand || '').toUpperCase();
+                    let model = String(node.model || '').toUpperCase();
+                    let descr = String(node.sys_descr || node.sysDescr || '').toUpperCase();
+                    
+                    if (devType.includes('AP') || devType.includes('無線') || devType.includes('WIFI') || devType.includes('WIRELESS')) {
+                        isAP = true;
+                    } else if (/\bAP\b/i.test(sysName) || /\bWIFI\b/i.test(sysName) || sysName.includes('RUCKUS') || sysName.includes('ARUBA')) {
+                        isAP = true;
+                    } else if (brand.includes('RUCKUS') || brand.includes('ARUBA')) {
+                        isAP = true;
+                    } else if (model.includes('AP') || model.includes('IAP') || model.includes('ICX')) {
+                        isAP = true;
+                    } else if (descr.includes('RUCKUS WIRELESS') || descr.includes('ARUBAOS')) {
+                        isAP = true;
+                    }
+                }
+                if (isAP) apNodes.push(node);
+                else normalIps.push(ip);
+            });
+        } catch(e) {
+            console.error("無法取得全網設備:", e);
+            normalIps = ips;
+        }
+    } else {
+        normalIps = ips;
+    }
+
+    let finalBodyHtml = '';
+
+    if (apNodes.length > 0) {
+        let apBannerHtml = `<div class="mb-2 pb-2 border-bottom border-secondary">`;
+        apNodes.forEach(ap => {
+            let apName = ap.name || ap.sysName || ap.ip;
+            apBannerHtml += `
+                <div class="d-flex justify-content-between align-items-center mb-1 bg-black p-2 rounded border border-warning" style="box-shadow: 0 0 5px rgba(255,193,7,0.2);">
+                    <span class="text-warning fw-bold text-truncate me-2" style="font-size: 0.85rem;" title="${apName}"><i class="bi bi-broadcast me-2"></i>${apName}</span>
+                    <span class="badge bg-success text-white" style="font-size: 0.8rem; white-space: nowrap;">${ap.ip}</span>
+                </div>`;
+        });
+        apBannerHtml += `</div>`;
+        finalBodyHtml += apBannerHtml;
+    }
+    
+    if (normalIps.length === 0) {
+        if (apNodes.length > 0) {
+            finalBodyHtml += '<div class="p-3 text-center text-white-50 bg-black border border-secondary rounded my-2" style="font-size: 0.85rem;"><i class="bi bi-info-circle mb-2 d-block fs-4 opacity-50"></i>除了上述 AP 外，<br>目前無其他終端 IP 紀錄。</div>';
+        } else {
+            finalBodyHtml += '<div class="p-3 text-center text-white-50 bg-black border border-secondary rounded my-2" style="font-size: 0.85rem;"><i class="bi bi-info-circle mb-2 d-block fs-4 opacity-50"></i>此連接埠目前無任何對應的 IP 紀錄。</div>';
+        }
+    } else {
+        let listHtml = `<div class="text-success fw-bold mb-2 ps-1" style="font-size: 0.85rem;"><i class="bi bi-check-circle-fill me-1"></i>共追蹤到 ${normalIps.length} 個 IP</div>`;
+        listHtml += '<div class="list-group list-group-flush border border-secondary rounded">';
+        normalIps.forEach(ip => {
+            listHtml += `<div class="list-group-item bg-black text-white-50 border-secondary py-2 d-flex align-items-center" style="font-size: 0.9rem;"><i class="bi bi-pc-display me-2 text-info"></i>${ip}</div>`;
+        });
+        listHtml += '</div>';
+        finalBodyHtml += listHtml;
+    }
+    
+    bodyEl.innerHTML = finalBodyHtml;
+}
+
+function scanSingleDevice(ip) {
+    let btn = document.getElementById('btn-single-scan');
+    if(!btn) return;
+    let originalHtml = btn.innerHTML;
+    
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 掃描中...';
+    btn.classList.add('disabled');
+
+    fetch(`/api/scan_node/${ip}`, { method: 'POST' })
+    .then(res => res.json())
+    .then(data => {
+        if (data.success) {
+            fetch('/api/topology/fast').then(r=>r.json()).then(res => {
+                if(!res.empty) nodesDataSet.update(res.nodes);
+                if(typeof window.updateRightClickModalContent === 'function') {
+                    window.updateRightClickModalContent(ip);
+                }
+                if (typeof showToast === 'function') {
+                    showToast(`✅ 設備 ${ip} 獨立重新掃描與面板數據已原地更新完成！`, 'success');
+                }
+            });
+        } else {
+            if (typeof showToast === 'function') showToast(`❌ 獨立掃描失敗: ${data.message}`, 'danger');
+            else alert('❌ 掃描失敗：' + data.message);
+            btn.innerHTML = originalHtml; btn.classList.remove('disabled');
+        }
+    })
+    .catch(err => {
+        if (typeof showToast === 'function') showToast(`❌ 網路錯誤: 伺服器無回應`, 'danger');
+        btn.innerHTML = originalHtml; btn.classList.remove('disabled');
+    });
+}
+
+function bindRightClickEvent() {
+    let isSamePort = (pA, pB) => {
+        if (!pA || !pB) return false;
+        let a = String(pA).toLowerCase().trim();
+        let b = String(pB).toLowerCase().trim();
+        if (a === b) return true;
+        
+        let numA = a.match(/\d+/g) || [];
+        let numB = b.match(/\d+/g) || [];
+        if (numA.length > 0 && numB.length > 0 && numA[numA.length-1] === numB[numB.length-1]) {
+            if (numA.length === 1 || numB.length === 1) return true;
+            if (numA[numA.length-2] === numB[numB.length-2]) return true;
+        }
+        return false;
+    };
+
+    function generateSwitchPanelHtml(nodeData) {
+        let rawData = {};
+        try { rawData = JSON.parse(nodeData.snmp_raw || "{}"); } catch(e){}
+        let ifNames = rawData[4] || {};
+        if (Object.keys(ifNames).length === 0) return '';
+        let ifHighSpeed = rawData[5] || {}; let ifSpeed = rawData[6] || {};
+        let ifAlias = rawData[9] || {}; let fdbData = rawData[10] || {};     
+        let bpToIfIndex = rawData[11] || {}; let qFdbData = rawData[12] || {};    
+        let arpData = rawData[13] || {}; let ruckusArpPort = rawData[16] || {};
+        let traffic = nodeTrafficData[nodeData.ip] || {};
+		
+		// 💡 提取剛抓回來的新維度資料
+        let adminStatus = rawData[32] || {};
+		let operStatus = rawData[44] || {}; // 🌟 新增：接收由快速輪詢即時揉入的實體網孔狀態碼
+        let domTx = rawData[33] || {};
+        let domRx = rawData[34] || {};
+		// 舊版 Aruba/HP 光纖資料
+        let hpDomTx = rawData[35] || {};
+        let hpDomRx = rawData[36] || {};
+        let entPhysicalName = rawData[37] || {};
+        // 💡 新增 Aruba CX 專屬陣列
+		let arubaCxTx = rawData[38] || {};
+        let arubaCxRx = rawData[39] || {};
+        // 💡 接收 Ruckus 新版 DOM 與 SSH 資料 (因插入新 OID，SSH 索引順延至 42)
+        let ruckusNewTx = rawData[40] || {};
+        let ruckusNewRx = rawData[41] || {};
+        let arubaSshDom = rawData[42] || {};
+		// 💡 接收背景 HTTPS 機器人截獲的 Palo Alto 全機 mW 光學數據
+        let paloAltoDom = rawData[43] || {};
+        
+        let entSensor = rawData[31] || {}; // 通用感測器資料庫
+
+        let poeTotal = 0;
+        if (rawData[25]) {
+            let val = parseInt(Object.values(rawData[25])[0]);
+            if (!isNaN(val) && val > 0 && val < 50000) poeTotal = val;
+        }
+
+        let sum_mW = 0;
+        [18, 19, 20].forEach(idx => {
+            if (rawData[idx]) {
+                Object.values(rawData[idx]).forEach(v => {
+                    let val = parseInt(v);
+                    if (!isNaN(val) && val > 0 && val < 100000 && val !== 1500) sum_mW += val;
+                });
+            }
+        });
+        let sum_W = 0;
+        if (rawData[21]) {
+            Object.values(rawData[21]).forEach(v => {
+                let val = parseFloat(v);
+                if (!isNaN(val) && val > 0 && val < 100) sum_W += val;
+            });
+        }
+        let poeUsed = Math.round((sum_mW / 1000) + sum_W);
+
+        let isPoeDevice = (nodeData.is_poe == 1 || nodeData.is_poe === '1' || poeTotal > 0 || poeUsed > 0 || /poe/i.test(nodeData.model || '') || /poe/i.test(nodeData.sysName || ''));
+        let allowPoeControl = (nodeData.is_poe == 1 || nodeData.is_poe === '1');
+        
+        let activeIfIdxs = new Set();
+        let checkFdb = (fdb) => { if(!fdb) return; Object.keys(fdb).forEach(suffix => { let bp = String(fdb[suffix]); let ifIdx = bpToIfIndex[bp] !== undefined ? String(bpToIfIndex[bp]) : bp; activeIfIdxs.add(String(ifIdx)); }); };
+        checkFdb(fdbData); checkFdb(qFdbData);
+        Object.keys(arpData).forEach(suffix => { let parts = suffix.split('.'); if(parts.length >= 4) { let ifIdx = parts.slice(0, -4).join('.'); activeIfIdxs.add(String(ifIdx)); }});
+        Object.keys(ruckusArpPort).forEach(ip => { activeIfIdxs.add(String(ruckusArpPort[ip])); });
+        
+        let globalMacToIp = new Map();
+        if (typeof cachedTopologyData !== 'undefined' && cachedTopologyData.nodes) {
+            cachedTopologyData.nodes.forEach(n => {
+                if (!n.snmp_raw || n.snmp_raw === '{}') return;
+                try { let rData = JSON.parse(n.snmp_raw); let aData = rData[13]; if (aData) { Object.keys(aData).forEach(s => { let p = s.split('.'); if (p.length >= 4) { let ip = p.slice(-4).join('.'); let mac = String(aData[s]); let macClean = mac.replace(/[^a-fA-F0-9]/g, '').toLowerCase(); if (macClean) globalMacToIp.set(macClean, ip); } }); } } catch(e) {}
+            });
+        }
+        
+        let portToMacs = {}; let normalizeMac = (m) => String(m).replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+        let processFdbForPort = (fdbDict, isQbridge) => {
+            if (!fdbDict) return;
+            Object.keys(fdbDict).forEach(suffix => {
+                let macClean = '';
+                if (isQbridge) { let parts = suffix.split('.'); if (parts.length >= 7) macClean = parts.slice(1, 7).map(n => parseInt(n).toString(16).padStart(2, '0').toLowerCase()).join(''); } 
+                else { macClean = suffix.split('.').map(n => parseInt(n).toString(16).padStart(2, '0').toLowerCase()).join(''); }
+                if (!macClean) return;
+                let bPort = String(fdbDict[suffix]); let ifIdx = bpToIfIndex[bPort] !== undefined ? String(bpToIfIndex[bPort]) : bPort;
+                if (!portToMacs[ifIdx]) portToMacs[ifIdx] = new Set();
+                portToMacs[ifIdx].add(macClean);
+            });
+        };
+        processFdbForPort(fdbData, false); processFdbForPort(qFdbData, true);
+
+        const HARDWARE_PROFILES = [
+            {
+                brand: /Forti/i, model: /.*/,
+                ports: (name, num, lowerName) => {
+                    let mPort = lowerName.match(/^port(\d+)$/);
+                    if (mPort) return { type: 'rj45', rowGroup: 1, label: mPort[1] }; 
+                    let mSfp = lowerName.match(/^(x|sfp)(\d+)$/);
+                    if (mSfp) return { type: 'sfp', rowGroup: 2, label: mSfp[1].toUpperCase() + mSfp[2] }; 
+                    let short = name.length > 4 ? name.substring(0, 4) : name;
+                    return { type: 'logic', rowGroup: 999, label: short.toUpperCase(), isLogic: true };
+                }
+            },
+            {
+                brand: /Aruba/i, model: /CX8100/i,
+                ports: (name, num, lowerName) => {
+                    if (num >= 1 && num <= 48) return { type: 'rj45', rowGroup: Math.ceil(num / 24), label: num }; 
+                    if (num >= 49 && num <= 52) return { type: 'sfp', rowGroup: 3, label: num }; 
+                    return null;
+                }
+            },
+            {
+                brand: /MikroTik/i, model: /.*/, 
+                ports: (name, num, lowerName) => {
+                    if (lowerName.includes('sfp') && !lowerName.includes('qsfp')) {
+                        return { type: 'sfp', rowGroup: Math.ceil(num / 24), label: num }; 
+                    }
+                    if (lowerName.includes('qsfp')) {
+                        let m = lowerName.match(/qsfp-plus(\d+)/); let b = m ? m[1] : num;
+                        let sm = lowerName.match(/qsfp-plus\d+-(\d+)/); let l = sm ? `Q${b}.${sm[1]}` : `Q${b}`;
+                        return { type: 'sfp', rowGroup: 99, label: l }; 
+                    }
+                    if (lowerName.includes('ether')) {
+                        return { type: 'rj45', rowGroup: 50 + Math.ceil(num / 24), label: 'E'+num }; 
+                    }
+                    return null;
+                }
+            },
+            {
+                brand: /Dell|X1052/i, model: /.*/,
+                ports: (name, num, lowerName) => {
+                    let m = lowerName.match(/(gi|te).*?(\d+)\/(\d+)\/(\d+)/);
+                    if (m) {
+                        let isTe = m[1] === 'te';
+                        let u = parseInt(m[2]), mod = parseInt(m[3]), p = parseInt(m[4]);
+                        let isUplink = isTe || mod >= 2;
+                        let rowGrp = isUplink ? (u * 100) + 99 : (u * 100) + Math.ceil(p / 24);
+                        let lbl = isUplink ? `${mod}/${p}` : p;
+                        return { type: isTe ? 'sfp' : 'rj45', rowGroup: rowGrp, label: lbl, _u: u, _mod: mod, _p: p };
+                    }
+                    return { type: 'logic', rowGroup: 9999, label: num, isLogic: true };
+                }
+            },
+            {
+                brand: /Ruckus|Foundry/i, model: /ICX/i,
+                ports: (name, num, lowerName) => {
+                    let m = lowerName.match(/(\d+)\/(\d+)\/(\d+)/);
+                    if (!m) return null;
+                    let u = parseInt(m[1]), mod = parseInt(m[2]), p = parseInt(m[3]);
+                    let type = (lowerName.includes('xg') || lowerName.includes('te') || mod > 1) ? 'sfp' : 'rj45';
+                    let rowGrp = mod === 1 ? (u * 100) + Math.ceil(p / 24) : (u * 100) + 99;
+                    let lbl = mod === 1 ? p : `${mod}/${p}`;
+                    return { type: type, rowGroup: rowGrp, label: lbl, _u: u, _mod: mod, _p: p }; 
+                }
+            },
+            {
+                brand: /D-Link/i, model: /.*/, 
+                ports: (name, num, lowerName) => {
+                    if (/802\.1q|dot1q/i.test(lowerName)) return null;
+                    if (num >= 1 && num <= 48 && !lowerName.includes('te') && !lowerName.includes('sfp')) return { type: 'rj45', rowGroup: 1, label: num };
+                    if (num >= 49 || lowerName.includes('te') || lowerName.includes('sfp')) return { type: 'sfp', rowGroup: 1, label: num };
+                    return null;
+                }
+            }
+        ];
+
+        let matchedProfile = HARDWARE_PROFILES.find(profile => 
+            profile.brand.test(nodeData.brand || '') && profile.model.test(nodeData.model || '')
+        );
+
+        let isMikroTik = /mikrotik/i.test(nodeData.brand || '');
+        let etherCount = 0;
+        if (isMikroTik) {
+            for (let k in ifNames) { if (ifNames[k].toLowerCase().includes('ether')) etherCount++; }
+        }
+
+        let physicalPorts = [];
+        for (let idx in ifNames) {
+            let name = cleanStr(ifNames[idx]); let lowerName = name.toLowerCase();
+            
+            if (/(vlan|loop|tun|null|cpu|bridge|switch|internal|vrrp|eoip|pppoe|gre|sit|wireguard|ovpn|l2tp|sstp|pptp)/i.test(lowerName)) {
+                if (!lowerName.includes('internal') || !/forti/i.test(nodeData.brand)) continue;
+            }
+
+            let portAlias = ifAlias[idx] ? decodeHexIfNeeded(ifAlias[idx]).toLowerCase() : '';
+            let isMgmt = /(mgmt|mgt|management|^eth0$|^me0$|^vme$|^oob$)/i.test(lowerName);
+            if (isMikroTik && lowerName.includes('ether') && etherCount === 1) { isMgmt = true; }
+
+            let isLag = (/(^lag|^lg|^po\d+|^trk|^bond)/i.test(lowerName) && !/port|gige|pon|ether/i.test(lowerName)) || /802\.1q|dot1q/i.test(lowerName);
+
+            let speedVal = 0;
+            if (ifHighSpeed[idx]) speedVal = parseInt(ifHighSpeed[idx]);
+            if (!speedVal && ifSpeed[idx]) { let bps = parseInt(ifSpeed[idx]); speedVal = bps >= 4294967295 ? 10000 : Math.floor(bps / 1000000); }
+            
+            let portNum = parseInt(idx);
+            let nMatch = name.match(/\d+/g);
+            if (nMatch) {
+                if (/mikrotik/i.test(nodeData.brand) && lowerName.includes('qsfp')) portNum = parseInt(nMatch[0]); 
+                else portNum = parseInt(nMatch[nMatch.length - 1]); 
+            }
+            
+            let hwType = null; let rowGroup = null; let shortLabel = null;
+            let _u = 0, _mod = 0, _p = 0;
+            
+            if (matchedProfile) {
+                let conf = matchedProfile.ports(name, portNum, lowerName);
+                if (conf) { 
+                    hwType = conf.type; rowGroup = conf.rowGroup; shortLabel = conf.label; 
+                    _u = conf._u || 0; _mod = conf._mod || 0; _p = conf._p || 0;
+                    if (conf.isLogic) isLag = true; 
+                }
+            }
+            
+            if (!hwType || !rowGroup) {
+                if (/^\d+$/.test(lowerName) || (!lowerName.includes('eth') && !lowerName.includes('gi') && !lowerName.includes('te') && !lowerName.includes('sfp') && !lowerName.includes('port'))) {
+                    hwType = 'rj45'; rowGroup = 999; isLag = true; shortLabel = name.length > 4 ? name.substring(0,4) : name;
+                } else {
+                    let isSfpGuess = (speedVal >= 10000) || /sfp|te|xg|forty|hundred/i.test(lowerName);
+                    hwType = isSfpGuess ? 'sfp' : 'rj45';
+                    let unit = 1, mod = 1;
+                    let m = name.match(/(\d+)\/(\d+)\/(\d+)/);
+                    if (m) {
+                        unit = parseInt(m[1]); mod = parseInt(m[2]); portNum = parseInt(m[3]);
+                        rowGroup = (unit * 100) + (mod * 10) + Math.ceil(portNum / 24);
+                        _u = unit; _mod = mod; _p = portNum;
+                    } else {
+                        rowGroup = Math.ceil(portNum / 24) || 1; 
+                        _p = portNum;
+                    }
+                    shortLabel = portNum;
+                }
+            }
+
+            physicalPorts.push({ 
+                idx: idx, name: name, lowerName: lowerName, speed: speedVal, num: portNum, 
+                hwType: hwType, rowGroup: rowGroup, shortLabel: shortLabel,
+                isMgmt: isMgmt, isLag: isLag, _u: _u, _mod: _mod, _p: _p
+            });
+        }
+        
+        if (physicalPorts.length === 0) return '';
+        
+        let standardPorts = []; let logicPorts = [];
+        physicalPorts.forEach(p => {
+            if (p.isLag || p.isMgmt) logicPorts.push(p); 
+            else standardPorts.push(p);
+        });
+
+        let portSorter = (a, b) => {
+            if (a.rowGroup !== b.rowGroup) return a.rowGroup - b.rowGroup;
+            if (a._u !== b._u) return a._u - b._u;
+            if (a._mod !== b._mod) return a._mod - b._mod;
+            if (a._p !== b._p) return a._p - b._p;
+            return parseInt(a.idx) - parseInt(b.idx);
+        };
+        standardPorts.sort(portSorter);
+        logicPorts.sort(portSorter);
+
+        let renderPortHtml = (p) => {
+            let isUplink = false;
+            if (typeof cachedTopologyData !== 'undefined' && cachedTopologyData.edges) {
+                for (let edge of cachedTopologyData.edges) {
+                    if (edge.from === nodeData.ip) { let ports = (edge.from_port || '').split(','); if (ports.some(ep => isSamePort(ep, p.name))) { isUplink = true; break; } } 
+                    else if (edge.to === nodeData.ip) { let ports = (edge.to_port || '').split(','); if (ports.some(ep => isSamePort(ep, p.name))) { isUplink = true; break; } }
+                }
+            }
+            let treatAsUplink = isUplink || p.isLag || p.lowerName.includes('bond');
+            
+            let isActiveFdb = activeIfIdxs.has(String(p.idx));
+            let tData = traffic[p.idx] || {in_bps: 0, out_bps: 0};
+            let hasTraffic = (tData.in_bps > 0 || tData.out_bps > 0);
+            let poePower = getPoePowerForPort(rawData, p.idx);
+            
+            let portIps = new Set();
+            if (portToMacs[p.idx]) portToMacs[p.idx].forEach(mac => { if (globalMacToIp.has(mac)) portIps.add(globalMacToIp.get(mac)); });
+            if (arpData) { Object.keys(arpData).forEach(suffix => { let parts = suffix.split('.'); if(parts.length >= 4) { let ip = parts.slice(-4).join('.'); let mac = normalizeMac(String(arpData[suffix])); if (portToMacs[p.idx] && portToMacs[p.idx].has(mac)) portIps.add(ip); } }); }
+            if (ruckusArpPort) { Object.keys(ruckusArpPort).forEach(ip => { if (String(ruckusArpPort[ip]) === String(p.idx)) portIps.add(ip); }); }
+
+            // 💡 智慧連線判定：優先採用快速輪詢回傳的實體操作狀態 (ifOperStatus)
+            let isActive = false;
+            let isOperUp = (operStatus[p.idx] == '1');   // 1 代表標準的 Up
+            let isOperDown = (operStatus[p.idx] == '2'); // 2 代表標準的 Down
+
+            if (operStatus[p.idx] !== undefined) {
+                // 🌟 如果快速輪詢有回傳實體狀態，以實體燈號為最高宗旨！
+                isActive = isOperUp;
+            } else {
+                // 備援方案：若該設備剛建立、尚未跑過新版快打輪詢，沿用舊版綜合推算
+                isActive = isActiveFdb || hasTraffic || portIps.size > 0 || (poePower !== null && poePower > 0);
+            }
+			
+            let is10G = p.speed >= 10000;
+            let portClass = p.hwType === 'sfp' ? 'sfp-port' : 'rj45-port';
+            
+            let inErr = (rawData[23] && rawData[23][p.idx]) ? parseInt(rawData[23][p.idx]) : 0;
+            let outErr = (rawData[24] && rawData[24][p.idx]) ? parseInt(rawData[24][p.idx]) : 0;
+            let hasPhysicalError = (inErr > 0 || outErr > 0);
+			
+            // 💡 1. 判斷是否被管理員強制 Shutdown (Admin Status = 2)
+            let isAdminDown = (adminStatus[p.idx] == '2');
+
+            let ledClass = 'led-down'; let glowColor = '';
+            // 💡 2. 賦予 Admin Down 專屬的紫色狀態燈
+            if (isAdminDown) { ledClass = 'led-admin'; glowColor = 'rgba(111, 66, 193, 0.8)'; }
+            else if (hasPhysicalError) { ledClass = 'led-error'; glowColor = 'rgba(255, 0, 0, 0.9)'; }
+            else if (isUplink) { ledClass = 'led-10g'; glowColor = 'rgba(0, 238, 255, 0.8)'; } 
+            else if (isActive) { ledClass = 'led-1g'; glowColor = 'rgba(57, 255, 20, 0.8)'; }
+
+            let borderStyle = '';
+            if (p.isMgmt) { borderStyle = 'border-color: #dc3545;'; if(ledClass !== 'led-down') glowColor = 'rgba(220, 53, 69, 0.8)'; } 
+            else if (p.isLag) { borderStyle = 'border-color: #fd7e14;'; if(ledClass !== 'led-down') glowColor = 'rgba(253, 126, 20, 0.8)'; } 
+            else if (is10G) { borderStyle = 'border-color: #ffe066;'; if(ledClass !== 'led-down') glowColor = 'rgba(255, 224, 102, 0.8)'; } 
+
+            let glowStyle = (ledClass !== 'led-down' && glowColor) ? `box-shadow: 0 0 8px ${glowColor};` : '';
+
+            let shortName = (p.shortLabel !== null && p.shortLabel !== undefined) ? String(p.shortLabel) : String(p.num);
+            if (p.isMgmt && !shortName.match(/^[A-Za-z]/)) { shortName = 'M' + shortName; } 
+            else if (p.isLag && !shortName.match(/^[A-Za-z]/) && !shortName.includes('/')) { shortName = 'L' + shortName; } 
+
+            let labelStyle = shortName.length >= 3 ? "font-size: 0.55rem; letter-spacing: -0.5px;" : "";
+
+            // 💡 3. 多廠牌光纖模組 DOM 智慧擷取與計算 (極致瀑布流解析)
+            let txRaw = null; 
+            let rxRaw = null; 
+
+            // (A) 優先嘗試 新/舊版 Ruckus ICX (支援 .1 子層級索引)
+            let rTx = ruckusNewTx[p.idx] || ruckusNewTx[p.idx + '.1'] || domTx[p.idx];
+            let rRx = ruckusNewRx[p.idx] || ruckusNewRx[p.idx + '.1'] || domRx[p.idx];
+            
+            // 💡 破解 Ruckus 索引陷阱：如果拿 ifIndex (例如 48) 找不到，就去實體設備表 (entPhysicalName) 裡面找對應的光纖模組編號 (例如 2647)
+            if (!rTx && !rRx && Object.keys(entPhysicalName).length > 0) {
+                let pNameLower = p.name.toLowerCase(); // 例如 "1/1/48"
+                for (let eIdx in entPhysicalName) {
+                    let eName = entPhysicalName[eIdx].toLowerCase();
+                    // 如果實體名稱包含 "1/1/48" (例如 "port optics 1/1/48")
+                    if (eName.includes(pNameLower)) {
+                        // 檢查這個實體編號在 DOM 資料庫裡有沒有數值
+                        if (ruckusNewTx[eIdx] || ruckusNewRx[eIdx]) {
+                            rTx = ruckusNewTx[eIdx];
+                            rRx = ruckusNewRx[eIdx];
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 如果有找到 Ruckus 的數值，就正式採用
+            if (rTx || rRx) {
+                txRaw = rTx;
+                rxRaw = rRx;
+            }
+            // (B) 嘗試 新版 Aruba CX OID
+            else if (arubaCxTx[p.idx] || arubaCxRx[p.idx]) {
+                txRaw = arubaCxTx[p.idx];
+                rxRaw = arubaCxRx[p.idx];
+            }
+            // (C) 嘗試 舊版 Ruckus (µW)
+            else if (domTx[p.idx] || domRx[p.idx]) {
+                txRaw = domTx[p.idx];
+                rxRaw = domRx[p.idx];
+            }
+            // (D) 嘗試 舊版 HP/Aruba
+            else if (hpDomTx[p.idx] || hpDomRx[p.idx]) {
+                txRaw = hpDomTx[p.idx];
+                rxRaw = hpDomRx[p.idx];
+            }
+            // (E) 終極備援：呼叫 SSH CLI 引擎的數據 (完美對應 p.name)
+            else if (arubaSshDom[p.name]) {
+                txRaw = arubaSshDom[p.name].tx;
+                rxRaw = arubaSshDom[p.name].rx;
+            }
+			// (E1) 💡 新增：Palo Alto XML API 數據匹配 (完美對應 "ethernet1/1")
+            else if (paloAltoDom[p.name] || paloAltoDom[p.name.toLowerCase()]) {
+                let paPort = paloAltoDom[p.name] || paloAltoDom[p.name.toLowerCase()];
+                txRaw = paPort.tx;
+                rxRaw = paPort.rx;
+            }
+
+            // (F) 如果以上「五大來源」都摃龜，啟動實體感測器跨表查詢 (ENTITY-MIB)
+            if (!txRaw && !rxRaw && Object.keys(entPhysicalName).length > 0) {
+                let pNameLower = p.name.toLowerCase(); 
+                for (let eIdx in entPhysicalName) {
+                    let sensorName = entPhysicalName[eIdx].toLowerCase();
+                    if (sensorName.includes(pNameLower) || sensorName.includes(p.name)) {
+                        if (sensorName.includes('tx') || sensorName.includes('transmit')) {
+                            txRaw = entSensor['4.' + eIdx] || entSensor[eIdx];
+                        } else if (sensorName.includes('rx') || sensorName.includes('receive')) {
+                            rxRaw = entSensor['4.' + eIdx] || entSensor[eIdx];
+                        }
+                    }
+                }
+            }
+
+            let domStr = '';
+            if (txRaw || rxRaw) {
+                // 單位智慧換算引擎
+                let calcDbm = (val) => {
+                    let num = parseFloat(val);
+                    if (isNaN(num)) return 'N/A';
+                    
+                    // 💡 新增：處理千分之一 dBm (例如 -19500 -> -19.50 dBm)
+                    if (num < -1000) return (num / 1000).toFixed(2) + ' dBm'; 
+                    // 處理百分之一 dBm (例如 -1950 -> -19.50 dBm)
+                    if (num < -100) return (num / 100).toFixed(2) + ' dBm'; 
+                    
+                    if (num <= 0) return num.toFixed(2) + ' dBm'; 
+                    if (num > 0 && num < 10) return num.toFixed(2) + ' dBm'; 
+
+                    // 視為微瓦 (µW)，進行對數換算 (Ruckus 與 Aruba CX 標準)
+                    let mw = num / 1000;
+                    if (mw <= 0) return 'N/A';
+                    return (10 * Math.log10(mw)).toFixed(2) + ' dBm';
+                };
+                
+                let t = txRaw ? calcDbm(txRaw) : 'N/A'; 
+                let r = rxRaw ? calcDbm(rxRaw) : 'N/A';
+                domStr = `<br>🔆 <span class="text-info">光纖模組:</span> Tx ${t} | Rx ${r}`;
+                
+                if (rxRaw && r !== 'N/A') {
+                   let rDbm = parseFloat(r.replace(' dBm', ''));
+                   if (rDbm < -20) domStr += ` <span class="text-danger fw-bold">(嚴重衰減!)</span>`;
+                   else if (rDbm < -17) domStr += ` <span class="text-warning fw-bold">(訊號偏弱)</span>`;
+                }
+            }
+
+            let title = `介面: <span class="text-info">${p.name}</span> (Speed: ${p.speed ? (p.speed>=10000 ? p.speed/1000+'G' : p.speed+'M') : 'Unknown'})`;
+            let portAlias = ifAlias[p.idx] ? decodeHexIfNeeded(ifAlias[p.idx]) : '';
+            if (portAlias) title += `<br>📝 說明: ${portAlias}`;
+            
+            // 💡 4. 提示文字整合 Admin Down 與 光學 DOM
+            if (isAdminDown) title += `<br>狀態: <span class="text-warning fw-bold">管理員強制停用 (Shutdown)</span> 🔒`;
+            else if (isUplink) title += `<br>狀態: 中繼傳遞 (Uplink/Downlink)`; 
+            else if (isActive) title += `<br>狀態: 終端接入 (Active)`; 
+            else title += `<br>狀態: 空閒/未連線 (Down)`;
+            
+            title += domStr; // 寫入光學數值
+            
+            if (poePower !== null) title += `<br>⚡ PoE供電: <span class="text-warning fw-bold">${poePower} W</span>`;
+            if (!isUplink && portIps.size > 0) { let ipArr = Array.from(portIps); if (ipArr.length <= 3) title += `<br>🖥️ 設備 IP: ${ipArr.join(', ')}`; else title += `<br>🖥️ 設備 IP: ${ipArr.slice(0, 3).join(', ')} (等 ${ipArr.length} 台)`; }
+            if (hasTraffic) title += `<br>流量: ▼ ${formatBps(tData.in_bps)} | ▲ ${formatBps(tData.out_bps)}`;
+            if (hasPhysicalError) title += `<br>❌ 實體線路錯誤封包: In=${inErr} | Out=${outErr} <span class="text-danger">(建議檢查線路或重插)</span>`;
+
+            if (allowPoeControl && !isUplink && !p.isLag && !is10G && !p.isMgmt) {
+                title += `<br>🖱️ <span class="text-warning">左鍵點擊執行 PoE 重啟</span>`;
+            }
+            title += `<br>🖱️ <span class="text-success">右鍵點擊可查看完整 IP 清單</span>`;
+
+            let ipListStr = Array.from(portIps).join(','); let safeSysName = (nodeData.sysName || '').replace(/'/g, "\\'");
+
+            let clickAttr = (allowPoeControl && !isUplink && !p.isLag && !is10G && !p.isMgmt)
+                            ? `onclick="triggerPoeCycle('${nodeData.ip}', '${p.idx}', '${p.name}')"`
+                            : "";
+            let cursorStyle = clickAttr ? "pointer" : "default";
+            let safeTitle = title.replace(/"/g, '&quot;');
+            
+            return `
+                <div class="${portClass}" style="${borderStyle} cursor: ${cursorStyle}; transition: transform 0.2s; flex-shrink: 0;"
+                     onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"
+                     ${clickAttr}
+                     oncontextmenu="showPortIps(event, '${safeSysName}', '${nodeData.ip}', '${p.name}', '${ipListStr}', ${treatAsUplink})"
+                     data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom"
+                     title="${safeTitle}">
+                    <div class="port-led ${ledClass}" style="${glowStyle}"></div>
+                    <div class="port-label" style="${labelStyle}">${shortName}</div>
+                </div>
+            `;
+        };
+
+        let rowGroups = {};
+        standardPorts.forEach(p => {
+            if (!rowGroups[p.rowGroup]) rowGroups[p.rowGroup] = [];
+            rowGroups[p.rowGroup].push(p);
+        });
+
+        let rowsHtml = '';
+        Object.keys(rowGroups).sort((a,b)=>parseInt(a)-parseInt(b)).forEach(groupKey => {
+            let groupPorts = rowGroups[groupKey];
+            let portsPerRow = 24; 
+            
+            for (let i = 0; i < groupPorts.length; i += portsPerRow) {
+                let chunk = groupPorts.slice(i, i + portsPerRow);
+                rowsHtml += `<div class="chassis-row" style="margin-bottom: 6px;">`;
+                chunk.forEach(p => { rowsHtml += renderPortHtml(p); });
+                rowsHtml += `</div>`;
+            }
+        });
+
+        if (logicPorts.length > 0) {
+            rowsHtml += `<div class="chassis-row logic-row" style="flex-wrap: wrap; margin-top: 8px;">`;
+            logicPorts.forEach(p => { rowsHtml += renderPortHtml(p); });
+            rowsHtml += `</div>`;
+        }
+
+        let panelHtml = `
+            <style>
+              .chassis-scroll-wrapper {
+                  max-height: 320px;
+                  overflow-y: auto;
+                  overflow-x: hidden;
+                  border-radius: 6px;
+                  border: 2px solid #1a1a1a;
+                  scrollbar-width: thin;
+                  scrollbar-color: #666 #111;
+              }
+              .chassis-scroll-wrapper::-webkit-scrollbar { width: 8px; }
+              .chassis-scroll-wrapper::-webkit-scrollbar-track { background: #111; }
+              .chassis-scroll-wrapper::-webkit-scrollbar-thumb { background-color: #666; border-radius: 4px; }
+              .virtual-chassis.no-border { border: none !important; border-radius: 0 !important; margin: 0 !important; }
+              .chassis-row { display: flex; flex-wrap: nowrap; gap: 4px; justify-content: flex-start; }
+			  /* 💡 新增紫色 LED 樣式 */
+              .led-admin { background-color: #6f42c1; }
+            </style>
+            
+            <div class="d-flex flex-wrap gap-3 mb-3 justify-content-start" style="font-size: 0.85rem;">
+                <span class="d-flex align-items-center"><div class="port-led led-10g position-relative me-2" style="width:12px;height:6px; top:0;"></div>中繼 (Uplink)</span>
+                <span class="d-flex align-items-center"><div class="port-led led-1g position-relative me-2" style="width:12px;height:6px; top:0;"></div>終端 (Active)</span>
+                <span class="d-flex align-items-center"><div class="port-led led-error position-relative me-2" style="width:12px;height:6px; top:0;"></div>線路故障 (Error)</span>
+                <span class="d-flex align-items-center"><div class="port-led position-relative me-2" style="width:12px;height:6px; top:0; background-color:#6f42c1; box-shadow: 0 0 6px rgba(111,66,193,0.8);"></div>停用 (Shutdown)</span>
+				<span class="border-start border-secondary pb-0 ps-3 ms-1 text-white-50">外框線區別：</span>
+                <span class="d-flex align-items-center"><span class="d-inline-block rounded-sm bg-dark me-1" style="width:14px;height:14px; border:2px solid #ffe066;"></span>10G+ 埠</span>
+                <span class="d-flex align-items-center"><span class="d-inline-block rounded-sm bg-dark me-1" style="width:14px;height:14px; border:2px solid #fd7e14;"></span>LAG/Bond 聚合</span>
+                <span class="d-flex align-items-center"><span class="d-inline-block rounded-sm bg-dark me-1" style="width:14px;height:14px; border:2px solid #dc3545;"></span>MGMT 管理</span>
+            </div>
+            
+            <div class="chassis-scroll-wrapper mb-3 mt-2">
+                <div class="virtual-chassis no-border">
+                    <div class="chassis-ear"><div class="screw"></div><div class="screw"></div><div class="screw"></div></div>
+                    <div class="chassis-body">
+                        ${rowsHtml}
+                    </div>
+                    <div class="chassis-ear"><div class="screw"></div><div class="screw"></div><div class="screw"></div></div>
+                </div>
+            </div>
+        `;
+        
+        if (isPoeDevice) {
+            if (poeTotal === 0) poeTotal = 370; 
+            if (poeUsed > poeTotal) poeUsed = poeTotal;
+
+            let poePercent = Math.round((poeUsed / poeTotal) * 100);
+            let barClass = poePercent > 90 ? 'poe-bar-danger' : (poePercent > 70 ? 'poe-bar-warn' : 'poe-bar-safe');
+            
+            panelHtml += `
+                <div class="poe-budget-container">
+                    <div class="d-flex justify-content-between text-white-50" style="font-size: 0.8rem;">
+                        <span><i class="bi bi-lightning-charge-fill text-warning me-1"></i>系統 PoE 總供電負載</span>
+                        <span class="${poePercent > 90 ? 'text-danger fw-bold' : ''}">${poeUsed} W / ${poeTotal} W (${poePercent}%)</span>
+                    </div>
+                    <div class="poe-progress">
+                        <div class="${barClass}" style="width: ${poePercent}%; height: 100%;"></div>
+                    </div>
+                </div>
+            `;
+        }
+
+        let tempVal = null; let fanStatus = '正常 (OK)'; let psuStatus = '正常 (OK)'; let hasSensorData = false;
+
+        if (rawData[26] && Object.keys(rawData[26]).length > 0) {
+            let temps = Object.values(rawData[26]).map(v => parseFloat(v) / 2).filter(v => v > 0 && v < 150);
+            if (temps.length > 0) { tempVal = Math.max(...temps); hasSensorData = true; }
+        }
+        if (!tempVal && rawData[29] && Object.keys(rawData[29]).length > 0) {
+            let temps = Object.values(rawData[29]).map(v => parseFloat(v)).filter(v => v > 0 && v < 150);
+            if (temps.length > 0) { tempVal = Math.max(...temps); hasSensorData = true; }
+        }
+        if (!tempVal && rawData[30] && rawData[30]['10']) { 
+            tempVal = parseFloat(rawData[30]['10']) / 10; hasSensorData = true;
+        }
+        if (!tempVal && rawData[31] && Object.keys(rawData[31]).length > 0) {
+             let temps = Object.values(rawData[31]).map(v => parseFloat(v)).filter(v => v > 0 && v < 150);
+             if (temps.length > 0) { tempVal = Math.max(...temps); hasSensorData = true; }
+        }
+
+        if (rawData[27] && Object.keys(rawData[27]).length > 0) {
+            let fans = Object.values(rawData[27]);
+            if (fans.includes('3') || fans.includes('4')) fanStatus = '故障警報 (Failed)';
+            hasSensorData = true;
+        }
+        if (rawData[28] && Object.keys(rawData[28]).length > 0) {
+            let psus = Object.values(rawData[28]);
+            if (psus.includes('3') || psus.includes('4')) psuStatus = '供電異常 (Failed)';
+            hasSensorData = true;
+        }
+
+        if (hasSensorData || tempVal !== null) {
+            let tempColor = 'text-success';
+            let tempDisplay = '未偵測';
+            if (tempVal !== null) {
+                tempDisplay = `${tempVal} °C`;
+                if (tempVal >= 75) tempColor = 'text-danger fw-bold';
+                else if (tempVal >= 60) tempColor = 'text-warning';
+            }
+            
+            let fanColor = fanStatus.includes('故障') ? 'text-danger fw-bold' : 'text-info';
+            let psuColor = psuStatus.includes('異常') ? 'text-danger fw-bold' : 'text-success';
+
+            panelHtml += `
+                <div class="poe-budget-container mt-2" style="background: #111; border-color: #444;">
+                    <div class="d-flex justify-content-between text-white-50 mb-2" style="font-size: 0.85rem;">
+                        <span class="fw-bold"><i class="bi bi-heart-pulse-fill text-danger me-1"></i>硬體健康度與環境感測 (Hardware Health)</span>
+                    </div>
+                    <div class="row text-center" style="font-size: 0.8rem;">
+                        <div class="col-4 border-end border-secondary">
+                            <div class="text-white-50 mb-1"><i class="bi bi-thermometer-half me-1"></i>系統溫度</div>
+                            <div class="${tempColor}" style="font-size: 1rem;">${tempDisplay}</div>
+                        </div>
+                        <div class="col-4 border-end border-secondary">
+                            <div class="text-white-50 mb-1"><i class="bi bi-fan me-1"></i>風扇狀態</div>
+                            <div class="${fanColor}" style="font-size: 0.9rem; margin-top: 3px;">${fanStatus}</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="text-white-50 mb-1"><i class="bi bi-plug-fill me-1"></i>備援電源</div>
+                            <div class="${psuColor}" style="font-size: 0.9rem; margin-top: 3px;">${psuStatus}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        return panelHtml;
+    }
+
+    window.updateRightClickModalContent = function(nodeId) {
+        var nodeData = nodesDataSet.get(nodeId);
+        if (!nodeData) return;
+        
+        let activeTabTarget = "#panel"; 
+        let activeTabBtn = document.querySelector('#snmpTabs .nav-link.active');
+        if (activeTabBtn) {
+            activeTabTarget = activeTabBtn.getAttribute('data-bs-target');
+        }
+
+        document.getElementById('snmpModalTitle').innerHTML = `<i class="bi bi-terminal me-2"></i>${nodeData.sysName || nodeData.ip} - 詳細設備資訊庫`;
+        
+        // ========================================================
+        // ⏱️ 設備運行時間 (sysUpTime) 智慧解析引擎
+        // ========================================================
+        let uptimeRaw = "";
+        try {
+            let rawData = JSON.parse(nodeData.snmp_raw || "{}");
+            if (Array.isArray(rawData) && rawData[22]) {
+                let keys = Object.keys(rawData[22]);
+                if (keys.length > 0) {
+                    uptimeRaw = String(rawData[22][keys[0]]);
+                }
+            }
+        } catch(e) { console.error("提取 Uptime 失敗:", e); }
+
+        // 智慧型時間格式自適應轉換器：相容 TimeTicks 純數字與各廠牌格式化字串
+        function parseUptime(uptimeStr) {
+            if (!uptimeStr) return { text: "無資料", isUnder24h: false };
+            let str = uptimeStr.trim();
+            
+            if (/^\d+$/.test(str)) {
+                let timeticks = parseInt(str, 10);
+                let totalSeconds = Math.floor(timeticks / 100);
+                return formatDuration(totalSeconds);
+            }
+            let matchTicks = str.match(/\((\d+)\)/);
+            if (matchTicks) {
+                let timeticks = parseInt(matchTicks[1], 10);
+                let totalSeconds = Math.floor(timeticks / 100);
+                return formatDuration(totalSeconds);
+            }
+            let days = 0, hours = 0, minutes = 0;
+            let daysMatch = str.match(/(\d+)\s*day/i);
+            if (daysMatch) days = parseInt(daysMatch[1], 10);
+            let timeMatch = str.match(/(\d+):(\d+):(\d+)/);
+            if (timeMatch) {
+                hours = parseInt(timeMatch[1], 10);
+                minutes = parseInt(timeMatch[2], 10);
+            } else {
+                let hourMatch = str.match(/(\d+)\s*hour/i);
+                if (hourMatch) hours = parseInt(hourMatch[1], 10);
+                let minMatch = str.match(/(\d+)\s*min/i);
+                if (minMatch) minutes = parseInt(minMatch[1], 10);
+            }
+            let totalSeconds = (days * 86400) + (hours * 3600) + (minutes * 60);
+            if (totalSeconds > 0) return formatDuration(totalSeconds);
+            return { text: str, isUnder24h: false }; 
+        }
+
+        // 💡 優化點 2：運行時間重塑為「DD天HH時MM分」格式樣板
+        function formatDuration(totalSeconds) {
+            let d = Math.floor(totalSeconds / 86400);
+            let h = Math.floor((totalSeconds % 86400) / 3600);
+            let m = Math.floor((totalSeconds % 3600) / 60);
+            let dd = String(d).padStart(2, '0');
+            let hh = String(h).padStart(2, '0');
+            let mm = String(m).padStart(2, '0');
+            return { text: `${dd}天${hh}時${mm}分`, isUnder24h: totalSeconds < 86400 };
+        }
+
+        // ========================================================
+        // 📊 徽章樣式優化 (寬度微調至 145px 以容納繁體中文字串)
+        // ========================================================
+        let badgeStyle = 'display: inline-block; min-width: 145px; text-align: center; font-size: 0.95rem !important; padding: 5px 8px; font-weight: bold; box-shadow: 0 2px 4px rgba(0,0,0,0.3);';
+        
+        var statusBadge = '';
+        if (nodeData.status === 'down') statusBadge = `<span class="badge bg-danger" style="${badgeStyle}">🔴 徹底斷線</span>`;
+        else if (nodeData.status === 'warning') statusBadge = `<span class="badge bg-warning text-dark" style="${badgeStyle}">⚠️ SNMP 異常</span>`;
+        else statusBadge = `<span class="badge bg-success" style="${badgeStyle}">🟢 正常連線</span>`;
+
+        let uptimeBadge = '';
+        if (!uptimeRaw || uptimeRaw === "None" || nodeData.status === 'down') {
+            uptimeBadge = `<span class="badge bg-secondary text-white-50" style="${badgeStyle}">⏱️ 斷線無資料</span>`;
+        } else {
+            let uptimeInfo = parseUptime(uptimeRaw);
+            if (uptimeInfo.text === "無資料") {
+                uptimeBadge = `<span class="badge bg-secondary text-white-50" style="${badgeStyle}">⏱️ 暫無核心資料</span>`;
+            } else {
+                let uptimeColor = uptimeInfo.isUnder24h ? '#fd7e14' : '#2ecc71';
+                let uptimeBg = uptimeInfo.isUnder24h ? 'rgba(253,126,20,0.12)' : 'rgba(46,204,113,0.12)';
+                uptimeBadge = `<span class="badge" style="${badgeStyle} color: ${uptimeColor}; background-color: ${uptimeBg}; border: 1px solid ${uptimeColor};">⏱️ ${uptimeInfo.text}</span>`;
+            }
+        }
+
+        let snmpRawHtml = ''; let rawData = {};
+        try {
+            rawData = JSON.parse(nodeData.snmp_raw || "{}");
+            if (Array.isArray(rawData) && rawData.length >= 8) {
+                let formattedJson = {
+                    "LLDP_SysNames (1.0.8802.1.1.2.1.4.1.1.9)": rawData[0],
+                    "LLDP_PortDesc (1.0.8802.1.1.2.1.4.1.1.7)": rawData[1],
+                    "LLDP_PortID (1.0.8802.1.1.2.1.4.1.1.6)": rawData[2],
+                    "LLDP_MgmtIP (1.0.8802.1.1.2.1.4.1.1.8)": rawData[3],
+                    "ifName (1.3.6.1.2.1.31.1.1.1.1)": rawData[4],
+                    "ifHighSpeed (1.3.6.1.2.1.31.1.1.1.15)": rawData[5],
+                    "ifSpeed (1.3.6.1.2.1.2.2.1.5)": rawData[6],
+                    "ifPhysAddress (1.3.6.1.2.1.2.2.1.6)": rawData[7]
+                };
+                if (rawData.length >= 9) { formattedJson["ifDescr (1.3.6.1.2.1.2.2.1.2)"] = rawData[8]; }
+                if (rawData.length >= 10) { formattedJson["ifAlias [自訂說明] (1.3.6.1.2.1.31.1.1.1.18)"] = rawData[9]; }
+                if (rawData.length >= 11) { formattedJson["dot1dTpFdbPort [FDB] (1.3.6.1.2.1.17.4.3.1.2)"] = rawData[10]; }
+                if (rawData.length >= 12) { formattedJson["dot1dBasePortIfIndex [FDB->If] (1.3.6.1.2.1.17.1.4.1.2)"] = rawData[11]; }
+                if (rawData.length >= 13) { formattedJson["dot1qTpFdbPort [Q-BRIDGE FDB] (1.3.6.1.2.1.17.7.1.2.2.1.2)"] = rawData[12]; }
+                if (rawData.length >= 14) { formattedJson["ipNetToMediaPhysAddress [ARP] (1.3.6.1.2.1.4.22.1.2)"] = rawData[13]; }
+                if (rawData.length >= 15) { formattedJson["ipNetToPhysicalPhysAddress [新世代ARP] (1.3.6.1.2.1.4.35.1.4)"] = rawData[14]; }
+                if (rawData.length >= 16) { formattedJson["atPhysAddress [古老ARP] (1.3.6.1.2.1.3.1.1.2)"] = rawData[15]; }
+                if (rawData.length >= 17) { formattedJson["snIpArpPort [Ruckus ARP Port] (1.3.6.1.4.1.1991.1.1.2.1.35.1.3)"] = rawData[16]; }
+                if (rawData.length >= 18) { formattedJson["ipRouteNextHop [Route] (1.3.6.1.2.1.4.21.1.7)"] = rawData[17]; }
+                if (rawData.length >= 19) { formattedJson["pethPsePortActualPower [標準PoE mW] (1.3.6.1.2.1.105.1.3.1.1.4)"] = rawData[18]; }
+                if (rawData.length >= 20) { formattedJson["snAgentPoePortPowerConsumption [Ruckus PoE mW] (1.3.6.1.4.1.1991.1.1.2.14.2.2.1.6)"] = rawData[19]; }
+                if (rawData.length >= 21) { formattedJson["cpeExtPsePortPwr Consumption [Cisco PoE mW] (1.3.6.1.4.1.9.9.402.1.2.1.7)"] = rawData[20]; }
+                if (rawData.length >= 22) { formattedJson["dlinkPoeActualPower [D-Link PoE W] (1.3.6.1.4.1.171.10.76.12.22.1.1.9)"] = rawData[21]; }
+                if (rawData.length >= 23) { formattedJson["sysUpTime [運行時間] (1.3.6.1.2.1.1.3)"] = rawData[22]; }
+				if (rawData.length >= 33) { formattedJson["ifAdminStatus [管理員狀態] (1.3.6.1.2.1.2.2.1.7)"] = rawData[32]; }
+				if (rawData.length >= 34) { formattedJson["ruckusDomTxPower [發送功率µW] (1.3.6.1.4.1.1991.1.1.3.3.6.1.4)"] = rawData[33]; }
+				if (rawData.length >= 35) { formattedJson["ruckusDomRxPower [接收功率µW] (1.3.6.1.4.1.1991.1.1.3.3.6.1.5)"] = rawData[34]; }
+				if (rawData.length >= 36) { formattedJson["hpicfXcvrTxPwr [舊版HP/Aruba Tx] (1.3.6.1.4.1.11.2.14.11.5.1.122.1.1.2)"] = rawData[35]; }
+				if (rawData.length >= 37) { formattedJson["hpicfXcvrRxPwr [舊版HP/Aruba Rx] (1.3.6.1.4.1.11.2.14.11.5.1.122.1.1.3)"] = rawData[36]; }
+				if (rawData.length >= 38) { formattedJson["entPhysicalName [實體設備對應表] (1.3.6.1.2.1.47.1.1.1.1.7)"] = rawData[37]; }
+				if (rawData.length >= 39) { formattedJson["arubaCxTxPwr [Aruba CX 10.14+ Tx] (1.3.6.1.4.1.47196.4.1.1.3.38.1.1.9)"] = rawData[38]; }
+				if (rawData.length >= 40) { formattedJson["arubaCxRxPwr [Aruba CX 10.14+ Rx] (1.3.6.1.4.1.47196.4.1.1.3.38.1.1.10)"] = rawData[39]; }
+				if (rawData.length >= 41) { formattedJson["ruckusIcxTxPwr [真實Ruckus Tx] (1.3.6.1.4.1.1991.1.1.3.3.10.1.3)"] = rawData[40]; }
+				if (rawData.length >= 42) { formattedJson["ruckusIcxRxPwr [真實Ruckus Rx] (1.3.6.1.4.1.1991.1.1.3.3.10.1.4)"] = rawData[41]; }
+				if (rawData.length >= 43) { formattedJson["Aruba_SSH_DOM [終極備援: 背景CLI實體抓取]"] = rawData[42]; }
+				// 💡 補上最後一行
+				if (rawData.length >= 44) { formattedJson["PaloAlto_API_DOM [Palo Alto XML API 抓取]"] = rawData[43]; }
+				if (rawData.length >= 45) { formattedJson["ifOperStatus [實體網孔狀態] (1.3.6.1.2.1.2.2.1.8)"] = rawData[44]; } // 🌟 補上這行
+
+                Object.keys(formattedJson).forEach(k => { if (Object.keys(formattedJson[k] || {}).length === 0) delete formattedJson[k]; });
+                snmpRawHtml = JSON.stringify(formattedJson, null, 2);
+            } else { snmpRawHtml = JSON.stringify(rawData, null, 2); }
+            if (snmpRawHtml === '{}') snmpRawHtml = "沒有抓取到詳細的 MIB 資料 (可能 Timeout 或無資料)";
+        } catch(e) { snmpRawHtml = "資料解析失敗或尚未掃描快取"; }
+
+        let ifNames = rawData[4] || {};
+        let aliasData = rawData[9] || {};
+        let fdbData = rawData[10] || {};
+        let bpToIfIndex = rawData[11] || {};
+        let qFdbData = rawData[12] || {};
+        let arpData = rawData[13] || {};
+        let ruckusArpPort = rawData[16] || {};
+        let routeData = rawData[17] || {};
+        
+        let aliasHtml = ''; let aliasCount = 0;
+        if (Object.keys(aliasData).length > 0) {
+            let sortedIdxs = Object.keys(aliasData).sort((a,b) => parseInt(a) - parseInt(b));
+            sortedIdxs.forEach(idx => {
+                let aText = decodeHexIfNeeded(aliasData[idx]);
+                if (aText) {
+                    let pName = ifNames[idx] ? cleanStr(ifNames[idx]) : `Port ${idx}`;
+                    aliasHtml += `<tr><td style="white-space: nowrap;" class="text-warning fw-bold">${pName}</td><td class="text-info">${aText}</td></tr>`;
+                    aliasCount++;
+                }
+            });
+        }
+        if (aliasCount === 0) aliasHtml = '<tr><td colspan="2" class="text-center text-white-50">無自訂說明備註 (或尚未重新掃描)</td></tr>';
+
+        let uniqueFDBTable = new Set(); let fdbHtml = ''; let fdbCount = 0;
+        if (Object.keys(qFdbData).length > 0) {
+            Object.keys(qFdbData).forEach(suffix => {
+                let parts = suffix.split('.');
+                if (parts.length >= 7) {
+                    let vlan = parts[0];
+                    let macHex = parts.slice(1).map(n => parseInt(n).toString(16).padStart(2, '0').toUpperCase()).join(':');
+                    let bPort = String(qFdbData[suffix]);
+                    let ifIdx = bpToIfIndex[bPort] !== undefined ? String(bpToIfIndex[bPort]) : bPort;
+                    let ifName = ifNames[ifIdx] ? cleanStr(ifNames[ifIdx]) : `Port ${ifIdx}`;
+                    let uniqueKey = `${macHex}-${ifName}`;
+                    if (!uniqueFDBTable.has(uniqueKey)) { uniqueFDBTable.add(uniqueKey); fdbHtml += `<tr><td style="white-space: nowrap;">${macHex}</td><td style="white-space: nowrap;">${ifName} <small class="text-white-50">(VLAN ${vlan})</small></td></tr>`; fdbCount++; }
+                }
+            });
+        }
+        if (Object.keys(fdbData).length > 0) {
+            Object.keys(fdbData).forEach(suffix => {
+                let macHex = suffix.split('.').map(n => parseInt(n).toString(16).padStart(2, '0').toUpperCase()).join(':');
+                let bPort = String(fdbData[suffix]);
+                let ifIdx = bpToIfIndex[bPort] !== undefined ? String(bpToIfIndex[bPort]) : bPort;
+                let ifName = ifNames[ifIdx] ? cleanStr(ifNames[ifIdx]) : `Port ${ifIdx}`;
+                let uniqueKey = `${macHex}-${ifName}`;
+                if (!uniqueFDBTable.has(uniqueKey)) { uniqueFDBTable.add(uniqueKey); fdbHtml += `<tr><td style="white-space: nowrap;">${macHex}</td><td style="white-space: nowrap;">${ifName}</td></tr>`; fdbCount++; }
+            });
+        }
+        if(fdbCount === 0) fdbHtml = '<tr><td colspan="2" class="text-center text-white-50">無 MAC 學習紀錄 (或尚未重新掃描)</td></tr>';
+
+        let arpHtml = ''; let arpCount = 0;
+        if (Object.keys(arpData).length > 0) {
+            Object.keys(arpData).forEach(suffix => {
+                let parts = suffix.split('.');
+                if(parts.length >= 4) {
+                    let ifIdx = parts.slice(0, -4).join('.'); let ip = parts.slice(-4).join('.'); let mac = arpData[suffix];
+                    let physicalPort = getPhysicalPortFromFDB(rawData, mac);
+                    let ifNameHtml = '';
+
+                    if (physicalPort) { ifNameHtml = `<span class="text-success fw-bold">${physicalPort}</span> <small class="text-white-50">(由 FDB推演)</small>`; } 
+                    else if (ruckusArpPort[ip]) { let pIdx = ruckusArpPort[ip]; let pName = ifNames[pIdx] ? cleanStr(ifNames[pIdx]) : `Port ${pIdx}`; ifNameHtml = `<span class="text-success">${pName}</span> <small class="text-white-50">(私有 MIB)</small>`; } 
+                    else { let pName = ifNames[ifIdx] ? cleanStr(ifNames[ifIdx]) : `介面 ${ifIdx}`; ifNameHtml = `<span class="text-warning">${pName}</span> <small class="text-danger">(L3 邏輯介面)</small>`; }
+
+                    arpHtml += `<tr><td style="white-space: nowrap;">${ip}</td><td style="white-space: nowrap;">${mac}</td><td style="white-space: nowrap;">${ifNameHtml}</td></tr>`; arpCount++;
+                }
+            });
+        }
+        if(arpCount === 0) arpHtml = '<tr><td colspan="3" class="text-center text-white-50">無 ARP 紀錄 (或尚未重新掃描)</td></tr>';
+
+        let routeHtml = ''; let routeCount = 0;
+        if (Object.keys(routeData).length > 0) {
+            Object.keys(routeData).forEach(suffix => { let destIp = suffix; let nextHop = routeData[suffix]; routeHtml += `<tr><td style="white-space: nowrap;">${destIp}</td><td style="white-space: nowrap;">${nextHop}</td></tr>`; routeCount++; });
+        }
+        if(routeCount === 0) routeHtml = '<tr><td colspan="2" class="text-center text-white-50">無動態/靜態路由紀錄 (或尚未重新掃描)</td></tr>';
+		
+        let lldpSysNames = rawData[0] || {};
+        let lldpPortDesc = rawData[1] || {};
+        let lldpMgmtIP   = rawData[3] || {}; 
+
+        let lldpHtml = ''; let lldpCount = 0;
+        if (Object.keys(lldpSysNames).length > 0) {
+            let groupedLldp = {};
+            Object.keys(lldpSysNames).forEach(suffix => {
+                let parts = suffix.split('.');
+                if (parts.length >= 2) {
+                    let localPortIdx = parts[1]; 
+                    if (!groupedLldp[localPortIdx]) groupedLldp[localPortIdx] = [];
+                    groupedLldp[localPortIdx].push({
+                        sysName: lldpSysNames[suffix] || '未知設備',
+                        neighborPort: lldpMgmtIP[suffix] || '未知埠口',
+                        portDesc: lldpPortDesc[suffix] || '無描述'
+                    });
+                }
+            });
+
+            let sortedLocalPorts = Object.keys(groupedLldp).sort((a, b) => parseInt(a) - parseInt(b));
+            sortedLocalPorts.forEach(lPort => {
+                let pName = ifNames[lPort] ? cleanStr(ifNames[lPort]) : `Port ${lPort}`;
+                groupedLldp[lPort].forEach(neighbor => {
+                    lldpHtml += `<tr>
+                        <td style="white-space: nowrap;" class="text-warning fw-bold"><i class="bi bi-plug-fill me-1"></i>${pName}</td>
+                        <td style="white-space: nowrap;" class="text-info fw-bold">${neighbor.sysName}</td>
+                        <td style="white-space: nowrap;" class="text-success fw-bold">${neighbor.neighborPort}</td>
+                        <td class="text-white-50" style="font-size:0.8rem; word-break: break-all;">${neighbor.portDesc}</td>
+                    </tr>`;
+                    lldpCount++;
+                });
+            });
+        }
+        if (lldpCount === 0) {
+            lldpHtml = '<tr><td colspan="4" class="text-center text-white-50 py-3"><i class="bi bi-exclamation-triangle me-2"></i>此設備目前無鄰居探索資料 (LLDP 關閉或未連接其他智能網管型交換器)</td></tr>';
+        }
+		
+        let panelViewHtml = generateSwitchPanelHtml(nodeData);
+        let sysDescrText = nodeData.sysDescr || '無資料';
+
+        var content = `
+            <div class="table-responsive mb-3">
+                <table class="table table-sm table-bordered table-dark align-middle mb-0" style="font-size: 0.85rem;">
+                    <tbody>
+                        <tr>
+                            <th style="width:15%; white-space:nowrap;" class="text-secondary bg-black">IP 位址</th>
+                            <td style="width:35%;" class="text-info fw-bold">
+                                ${nodeData.ip} 
+                                <button class="btn btn-sm btn-outline-warning py-0 px-2 ms-2 shadow-sm" style="font-size: 0.75rem;" onclick="triggerSecureScan('${nodeData.ip}', '${nodeData.brand}', '${nodeData.model}')" id="btn-single-scan" title="立即深度掃描這台設備 (Aruba CX 將觸發進階授權)">
+                                    <i class="bi bi-lightning-charge-fill"></i> 獨立重新掃描
+                                </button>
+                            </td>
+                            <th style="width:15%; white-space:nowrap;" class="text-secondary bg-black">狀態</th>
+                            <td style="width:35%;">${statusBadge}</td>
+                        </tr>
+                        <tr>
+                            <th style="white-space:nowrap;" class="text-secondary bg-black">設備名稱</th>
+                            <td>${nodeData.sysName || '無'}</td>
+                            <th style="white-space:nowrap;" class="text-secondary bg-black">運行時間</th>
+                            <td>${uptimeBadge}</td>
+                        </tr>
+                        <tr><th style="white-space:nowrap;" class="text-secondary bg-black">廠牌 / 型號</th><td colspan="3"><span class="text-warning">${nodeData.brand}</span> / ${nodeData.model || '無'}</td></tr>
+                        <tr><th style="white-space:nowrap;" class="text-secondary bg-black">系統描述</th><td colspan="3" class="text-success" style="font-size: 0.8rem; font-family: Consolas, monospace; white-wrap: pre-wrap; word-break: break-all;">${sysDescrText}</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <ul class="nav nav-tabs border-secondary mb-3" id="snmpTabs" role="tablist">
+              <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn active" data-bs-toggle="tab" data-bs-target="#panel" type="button" role="tab"><i class="bi bi-hdd-rack me-1"></i>交換器實體面板</button></li>
+              <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" data-bs-toggle="tab" data-bs-target="#portalias" type="button" role="tab"><i class="bi bi-card-text me-1"></i>連接埠說明 (Alias)</button></li>
+			  
+              <li class="nav-item" role="presentation">
+                  <button class="nav-link snmp-tab-btn" id="config-tab" data-bs-toggle="tab" data-bs-target="#config-panel" type="button" role="tab" onclick="loadDeviceConfig('${nodeData.ip}')">
+                      <i class="bi bi-file-earmark-code me-1 text-primary"></i>歷史設定檔
+                  </button>
+              </li>
+
+			  <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" id="snmp-events-tab" data-bs-toggle="tab" data-bs-target="#snmp-events" type="button" role="tab" onclick="fetchDeviceEvents('${nodeId}')"><i class="bi bi-clock-history me-1 text-info"></i>事件軌跡</button></li>
+              <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" data-bs-toggle="tab" data-bs-target="#lldp" type="button" role="tab"><i class="bi bi-broadcast me-1"></i>LLDP 鄰居解析</button></li>
+              <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" data-bs-toggle="tab" data-bs-target="#routing" type="button" role="tab"><i class="bi bi-diagram-3 me-1"></i>路由與尋址 (ARP/FDB)</button></li>
+              <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" data-bs-toggle="tab" data-bs-target="#rawdata" type="button" role="tab"><i class="bi bi-file-code me-1"></i>詳細 SNMP 庫</button></li>
+            </ul>
+            
+            <div class="tab-content" id="snmpTabsContent">
+              <div class="tab-pane fade show active" id="panel" role="tabpanel">${panelViewHtml ? panelViewHtml : '<div class="alert alert-dark text-center mt-4 text-white-50"><i class="bi bi-info-circle me-2"></i>此設備無實體連接埠資料，無法繪製面板。</div>'}</div>
+              
+              <div class="tab-pane fade" id="portalias" role="tabpanel">
+                <div class="table-responsive border border-secondary rounded custom-scroll" style="height: 35vh; overflow-y: auto;">
+                    <table class="table table-dark table-striped mb-0 dense-table">
+                        <thead class="bg-black text-secondary" style="position: sticky; top: 0;"><tr><th style="width: 25%;">介面名稱</th><th>自訂說明 (ifAlias)</th></tr></thead>
+                        <tbody>${aliasHtml}</tbody>
+                    </table>
+                </div>
+              </div>
+			  
+              <div class="tab-pane fade" id="config-panel" role="tabpanel">
+                  <div class="p-2">
+                      <div class="d-flex justify-content-between align-items-center mb-2 pb-2 border-bottom border-secondary">
+                          <h6 id="config-time-label" class="text-white-50 m-0" style="font-size: 0.85rem;">
+                              <i class="bi bi-clock-history me-1"></i>最後備份時間：查詢中...
+                          </h6>
+                          <div class="input-group input-group-sm shadow-sm" style="width: auto;">
+                              <span class="input-group-text bg-dark border-secondary text-white small">版本</span>
+                              <select class="form-select bg-secondary border-secondary text-white fw-bold" id="selConfigHistoryIndex" style="cursor: pointer;" onchange="loadDeviceConfig('${nodeData.ip}', this.value)">
+                                  <option value="0" selected>第 1 次 (最新)</option>
+                                  <option value="1">第 2 次 (次新)</option>
+                                  <option value="2">第 3 次 (最早)</option>
+                              </select>
+                              <button class="btn btn-warning text-always-dark fw-bold" type="button" onclick="downloadCurrentConfig('${nodeData.ip}')" title="下載所選的歷史設定檔">
+                                  <i class="bi bi-download me-1"></i> 下載
+                              </button>
+                          </div>
+                      </div>
+                      <pre id="config-code-block" class="p-3 bg-black text-success rounded border border-secondary custom-scroll" style="height: 30vh; overflow-y: auto; font-family: 'Consolas', monospace; white-space: pre-wrap; font-size: 0.85rem; box-shadow: inset 0 0 10px #000;">載入設定檔中...</pre>
+                  </div>
+              </div>
+
+		      <div class="tab-pane fade" id="snmp-events" role="tabpanel" tabindex="0">
+				<div class="p-2">
+					<div id="device-events-container">
+						<div class="text-center text-white-50 py-4"><div class="spinner-border spinner-border-sm me-2"></div>正在載入設備歷史事件...</div>
+					</div>
+				 </div>
+			  </div>
+
+              <div class="tab-pane fade" id="lldp" role="tabpanel">
+                <div class="table-responsive border border-secondary rounded custom-scroll" style="height: 35vh; overflow-y: auto;">
+                    <table class="table table-dark table-striped mb-0 dense-table" style="font-size:0.85rem;">
+                        <thead class="bg-black text-secondary" style="position: sticky; top: 0; z-index: 5;">
+                            <tr>
+                                <th style="width: 20%;">本機介面</th>
+                                <th style="width: 25%;">鄰居設備名稱</th>
+                                <th style="width: 25%;">鄰居連接埠</th>
+                                <th>鄰居埠口描述 / MAC 資訊</th>
+                            </tr>
+                        </thead>
+                        <tbody>${lldpHtml}</tbody>
+                    </table>
+                </div>
+              </div>
+
+              <div class="tab-pane fade" id="routing" role="tabpanel">
+                <div class="row g-2">
+                    <div class="col-md-4"><h6 class="text-info fw-bold mb-1" style="font-size:0.85rem;"><i class="bi bi-diagram-3 me-1"></i>MAC 學習表 (FDB)</h6><div class="table-responsive border border-secondary rounded custom-scroll" style="height: 35vh; overflow-y: auto;"><table class="table table-dark table-striped mb-0 dense-table"><thead class="bg-black text-secondary" style="position: sticky; top: 0;"><tr><th>MAC 位址</th><th>學習介面</th></tr></thead><tbody>${fdbHtml}</tbody></table></div></div>
+                    <div class="col-md-5"><h6 class="text-warning fw-bold mb-1" style="font-size:0.85rem;"><i class="bi bi-pc-display me-1"></i>ARP 對應表</h6><div class="table-responsive border border-secondary rounded custom-scroll" style="height: 35vh; overflow-y: auto;"><table class="table table-dark table-striped mb-0 dense-table"><thead class="bg-black text-secondary" style="position: sticky; top: 0;"><tr><th>IP 位址</th><th>實體 MAC</th><th>介面</th></tr></thead><tbody>${arpHtml}</tbody></table></div></div>
+                    <div class="col-md-3"><h6 class="text-success fw-bold mb-1" style="font-size:0.85rem;"><i class="bi bi-signpost-split me-1"></i>路由表 (Routing)</h6><div class="table-responsive border border-secondary rounded custom-scroll" style="height: 35vh; overflow-y: auto;"><table class="table table-dark table-striped mb-0 dense-table"><thead class="bg-black text-secondary" style="position: sticky; top: 0;"><tr><th>目的 IP 網段</th><th>Next Hop</th></tr></thead><tbody>${routeHtml}</tbody></table></div></div>
+                </div>
+              </div>
+              <div class="tab-pane fade" id="rawdata" role="tabpanel">
+                <pre class="bg-black p-3 rounded border border-secondary text-info custom-scroll" style="font-size: 0.85rem; height: 35vh; overflow-y: auto;">${snmpRawHtml}</pre>
+              </div>
+            </div>
+        `;
+        
+        document.getElementById('snmpModalBody').innerHTML = content;
+        
+        try {
+            document.querySelectorAll('.tooltip').forEach(t => t.remove());
+            let triggerEls = document.getElementById('snmpModalBody').querySelectorAll('[data-bs-toggle="tooltip"]');
+            triggerEls.forEach(function (el) {
+                if (typeof window.bootstrap !== 'undefined' && window.bootstrap.Tooltip) {
+                    new window.bootstrap.Tooltip(el, { html: true, trigger: 'hover', boundary: 'window' });
+                } else if (typeof jQuery !== 'undefined' && typeof jQuery.fn.tooltip !== 'undefined') {
+                    jQuery(el).tooltip({ html: true, trigger: 'hover', boundary: 'window' });
+                }
+            });
+        } catch (err) { console.warn("Tooltip 重新綁定異常攔截:", err); }
+        
+        let tabEls = document.querySelectorAll('#snmpModalBody button[data-bs-toggle="tab"]');
+        tabEls.forEach(function(el) {
+            el.addEventListener('shown.bs.tab', function (event) {
+                let tabName = event.target.innerText.trim();
+                window.logFrontendAction("前端瀏覽軌跡", `切換面板頁籤`, `管理員在設備 [ ${nodeData.sysName || ''} ] (IP: ${nodeData.ip}) 的進階控制台內，切換調閱了【 ${tabName} 】內容。`);
+            });
+        });
+        
+        if (activeTabTarget && activeTabTarget !== "#panel") {
+            let targetBtn = document.querySelector(`#snmpTabs .nav-link[data-bs-target="${activeTabTarget}"]`);
+            let defaultBtn = document.querySelector(`#snmpTabs .nav-link[data-bs-target="#panel"]`);
+            let targetPane = document.querySelector(activeTabTarget);
+            let defaultPane = document.querySelector('#panel');
+            if (targetBtn && defaultBtn && targetPane && defaultPane) {
+                defaultBtn.classList.remove('active'); defaultPane.classList.remove('show', 'active');
+                targetBtn.classList.add('active'); targetPane.classList.add('show', 'active');
+
+                // 💡 關鍵修復：當系統自動恢復到這些「需要動態拉取 API」的標籤時，必須主動幫使用者「補開一槍」！
+                if (activeTabTarget === '#config-panel') {
+                    if (typeof loadDeviceConfig === 'function') loadDeviceConfig(nodeData.ip);
+                } else if (activeTabTarget === '#snmp-events') {
+                    if (typeof fetchDeviceEvents === 'function') fetchDeviceEvents(nodeId);
+                }
+            }
+        }
+    };
+
+    network.on("oncontext", function (params) {
+        params.event.preventDefault(); 
+        var nodeId = network.getNodeAt(params.pointer.DOM);
+        if (nodeId) {
+            var nodeData = nodesDataSet.get(nodeId);
+            
+            window.logFrontendAction(
+                "前端介面操作", 
+                `設備進階控制 [${nodeId}]`, 
+                `管理員對網路設備 [ ${nodeData ? (nodeData.sysName || '') : ''} ] (IP: ${nodeId}) 按下滑鼠右鍵，開啟 SNMP 詳細資料庫與虛擬實體面板。`
+            );
+
+            window.updateRightClickModalContent(nodeId);
+            
+            let modalEl = document.getElementById('snmpDataModal');
+            let snmpModal = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+            if (!modalEl.classList.contains('show')) {
+                snmpModal.show();
+            }
+        }
+    });
+}
+
+function triggerPoeCycle(ip, portIdx, portName) {
+    let rwComm = prompt(`🚨 [遠端 PoE 電源控制]\n\n您即將對設備 ${ip} 的【 ${portName} 】執行實體斷電與重啟 (Power Cycle).\n\n這會導致該孔位底下的設備斷線約 10~30 秒。\n請輸入該交換器的 SNMP 寫入密碼 (Write Community) 以確認授權：`, "private");
+    if (rwComm === null || rwComm.trim() === "") return; 
+    if (typeof showToast === 'function') showToast(`⚡ 正在對 ${portName} 執行 PoE 斷電重啟，請稍候約 3 秒鐘...`, 'warning');
+    
+    fetch('/api/poe_cycle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip: ip, port_idx: portIdx, rw_community: rwComm }) })
+    .then(res => res.json())
+    .then(res => {
+        if (typeof showToast === 'function') {
+            if (res.success) showToast(`✅ [成功] ${portName} ${res.message}`, 'success');
+            else showToast(`❌ [失敗] ${res.message}`, 'danger');
+        } else { alert(res.message); }
+    }).catch(err => {
+        if (typeof showToast === 'function') showToast(`❌ 發生網路錯誤: ${err.message}`, 'danger');
+    });
+}
+
+// 取得並渲染特定設備的生命週期事件 (Event Logs)
+function fetchDeviceEvents(ip) {
+    const container = document.getElementById('device-events-container');
+    if (!container) return;
+
+    fetch(`/api/device/${ip}/events`)
+        .then(res => res.json())
+        .then(data => {
+            if (!data.success) {
+                container.innerHTML = `<div class="alert alert-danger" style="background-color: #3b2a2a; border-color: #dc3545; color: #ffcccc;">載入失敗：${data.message}</div>`;
+                return;
+            }
+
+            if (data.events.length === 0) {
+                container.innerHTML = `<div class="text-center text-white-50 py-4"><i class="bi bi-inbox fs-3 d-block mb-2"></i>此設備近期無重大事件紀錄。</div>`;
+                return;
+            }
+
+            // 組合事件表格 HTML
+            let tableHtml = `
+                <table class="table table-dark table-striped table-hover align-middle mb-0" style="font-size: 0.85rem;">
+                    <thead>
+                        <tr style="border-bottom: 2px solid #4a5568;">
+                            <th style="width: 150px; color: #a0aec0;">發生時間</th>
+                            <th style="width: 120px; color: #a0aec0;">事件模組</th>
+                            <th style="width: 80px; color: #a0aec0;">狀態</th>
+                            <th style="color: #a0aec0;">詳細資訊</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            data.events.forEach(ev => {
+                // 狀態標籤上色邏輯
+                let badgeClass = "bg-secondary";
+                if (ev.result === "SUCCESS") badgeClass = "bg-success";
+                else if (ev.result === "FAILED") badgeClass = "bg-danger";
+                else if (ev.result === "WARNING") badgeClass = "bg-warning text-dark";
+                else if (ev.result === "INFO") badgeClass = "bg-info text-dark";
+
+                tableHtml += `
+                    <tr>
+                        <td class="text-white-50">${ev.timestamp}</td>
+                        <td class="fw-bold">${ev.action}</td>
+                        <td><span class="badge ${badgeClass}">${ev.result}</span></td>
+                        <td><span style="color: #cbd5e0;">${ev.details}</span></td>
+                    </tr>
+                `;
+            });
+
+            tableHtml += `</tbody></table>`;
+            container.innerHTML = tableHtml;
+        })
+        .catch(err => {
+            container.innerHTML = `<div class="alert alert-danger">網路連線異常，無法取得事件日誌。</div>`;
+            console.error(err);
+        });
+}
+
+// ==========================================
+// 📥 觸發歷史設定檔下載 (支援下拉選單版本指定)
+// ==========================================
+function downloadCurrentConfig(ip) {
+    if (ip) {
+        // 取得下拉選單目前的數值 (0, 1, 或 2)
+        const selIdx = document.getElementById('selConfigHistoryIndex');
+        const indexValue = selIdx ? selIdx.value : "0";
+        
+        if(typeof window.showToast === 'function') window.showToast(`正在下載 ${ip} 的設定檔...`, 'info');
+        
+        // 瀏覽器會自動攔截下載流，並把 index 參數帶給後端
+        window.location.href = `/api/device/download_config?ip=${ip}&index=${indexValue}`;
+    } else {
+        alert("無法取得目前的設備 IP！");
+    }
+}
+</script>

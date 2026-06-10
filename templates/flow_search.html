@@ -1,0 +1,1133 @@
+{% extends 'layout.html' %}
+{% block title %}資安流量明細檢索 - 網路拓樸管理系統{% endblock %}
+{% block head %}
+<style>
+    /* 🌟 雙重鎖死：徹底封印外層瀏覽器捲軸 */
+    html, body { background-color: #1a202c; color: #e2e8f0; overflow: hidden !important; height: 100vh; margin: 0; padding: 0; }
+    
+    .search-panel { background-color: #2d3748; border: 1px solid #4a5568; border-radius: 8px; }
+    .table-container { background-color: #2d3748; border: 1px solid #4a5568; border-radius: 8px; overflow-y: auto; }
+    .table th { background-color: #2a4365; color: #63b3ed; position: sticky; top: 0; z-index: 10; border-bottom: 2px solid #0ea5e9; }
+    .form-control, .form-select { background-color: #1a202c !important; color: #fff !important; border: 1px solid #4a5568 !important; }
+    .form-control:focus, .form-select:focus { border-color: #0ea5e9 !important; box-shadow: 0 0 0 0.25rem rgba(14, 165, 233, 0.25) !important; }
+	
+	/* 🌟 修復深色模式下輸入框提示字 (placeholder) 隱形的問題 */
+    .form-control::placeholder { color: #64748b !important; opacity: 1 !important; }
+    
+	.custom-scroll::-webkit-scrollbar { width: 6px; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #6c757d; border-radius: 3px; }
+
+    /* 卡片按鈕互動與發亮 */
+    .stat-card { cursor: pointer; transition: all 0.2s ease-in-out; }
+    .stat-card:hover { transform: translateY(-2px); filter: brightness(1.2); box-shadow: 0 4px 10px rgba(0,0,0,0.4) !important; }
+    .stat-card.active { background-color: rgba(255,255,255,0.08) !important; border-width: 2px !important; border-color: #0dcaf0 !important; }
+
+    /* IP & Port 專屬互動超連結樣式 */
+    .clickable-link { cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; transition: 0.15s; }
+    .clickable-link:hover { color: #fff !important; text-decoration-style: solid; background-color: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 4px; }
+
+	/* ========================================= */
+    /* 🌞 淺色模式 (Light Theme) 覆蓋宣告引擎    */
+    /* ========================================= */
+    body.light-theme { background-color: #f8fafc !important; color: #1e293b !important; }
+    
+    /* 針對本頁面的容器白化 */
+    body.light-theme .search-panel,
+    body.light-theme .table-container,
+    body.light-theme .modal-content,
+    body.light-theme .dropdown-menu,
+    body.light-theme .form-control,
+    body.light-theme .form-select,
+    body.light-theme .stat-card,
+    body.light-theme #chartModal .card { /* 🌟 修復圖表卡片沒有跟著變白的問題 */
+        background-color: #ffffff !important;
+        border-color: #cbd5e1 !important;
+        color: #1e293b !important;
+    }
+    
+    /* 表格白化 (利用 CSS 變數無痛轉換) */
+    body.light-theme .table-dark {
+        --bs-table-bg: #ffffff;
+        --bs-table-color: #1e293b;
+        --bs-table-border-color: #e2e8f0;
+        --bs-table-striped-bg: #f8fafc;
+        --bs-table-hover-bg: #f1f5f9;
+    }
+    body.light-theme .table th {
+        background-color: #f1f5f9 !important;
+        color: #0f172a !important;
+        border-bottom: 2px solid #0ea5e9 !important;
+    }
+    
+    /* 安全地反轉文字顏色 (避開 Navbar、按鈕與標籤) */
+    body.light-theme .search-panel .text-white-50,
+    body.light-theme .table-container .text-white-50,
+    body.light-theme .stat-card .text-white-50,
+    body.light-theme .modal-body .text-white-50 { color: #64748b !important; }
+    
+    body.light-theme .stat-card .text-white,
+    body.light-theme .modal-body .text-white { color: #0f172a !important; }
+
+    /* 🌟 修復「重置」按鈕文字在淺色模式下隱形的問題 */
+    body.light-theme .btn-outline-secondary.text-white { 
+        color: #475569 !important; 
+        border-color: #cbd5e1 !important; 
+    }
+    body.light-theme .btn-outline-secondary.text-white:hover {
+        background-color: #e2e8f0 !important;
+        color: #0f172a !important;
+    }
+    
+    /* 分頁與彈跳視窗細節反轉 */
+    body.light-theme .modal-header { background-color: #f1f5f9 !important; }
+    
+    /* 🌟 修復 X 關閉按鈕看不見的問題 (移除過度曝光) */
+    body.light-theme .btn-close-white { filter: invert(1) !important; }
+    
+    body.light-theme .page-link.bg-dark { background-color: #ffffff !important; border-color: #cbd5e1 !important; color: #1e293b !important; }
+    body.light-theme .list-group-item.bg-dark { background-color: #f8fafc !important; color: #1e293b !important; }
+	
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-column" style="height: calc(100vh - 95px); margin-top: -15px;">
+    
+    <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
+        <h4 class="text-info fw-bold mb-0"><i class="bi bi-search me-2"></i>NetFlow / sFlow 網路通訊軌跡明細檢索</h4>
+        <button id="themeToggleBtn" class="btn btn-sm btn-outline-secondary text-white shadow-sm" onclick="toggleTheme()">
+            <i class="bi bi-sun-fill me-1 text-warning"></i>切換淺色模式
+        </button>
+    </div>
+    
+    <div id="summaryDashboard" class="row g-2 mb-2 flex-shrink-0">
+        <div class="col-md-4">
+            <div id="card-download" class="card shadow-sm h-100 stat-card" style="background-color: rgba(32, 201, 151, 0.04); border: 1px solid #20c997;" onclick="filterByCard('download')" title="點擊過濾：僅顯示外到內流量">
+                <div class="card-body text-center py-2">
+                    <div class="text-success fw-bold mb-1" style="font-size: 0.82rem;"><i class="bi bi-cloud-arrow-down-fill me-1"></i>外到內 (總接收 Download)</div>
+                    <h4 id="sumDownload" class="text-white fw-bold mb-0">0.00 <span class="fs-6 text-white-50">MB</span></h4>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div id="card-upload" class="card shadow-sm h-100 stat-card" style="background-color: rgba(255, 193, 7, 0.04); border: 1px solid #ffc107;" onclick="filterByCard('upload')" title="點擊過濾：僅顯示內到外流量">
+                <div class="card-body text-center py-2">
+                    <div class="text-warning fw-bold mb-1" style="font-size: 0.82rem;"><i class="bi bi-cloud-arrow-up-fill me-1"></i>內到外 (總傳送 Upload)</div>
+                    <h4 id="sumUpload" class="text-white fw-bold mb-0">0.00 <span class="fs-6 text-white-50">MB</span></h4>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div id="card-internal" class="card shadow-sm h-100 stat-card" style="background-color: rgba(13, 202, 240, 0.04); border: 1px solid #0dcaf0;" onclick="filterByCard('internal')" title="點擊過濾：僅顯示內網互傳流量">
+                <div class="card-body text-center py-2">
+                    <div class="text-info fw-bold mb-1" style="font-size: 0.82rem;"><i class="bi bi-arrow-left-right me-1"></i>內網橫向通訊 (Internal)</div>
+                    <h4 id="sumInternal" class="text-white fw-bold mb-0">0.00 <span class="fs-6 text-white-50">MB</span></h4>
+                </div>
+            </div>
+        </div>
+    </div>
+	
+	<div class="modal fade" id="chartModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
+        <div class="modal-dialog modal-xl modal-dialog-centered">
+            <div class="modal-content shadow-lg" style="background-color: #1a202c; border: 1px solid #4a5568;">
+                <div class="modal-header border-secondary" style="background-color: #2a4365;">
+                    <h5 class="modal-title text-info fw-bold"><i class="bi bi-bar-chart-fill me-2"></i>流量趨勢與協定統計圖</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body text-white">
+                    <div class="row g-2">
+                        <div class="col-md-8">
+                            <div class="card shadow-sm h-100" style="background-color: #2d3748; border: 1px solid #4a5568;">
+                                <div class="card-body p-2" style="height: 350px;">
+                                    <canvas id="trendChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card shadow-sm h-100" style="background-color: #2d3748; border: 1px solid #4a5568;">
+                                <div class="card-body p-2 d-flex justify-content-center" style="height: 350px;">
+                                    <canvas id="protocolChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="search-panel p-2 mb-3 shadow-sm flex-shrink-0">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="small text-white-50 mb-1">⏰ 快選時間範圍</label>
+                <select id="timePreset" class="form-select form-select-sm" onchange="toggleCustomTime()">
+                    <option value="-5m" selected>最近 5 分鐘</option>
+					<option value="-15m">最近 15 分鐘</option>
+					<option value="-30m">最近 30 分鐘</option>
+                    <option value="-1h">最近 1 小時</option>
+                    <option value="-6h">最近 6 小時</option>
+                    <option value="-24h">最近 24 小時</option>
+                    <option value="custom">📅 自訂時間區間</option>
+                </select>
+            </div>
+            <div id="customTimeRange" class="col-md-3 d-none">
+                <div class="row g-1">
+                    <div class="col">
+                        <label class="small text-white-50 mb-1">開始時間</label>
+                        <input type="datetime-local" id="startTime" class="form-control form-control-sm">
+                    </div>
+                    <div class="col">
+                        <label class="small text-white-50 mb-1">結束時間</label>
+                        <input type="datetime-local" id="endTime" class="form-control form-control-sm">
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <label class="small text-white-50 mb-1">🖥️ 來源 IP</label>
+                <input type="text" id="srcIp" class="form-control form-control-custom form-control-sm" placeholder="如: 192.168.1.1">
+            </div>
+            <div class="col-md-2">
+                <label class="small text-white-50 mb-1">🌐 目的地 IP</label>
+                <input type="text" id="dstIp" class="form-control form-control-custom form-control-sm" placeholder="如: 8.8.8.8">
+            </div>
+            <div class="col-md-1">
+                <label class="small text-white-50 mb-1">🔌 通訊 Port</label>
+                <input type="text" id="portVal" class="form-control form-control-custom form-control-sm" placeholder="如: 443">
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+                <button class="btn btn-info btn-sm flex-grow-1 fw-bold shadow-sm" onclick="executeFlowSearch()">
+                    <i class="bi bi-funnel-fill me-1"></i>執行
+                </button>
+                <button class="btn btn-outline-secondary btn-sm flex-grow-1 fw-bold text-white shadow-sm" onclick="resetSearch()">
+                    <i class="bi bi-arrow-counterclockwise me-1"></i>重置
+                </button>
+            </div>
+            
+            <div class="col text-end align-self-end mb-1 d-flex flex-column align-items-end gap-2">
+                <button class="btn btn-warning btn-sm fw-bold shadow-sm" onclick="showChartModal()" id="btnShowCharts" disabled>
+                    <i class="bi bi-bar-chart-line-fill me-1"></i>流量統計圖
+                </button>
+                <div id="recordCountDisplay" class="badge bg-primary text-white fs-6 px-3 py-1.5 shadow-sm" style="border: 1px solid #0ea5e9; white-space: nowrap;">
+                    <i class="bi bi-list-columns-reverse me-1"></i> 目前顯示: 0 筆紀錄
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="table-container custom-scroll shadow-sm flex-grow-1" style="min-height: 0;">
+        <table class="table table-dark table-hover table-striped mb-0 align-middle small text-center" style="table-layout: fixed;">
+            <thead>
+                <tr>
+                    <th width="16%">🕒 通訊時間戳</th>
+                    <th width="15%">🖥️ 來源主機 (Source)</th>
+                    <th width="4%">➡️</th>
+                    <th width="15%">🌐 目的主機 (Dest)</th>
+                    <th width="13%">來源 Port</th>
+                    <th width="13%">目的 Port</th>
+                    <th width="10%">協定 (Protocol)</th>
+                    <th width="14%">📦 累積傳輸量</th>
+                </tr>
+            </thead>
+            <tbody id="flowResultBody">
+                <tr>
+                    <td colspan="8" class="text-white-50 py-5">
+                        <i class="bi bi-arrow-up-circle fs-3 d-block mb-2 text-info"></i>
+                        請設定上方篩選條件後，點擊「執行」調閱 InfluxDB 歷史大數據
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+	
+	<div class="d-flex justify-content-between align-items-center mt-2 flex-shrink-0 pb-1">
+        <div class="text-white-50 small"><i class="bi bi-layout-text-window-reverse me-1"></i>大數據檢索結果 (每頁顯示 50 筆)</div>
+        <div id="paginationContainer"></div>
+    </div>
+	
+	<div id="ipContextMenu" class="dropdown-menu shadow-sm" style="display:none; position: absolute; z-index: 1050; background-color: #2d3748; border: 1px solid #4a5568;">
+        <a class="dropdown-item text-info fw-bold" href="javascript:void(0)" onclick="performIpLookup()"><i class="bi bi-search me-2"></i>查詢 IP 來源與 DNS</a>
+        <div class="dropdown-divider border-secondary"></div>
+        <a class="dropdown-item text-white-50" href="javascript:void(0)" onclick="copyContextIp()"><i class="bi bi-clipboard me-2"></i>複製 IP 位址</a>
+    </div>
+
+    <div class="modal fade" id="ipInfoModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content" style="background-color: #1a202c; border: 1px solid #4a5568;">
+                <div class="modal-header border-secondary" style="background-color: #2a4365;">
+                    <h5 class="modal-title text-info fw-bold"><i class="bi bi-globe me-2"></i>IP 來源分析報告</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body text-white" id="ipInfoModalBody">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-info mb-2" role="status"></div>
+                        <p class="text-white-50 mb-0">正在穿透全球路由庫查詢中...</p>
+                    </div>
+                </div>
+                <div class="modal-footer border-secondary">
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">關閉視窗</button>
+                </div>
+            </div>
+        </div>
+    </div>
+	
+	<div class="modal fade" id="envWarningModal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1" aria-hidden="true" style="z-index: 1080;">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content shadow-lg" style="background-color: #2d3748; border: 2px solid #dc3545;">
+                <div class="modal-header border-danger" style="background-color: rgba(220, 53, 69, 0.15);">
+                    <h5 class="modal-title text-danger fw-bold"><i class="bi bi-exclamation-triangle-fill me-2"></i>大數據引擎異常警告</h5>
+                </div>
+                <div class="modal-body text-white" id="envWarningBody" style="font-size: 1.1rem;">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-danger mb-2" role="status"></div>
+                        <p class="text-white-50">正在檢查系統環境...</p>
+                    </div>
+                </div>
+                <div class="modal-footer border-secondary">
+                    <a href="/" class="btn btn-secondary"><i class="bi bi-house-door me-1"></i>回首頁</a>
+                    <button type="button" class="btn btn-outline-danger" data-bs-dismiss="modal">我知道了 (僅供檢視介面)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+	
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+// 🌟 圖表實例全域變數
+let trendChartInstance = null;
+let protocolChartInstance = null;
+
+// 🌟 觸發圖表彈跳視窗
+function showChartModal() {
+    if (currentDisplayData.length === 0) return;
+    renderCharts(currentDisplayData); // 開啟視窗時才花效能繪圖
+    const modalEl = document.getElementById('chartModal');
+    let modalInstance = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+    modalInstance.show();
+}
+
+// 🌟 繪製圖表的核心大腦 (加入原點、單位與智慧深淺變色)
+function renderCharts(dataArray) {
+    let timeMap = {};
+    let protoMap = {};
+    let reversedData = [...dataArray].reverse();
+    
+    reversedData.forEach(item => {
+        let t = item.time.substring(11, 16); 
+        let mb = parseFloat(item.traffic_mb) || 0;
+        timeMap[t] = (timeMap[t] || 0) + mb;
+
+        let p = parseProtocol(item.protocol, item.src_port, item.dst_port).name;
+        protoMap[p] = (protoMap[p] || 0) + mb;
+    });
+
+    // 💡 動態感知目前是否為淺色模式，取得最佳對比色
+    const isLight = document.body.classList.contains('light-theme');
+    const gridColor = isLight ? '#e2e8f0' : '#334155';
+    const textColor = isLight ? '#64748b' : '#64748b';
+    const titleColor = isLight ? '#1e293b' : '#94a3b8';
+    const pieBorderColor = isLight ? '#ffffff' : '#2d3748';
+
+    const trendCtx = document.getElementById('trendChart').getContext('2d');
+    if (trendChartInstance) trendChartInstance.destroy();
+    
+    trendChartInstance = new Chart(trendCtx, {
+        type: 'line',
+        data: {
+            labels: Object.keys(timeMap),
+            datasets: [{
+                label: '總傳輸量 (MB)',
+                data: Object.values(timeMap).map(v => v.toFixed(2)),
+                borderColor: '#0ea5e9',
+                backgroundColor: 'rgba(14, 165, 233, 0.2)',
+                borderWidth: 2,
+                fill: true,
+                tension: 0.3,
+                pointRadius: 4,          
+                pointHoverRadius: 6,
+                pointBackgroundColor: '#fff', 
+                pointBorderColor: '#0ea5e9'
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: { legend: { display: false }, title: { display: true, text: '流量時序趨勢', color: titleColor, font: { size: 14 } } },
+            scales: {
+                x: { ticks: { color: textColor, maxTicksLimit: 15 }, grid: { display: false } },
+                y: { 
+                    title: { display: true, text: '流量單位 (MB)', color: '#0ea5e9', font: { weight: 'bold' } },
+                    ticks: { color: textColor }, 
+                    grid: { color: gridColor, borderDash: [5, 5] }, 
+                    beginAtZero: true 
+                }
+            }
+        }
+    });
+
+    const protoCtx = document.getElementById('protocolChart').getContext('2d');
+    if (protocolChartInstance) protocolChartInstance.destroy();
+
+    const protoColors = { 'TCP': '#3b82f6', 'UDP': '#0dcaf0', 'ICMP': '#ef4444', 'ESP (VPN)': '#f59e0b' };
+    const bgColors = Object.keys(protoMap).map(k => protoColors[k] || '#6c757d');
+
+    protocolChartInstance = new Chart(protoCtx, {
+        type: 'doughnut',
+        data: {
+            labels: Object.keys(protoMap),
+            datasets: [{
+                data: Object.values(protoMap).map(v => v.toFixed(2)),
+                backgroundColor: bgColors,
+                borderWidth: 1,
+                borderColor: pieBorderColor // 💡 圓餅圖縫隙也會根據深淺變化
+            }]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'right', labels: { color: textColor, boxWidth: 12, font: { size: 12 } } },
+                title: { display: true, text: '協定佔比', color: titleColor, font: { size: 14 } }
+            },
+            cutout: '65%'
+        }
+    });
+}
+
+let allFetchedData = [];
+let currentActiveCard = '';
+let previousFiltersHistory = null; 
+
+// 🌟 改寫：全域通訊埠對照組改為由 config.db 動態熱載入
+let wellKnownPorts = {};
+
+function loadPortDictionaryFromDB() {
+    fetch('/api/flow/port_dictionary')
+        .then(res => res.json())
+        .then(data => {
+            wellKnownPorts = data;
+            console.log("📊 [Port字典] 成功由 config.db 熱載入 " + Object.keys(wellKnownPorts).length + " 組標準通訊埠名稱。");
+        })
+        .catch(err => {
+            console.error("⚠️ 無法獲取後端 Port 字典，啟用前端防禦性底線:", err);
+            wellKnownPorts = { '22': 'SSH', '80': 'HTTP', '443': 'HTTPS', '53': 'DNS', '161': 'SNMP' };
+        });
+}
+
+// 網頁載入時第一時間向後台索要字典
+loadPortDictionaryFromDB();
+
+const internalCidrs = "{{ internal_nets | default('10.0.0.0/8, 172.16.0.0/12, 192.168.1.0/24') }}".split(',').map(s => s.trim()).filter(s => s);
+const excludeCidrs = "{{ exclude_nets | default('') }}".split(',').map(s => s.trim()).filter(s => s);
+
+// 🌟 高階二進位轉換引擎 (無縫支援 IPv4 與 IPv6 CIDR 計算)
+function ipToBinaryString(ip) {
+    if (!ip) return '';
+    if (ip.includes('.')) { 
+        return ip.split('.').map(octet => parseInt(octet, 10).toString(2).padStart(8, '0')).join('');
+    } else if (ip.includes(':')) { 
+        let fullIp = ip;
+        if (ip.includes('::')) {
+            const parts = fullIp.split('::');
+            // 過濾空字串避免 :: 造成陣列空洞
+            const left = parts[0] ? parts[0].split(':').filter(Boolean) : [];
+            const right = parts[1] ? parts[1].split(':').filter(Boolean) : [];
+            const missing = 8 - (left.length + right.length);
+            const middle = Array(missing).fill('0000');
+            fullIp = [...left, ...middle, ...right].join(':');
+        }
+        return fullIp.split(':').map(part => {
+            let p = parseInt(part || '0', 16);
+            if (isNaN(p)) p = 0;
+            return p.toString(2).padStart(16, '0');
+        }).join('');
+    }
+    return '';
+}
+
+function isIpInCidr(ip, cidr) {
+    if (!cidr) return false;
+    let [range, bits] = cidr.split('/');
+    if (!bits) bits = range.includes('.') ? '32' : '128';
+    bits = parseInt(bits, 10);
+    const ipBin = ipToBinaryString(ip);
+    const rangeBin = ipToBinaryString(range);
+    if (!ipBin || !rangeBin || ipBin.length !== rangeBin.length) return false;
+    return ipBin.substring(0, bits) === rangeBin.substring(0, bits);
+}
+
+// 判斷 IP 類型 (支援 IPv6 智慧歸類與 Class D 群播)
+// 🌟 判斷 IP 類型 (動態結合後台系統設定網段)
+function getIpType(ip) {
+    if (!ip || ip === '-' || ip === 'Unknown') return 'unknown';
+    const lowerIp = ip.toLowerCase();
+
+    // 1. 特殊群播與本地鏈路
+    if (lowerIp.startsWith('ff') || lowerIp.startsWith('fe80')) {
+        return 'class_d'; 
+    }
+
+    // 2. 優先比對「排除網段 (Exclude)」
+    for (let cidr of excludeCidrs) {
+        if (isIpInCidr(lowerIp, cidr)) return 'exclude';
+    }
+    
+    // 3. 核心比對「內網網段 (Internal)」，真正支援自訂 IPv6 /48 等遮罩！
+    for (let cidr of internalCidrs) {
+        if (isIpInCidr(lowerIp, cidr)) return 'internal';
+    }
+
+    // 4. 兜底機制：若都沒設定，基本識別 IPv4 私有網段 (RFC 1918)
+    const parts = ip.split('.');
+    if (parts.length === 4) {
+        const firstOctet = parseInt(parts[0], 10);
+        if (firstOctet >= 224 && firstOctet <= 255) return 'class_d'; 
+        if (firstOctet === 10 || firstOctet === 127 || firstOctet === 169) return 'internal';
+        if (firstOctet === 172 && parseInt(parts[1], 10) >= 16 && parseInt(parts[1], 10) <= 31) return 'internal';
+        if (firstOctet === 192 && parseInt(parts[1], 10) === 168) return 'internal';
+    }
+    
+    return 'external';
+}
+
+function getIpColorClass(type) {
+    if (type === 'internal') return 'text-success'; 
+    if (type === 'exclude') return 'text-warning';  
+    if (type === 'multicast') return 'text-primary'; // 💡 賦予多播專屬的科技藍色 
+    return 'text-danger';                           
+}
+
+// 🌟 協定探測邏輯全面改與資料庫動態字典對齊
+function parseProtocol(proto, srcPort, dstPort) {
+    const p = String(proto).trim().toUpperCase();
+    let sP = String(srcPort).trim();
+    let dP = String(dstPort).trim();
+    
+    if (p === 'TCP/UDP' || p === '-' || p === 'UNKNOWN' || p === '' || p === '0') {
+        // 標準知名 UDP 埠特徵集合
+        const udpList = ['53', '67', '68', '69', '123', '161', '162', '514', '546', '547'];
+        if (udpList.includes(sP) || udpList.includes(dP)) return { name: 'UDP', badge: 'bg-info text-dark' };
+        return { name: 'TCP', badge: 'bg-primary' };
+    }
+    
+    if (p === '6' || p === 'TCP') return { name: 'TCP', badge: 'bg-primary' };
+    if (p === '17' || p === 'UDP') return { name: 'UDP', badge: 'bg-info text-dark' };
+    if (p === '1' || p === 'ICMP') return { name: 'ICMP', badge: 'bg-danger' };
+    if (p === '50' || p === 'ESP') return { name: 'ESP (VPN)', badge: 'bg-warning text-dark' };
+    return { name: p, badge: 'bg-secondary' }; 
+}
+
+function renderSmartPort(portStr) {
+    if (!portStr || portStr === '-' || portStr === 'Unknown') return '<span class="text-white-50">-</span>';
+    let pInt = parseInt(portStr);
+    if (isNaN(pInt)) return `<span class="text-white-50">${portStr}</span>`;
+    
+    let pDesc = wellKnownPorts[portStr];
+    let displayText = portStr;
+    if (pDesc && pInt <= 8192) displayText = `${portStr} (${pDesc})`;
+    
+    let fullTitle = `Port: ${portStr} ${pDesc ? `（${pDesc}）` : ''} - 點擊鎖定過濾 (再次點擊還原)`;
+    return `<div class="text-truncate mx-auto text-info fw-bold clickable-link" style="max-width: 120px;" onclick="searchSpecificPort('${portStr}')" title="${fullTitle}">${displayText}</div>`;
+}
+
+function toggleCustomTime() {
+    const preset = document.getElementById('timePreset').value;
+    const customDiv = document.getElementById('customTimeRange');
+    if (preset === 'custom') customDiv.classList.remove('d-none');
+    else customDiv.classList.add('d-none');
+}
+
+function searchSpecificIP(ip, type) {
+    let srcIn = document.getElementById('srcIp');
+    let dstIn = document.getElementById('dstIp');
+
+    if ((type === 'src' && srcIn.value === ip && dstIn.value === '') ||
+        (type === 'dst' && dstIn.value === ip && srcIn.value === '')) {
+        
+        if (previousFiltersHistory) {
+            srcIn.value = previousFiltersHistory.src_ip;
+            dstIn.value = previousFiltersHistory.dst_ip;
+            document.getElementById('portVal').value = previousFiltersHistory.port;
+            document.getElementById('timePreset').value = previousFiltersHistory.timePreset;
+            previousFiltersHistory = null;
+        } else {
+            srcIn.value = ''; dstIn.value = '';
+        }
+    } else {
+        previousFiltersHistory = {
+            src_ip: srcIn.value, dst_ip: dstIn.value,
+            port: document.getElementById('portVal').value,
+            timePreset: document.getElementById('timePreset').value
+        };
+        if (type === 'src') { srcIn.value = ip; dstIn.value = ''; } 
+        else { dstIn.value = ip; srcIn.value = ''; }
+    }
+    
+    currentActiveCard = '';
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+    executeFlowSearch();
+}
+
+function searchSpecificPort(port) {
+    let portIn = document.getElementById('portVal');
+    
+    if (portIn.value === port) {
+        if (previousFiltersHistory) {
+            document.getElementById('srcIp').value = previousFiltersHistory.src_ip;
+            document.getElementById('dstIp').value = previousFiltersHistory.dst_ip;
+            portIn.value = previousFiltersHistory.port;
+            document.getElementById('timePreset').value = previousFiltersHistory.timePreset;
+            previousFiltersHistory = null;
+        } else {
+            portIn.value = '';
+        }
+    } else {
+        previousFiltersHistory = {
+            src_ip: document.getElementById('srcIp').value,
+            dst_ip: document.getElementById('dstIp').value,
+            port: portIn.value,
+            timePreset: document.getElementById('timePreset').value
+        };
+        portIn.value = port;
+    }
+    
+    currentActiveCard = '';
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+    executeFlowSearch();
+}
+
+function resetSearch() {
+    document.getElementById('timePreset').value = '-5m';
+    document.getElementById('customTimeRange').classList.add('d-none');
+    document.getElementById('srcIp').value = '';
+    document.getElementById('dstIp').value = '';
+    document.getElementById('portVal').value = '';
+    
+    currentActiveCard = '';
+    previousFiltersHistory = null;
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+    
+    executeFlowSearch();
+}
+
+// 🌟 新增全域分頁狀態變數
+let currentPage = 1;
+const recordsPerPage = 50;
+let currentDisplayData = []; // 目前正在顯示/過濾後的整體資料陣列
+
+// ========================================================
+// 🛡️ 系統健康檢查 (防呆機制)
+// ========================================================
+document.addEventListener('DOMContentLoaded', function() {
+    checkFlowEnvironment();
+});
+
+function checkFlowEnvironment() {
+    fetch('/api/flow/check_env')
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                // 只要有任何一個沒啟動，就觸發警告
+                if (!data.influxdb_ok || !data.telegraf_ok) {
+                    showEnvWarning(data.influxdb_ok, data.telegraf_ok);
+                }
+            }
+        })
+        .catch(err => console.error("環境檢查失敗:", err));
+}
+
+function showEnvWarning(influxOk, telegrafOk) {
+    let msg = '<p class="mb-3">系統偵測到您的「流量分析底層服務」未正常運作，目前無法進行任何資料查詢：</p><ul class="list-group list-group-flush rounded border border-secondary mb-2">';
+    
+    // InfluxDB 狀態
+    if (!influxOk) {
+        msg += '<li class="list-group-item bg-dark text-danger fw-bold py-3"><i class="bi bi-database-x fs-5 me-2"></i> InfluxDB 時序資料庫：未安裝或未啟動</li>';
+    } else {
+        msg += '<li class="list-group-item bg-dark text-success py-3"><i class="bi bi-database-check fs-5 me-2"></i> InfluxDB 時序資料庫：正常運行中</li>';
+    }
+    
+    // Telegraf 狀態
+    if (!telegrafOk) {
+        msg += '<li class="list-group-item bg-dark text-danger fw-bold py-3"><i class="bi bi-plugin fs-5 me-2"></i> Telegraf 收集引擎：未安裝或未啟動</li>';
+    } else {
+        msg += '<li class="list-group-item bg-dark text-success py-3"><i class="bi bi-plugin fs-5 me-2"></i> Telegraf 收集引擎：正常運行中</li>';
+    }
+    msg += '</ul><p class="text-white-50 small mt-3">* 請登入伺服器後台檢查服務狀態 (services.msc)。</p>';
+
+    document.getElementById('envWarningBody').innerHTML = msg;
+    
+    // 💡 1. 物理鎖死「執行」與「匯出」按鈕
+    const searchBtn = document.querySelector('button[onclick="executeFlowSearch()"]');
+    if(searchBtn) {
+        searchBtn.disabled = true;
+        searchBtn.innerHTML = '<i class="bi bi-lock-fill me-1"></i>引擎未啟動';
+        searchBtn.classList.replace('btn-info', 'btn-secondary');
+    }
+    
+    const exportBtn = document.querySelector('button[onclick="exportToCSV()"]');
+    if(exportBtn) {
+        exportBtn.disabled = true;
+    }
+
+    // 💡 2. 物理鎖死「重置」按鈕
+    const resetBtn = document.querySelector('button[onclick="resetSearch()"]');
+    if(resetBtn) {
+        resetBtn.disabled = true;
+        resetBtn.classList.add('opacity-50'); // 加上半透明灰暗效果
+    }
+
+    // 💡 3. 物理鎖死上方三個「流量統計卡片」
+    document.querySelectorAll('.stat-card').forEach(card => {
+        card.style.pointerEvents = 'none'; // 徹底禁用滑鼠點擊與 Hover 浮動效果
+        card.style.opacity = '0.4';        // 讓卡片變暗，呈現不可用狀態
+        card.onclick = null;               // 拔除原本綁定的 filterByCard 事件
+    });
+
+    // 彈出強迫視窗
+    const envModal = new bootstrap.Modal(document.getElementById('envWarningModal'));
+    envModal.show();
+}
+
+// ========================================================
+// 1. 核心渲染入口：負責接收新資料並初始化頁碼
+// ========================================================
+function renderTable(dataArray) {
+    currentDisplayData = dataArray;
+    currentPage = 1; // 只要有新搜尋或新過濾，一律回到第 1 頁
+    renderCurrentPage();
+    
+    // 🌟 判斷是否有資料，解鎖或鎖死「流量統計圖」按鈕
+    const chartBtn = document.getElementById('btnShowCharts');
+    if(chartBtn) chartBtn.disabled = (dataArray.length === 0);
+}
+
+// ========================================================
+// 2. 切頁處理大腦：負責切割 50 筆資料並畫出表格
+// ========================================================
+function renderCurrentPage() {
+    const tbody = document.getElementById('flowResultBody');
+    const countDisplay = document.getElementById('recordCountDisplay');
+    const paginationContainer = document.getElementById('paginationContainer');
+
+    if (currentDisplayData.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" class="text-white-50 py-5"><i class="bi bi-info-circle me-1"></i> 目前無對應的網路流量明細紀錄。</td></tr>`;
+        countDisplay.innerHTML = `<i class="bi bi-list-columns-reverse me-1"></i> 目前顯示: 0 筆紀錄`;
+        if (paginationContainer) paginationContainer.innerHTML = '';
+        return;
+    }
+
+    const totalRecords = currentDisplayData.length;
+    const totalPages = Math.ceil(totalRecords / recordsPerPage);
+    
+    // 防呆機制：頁碼不允許越界
+    if (currentPage < 1) currentPage = 1;
+    if (currentPage > totalPages) currentPage = totalPages;
+
+    // 💡 陣列切割核心 (只取該頁的 50 筆)
+    const startIndex = (currentPage - 1) * recordsPerPage;
+    const endIndex = Math.min(startIndex + recordsPerPage, totalRecords);
+    const pageData = currentDisplayData.slice(startIndex, endIndex);
+
+    let html = '';
+    pageData.forEach(item => {
+        let srcType = getIpType(item.src_ip);
+        let dstType = getIpType(item.dst_ip);
+        let srcColor = getIpColorClass(srcType);
+        let dstColor = getIpColorClass(dstType);
+        
+        let protoInfo = parseProtocol(item.protocol, item.src_port, item.dst_port);
+        let srcPortHtml = renderSmartPort(item.src_port);
+        let dstPortHtml = renderSmartPort(item.dst_port);
+
+        const trafficBadge = item.traffic_mb > 100 
+            ? `<span class="badge bg-danger fw-bold shadow-sm">${item.traffic_mb} MB</span>`
+            : (item.traffic_mb > 10 ? `<span class="badge bg-warning text-dark fw-bold shadow-sm">${item.traffic_mb} MB</span>` : `<span class="text-info">${item.traffic_mb} MB</span>`);
+            
+        html += `
+            <tr>
+                <td class="text-white-50">${item.time}</td>
+                <td><span class="${srcColor} fw-bold clickable-link" onclick="searchSpecificIP('${item.src_ip}', 'src')" oncontextmenu="showIpContextMenu(event, '${item.src_ip}')" title="左鍵: 快速過濾 | 右鍵: 來源探測">${item.src_ip}</span></td>
+                <td><i class="bi bi-arrow-right text-secondary"></i></td>
+                <td><span class="${dstColor} fw-bold clickable-link" onclick="searchSpecificIP('${item.dst_ip}', 'dst')" oncontextmenu="showIpContextMenu(event, '${item.dst_ip}')" title="左鍵: 快速過濾 | 右鍵: 來源探測">${item.dst_ip}</span></td>
+                <td>${srcPortHtml}</td>
+                <td>${dstPortHtml}</td>
+                <td><span class="badge ${protoInfo.badge} px-2 shadow-sm" style="min-width:45px; display:inline-block;">${protoInfo.name}</span></td>
+                <td>${trafficBadge}</td>
+            </tr>
+        `;
+    });
+    
+    tbody.innerHTML = html;
+    
+    // 💡 更新右上角動態筆數
+    countDisplay.innerHTML = `<i class="bi bi-list-columns-reverse me-1"></i> 顯示 ${startIndex + 1} ~ ${endIndex} / 共 ${totalRecords} 筆`;
+
+    // 繪製下方分頁按鈕
+    renderPaginationControls(totalPages);
+}
+
+// ========================================================
+// 3. UI 繪製：負責畫出首頁、前後頁以及固定 10 頁區塊按鈕
+// ========================================================
+function renderPaginationControls(totalPages) {
+    const container = document.getElementById('paginationContainer');
+    if (!container) return;
+
+    if (totalPages <= 1) {
+        container.innerHTML = ''; // 只有一頁時自動隱藏分頁列
+        return;
+    }
+
+    let html = `<ul class="pagination pagination-sm mb-0 shadow-sm">`;
+    
+    // |<< 首頁 & < 前頁
+    html += `<li class="page-item ${currentPage === 1 ? 'disabled' : ''}"><a class="page-link bg-dark text-info border-secondary" href="javascript:void(0)" onclick="changePage(1)">|&lt;&lt; 首頁</a></li>`;
+    html += `<li class="page-item ${currentPage === 1 ? 'disabled' : ''}"><a class="page-link bg-dark text-info border-secondary" href="javascript:void(0)" onclick="changePage(${currentPage - 1})">&lt; 前頁</a></li>`;
+
+    // 💡 區塊式分頁計算：固定顯示 1-10, 11-20, 21-30...
+    let maxBtns = 10;
+    let currentBlock = Math.ceil(currentPage / maxBtns); // 算出目前位在第幾個 10 頁區塊
+    let startPage = (currentBlock - 1) * maxBtns + 1;
+    let endPage = Math.min(startPage + maxBtns - 1, totalPages);
+
+    // ⏪ 若前方還有其他區塊，顯示 "..." 按鈕可快速跳回前十頁
+    if (startPage > 1) {
+        html += `<li class="page-item"><a class="page-link bg-dark text-white-50 border-secondary" href="javascript:void(0)" onclick="changePage(${startPage - 1})" title="跳至上一個區塊">...</a></li>`;
+    }
+
+    // 繪製區塊內的數字按鈕
+    for (let i = startPage; i <= endPage; i++) {
+        if (i === currentPage) {
+            html += `<li class="page-item active"><a class="page-link bg-info text-dark border-info fw-bold" href="javascript:void(0)">${i}</a></li>`;
+        } else {
+            html += `<li class="page-item"><a class="page-link bg-dark text-white-50 border-secondary" href="javascript:void(0)" onclick="changePage(${i})">${i}</a></li>`;
+        }
+    }
+
+    // ⏩ 若後方還有其他區塊，顯示 "..." 按鈕可快速跳至後十頁
+    if (endPage < totalPages) {
+        html += `<li class="page-item"><a class="page-link bg-dark text-white-50 border-secondary" href="javascript:void(0)" onclick="changePage(${endPage + 1})" title="跳至下一個區塊">...</a></li>`;
+    }
+
+    // 後頁 > & 末頁 >>|
+    html += `<li class="page-item ${currentPage === totalPages ? 'disabled' : ''}"><a class="page-link bg-dark text-info border-secondary" href="javascript:void(0)" onclick="changePage(${currentPage + 1})">後頁 &gt;</a></li>`;
+    html += `<li class="page-item ${currentPage === totalPages ? 'disabled' : ''}"><a class="page-link bg-dark text-info border-secondary" href="javascript:void(0)" onclick="changePage(${totalPages})">末頁 &gt;&gt;|</a></li>`;
+    
+    html += `</ul>`;
+    container.innerHTML = html;
+}
+
+// 點擊頁碼按鈕時的觸發器
+function changePage(page) {
+    currentPage = page;
+    renderCurrentPage();
+}
+
+function filterByCard(type) {
+    if (allFetchedData.length === 0) return;
+    document.querySelectorAll('.stat-card').forEach(c => c.classList.remove('active'));
+
+    if (currentActiveCard === type) {
+        currentActiveCard = '';
+        renderTable(allFetchedData);
+        return;
+    }
+
+    currentActiveCard = type;
+    document.getElementById('card-' + type).classList.add('active');
+
+    let filteredData = [];
+    if (type === 'download') {
+        filteredData = allFetchedData.filter(item => getIpType(item.src_ip) !== 'internal' && getIpType(item.dst_ip) === 'internal');
+    } else if (type === 'upload') {
+        filteredData = allFetchedData.filter(item => getIpType(item.src_ip) === 'internal' && getIpType(item.dst_ip) !== 'internal');
+    } else if (type === 'internal') {
+        filteredData = allFetchedData.filter(item => getIpType(item.src_ip) === 'internal' && getIpType(item.dst_ip) === 'internal');
+    }
+    renderTable(filteredData);
+}
+
+function executeFlowSearch() {
+    const preset = document.getElementById('timePreset').value;
+    let start = preset, end = 'now()';
+    
+    if (preset === 'custom') {
+        const sInput = document.getElementById('startTime').value;
+        const eInput = document.getElementById('endTime').value;
+        if (!sInput || !eInput) {
+            showToast('🚨 請完整選擇自訂時間的開始與結束範圍！', 'danger');
+            return;
+        }
+        start = new Date(sInput).toISOString();
+        end = new Date(eInput).toISOString();
+    }
+
+    const tbody = document.getElementById('flowResultBody');
+    tbody.innerHTML = `<tr><td colspan="8" class="py-5 text-info"><div class="spinner-border spinner-border-sm me-2"></div>正在穿透 InfluxDB 大數據叢集，請稍候...</td></tr>`;
+
+    document.getElementById('sumDownload').innerHTML = '0.00 <span class="fs-6 text-white-50">MB</span>';
+    document.getElementById('sumUpload').innerHTML = '0.00 <span class="fs-6 text-white-50">MB</span>';
+    document.getElementById('sumInternal').innerHTML = '0.00 <span class="fs-6 text-white-50">MB</span>';
+    document.getElementById('recordCountDisplay').innerHTML = `<i class="bi bi-arrow-repeat spin me-1"></i> 讀取中...`;
+
+    fetch('/api/flow/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            start_time: start,
+            src_ip: document.getElementById('srcIp').value,
+            dst_ip: document.getElementById('dstIp').value,
+            port: document.getElementById('portVal').value
+        })
+    })
+    .then(res => res.json())
+    .then(res => {
+        if (res.status === 'success') {
+            allFetchedData = res.data;
+            let sumDown = 0.0, sumUp = 0.0, sumInt = 0.0;
+
+            allFetchedData.forEach(item => {
+                let srcIsInternal = (getIpType(item.src_ip) === 'internal');
+                let dstIsInternal = (getIpType(item.dst_ip) === 'internal');
+                let mb = parseFloat(item.traffic_mb) || 0;
+
+                if (!srcIsInternal && dstIsInternal) sumDown += mb;
+                else if (srcIsInternal && !dstIsInternal) sumUp += mb;
+                else if (srcIsInternal && dstIsInternal) sumInt += mb;
+            });
+            
+            document.getElementById('sumDownload').innerHTML = sumDown.toFixed(2) + ' <span class="fs-6 text-white-50">MB</span>';
+            document.getElementById('sumUpload').innerHTML = sumUp.toFixed(2) + ' <span class="fs-6 text-white-50">MB</span>';
+            document.getElementById('sumInternal').innerHTML = sumInt.toFixed(2) + ' <span class="fs-6 text-white-50">MB</span>';
+
+            renderTable(allFetchedData);
+        } else {
+            document.getElementById('recordCountDisplay').innerHTML = `<i class="bi bi-x-circle me-1"></i> 讀取失敗`;
+            tbody.innerHTML = `<tr><td colspan="8" class="text-danger py-5"><i class="bi bi-x-circle me-1"></i> API 回傳失敗: ${res.message}</td></tr>`;
+        }
+    })
+    .catch(err => {
+        console.error("Fetch Error:", err);
+        document.getElementById('recordCountDisplay').innerHTML = `<i class="bi bi-x-circle me-1"></i> 讀取失敗`;
+        tbody.innerHTML = `<tr><td colspan="8" class="text-danger py-5"><i class="bi bi-x-circle me-1"></i> 檢索失敗，請檢查後端連線。</td></tr>`;
+    });
+}
+
+// ========================================================
+// 🌟 右鍵選單與 IP 查詢引擎 (防錯強固版)
+// ========================================================
+let contextTargetIp = '';
+const ipContextMenu = document.getElementById('ipContextMenu');
+
+// 攔截右鍵並顯示自訂選單
+function showIpContextMenu(e, ip) {
+    e.preventDefault(); 
+    contextTargetIp = ip;
+    if(ipContextMenu) {
+        ipContextMenu.style.display = 'block';
+        let x = e.pageX;
+        let y = e.pageY;
+        // 防止選單超出視窗邊界
+        if (x + 200 > window.innerWidth) x = window.innerWidth - 200;
+        if (y + 100 > window.innerHeight) y = window.innerHeight - 100;
+        ipContextMenu.style.left = x + 'px';
+        ipContextMenu.style.top = y + 'px';
+    }
+}
+
+// 點擊畫面其他地方自動隱藏選單
+document.addEventListener('click', function(e) {
+    if (ipContextMenu && ipContextMenu.style.display === 'block') {
+        ipContextMenu.style.display = 'none';
+    }
+});
+
+// 複製 IP 功能
+function copyContextIp() {
+    navigator.clipboard.writeText(contextTargetIp).then(() => {
+        if(typeof window.showToast === 'function') window.showToast(`✅ 已複製 IP: ${contextTargetIp}`, 'success');
+    }).catch(err => {
+        console.error("複製失敗:", err);
+    });
+}
+
+// 執行後端查詢並顯示 Modal (無痛串接後端 Google 翻譯雙列 UI 與 MAC 擷取大腦)
+function performIpLookup() {
+    const modalEl = document.getElementById('ipInfoModal');
+    if (!modalEl) { alert("❌ 找不到彈跳視窗 HTML 元素！"); return; }
+    
+    let modalInstance = bootstrap.Modal.getInstance(modalEl);
+    if (!modalInstance) modalInstance = new bootstrap.Modal(modalEl);
+    modalInstance.show();
+    
+    const modalBody = document.getElementById('ipInfoModalBody');
+    modalBody.innerHTML = `
+        <div class="text-center py-4">
+            <div class="spinner-border text-info mb-2" role="status"></div>
+            <p class="text-white-50 mb-0">正在對 <span class="text-info fw-bold">${contextTargetIp}</span> 進行反解與路由查詢...</p>
+        </div>
+    `;
+
+    fetch(`/api/tools/ip_lookup/${contextTargetIp}`)
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                const geo = data.geo || {}; 
+                const dnsColor = (data.hostname && data.hostname.includes('No PTR')) ? 'text-warning' : 'text-success';
+                // 💡 三向標籤動態產生
+                const isInternalBadge = data.is_multicast ? `<span class="badge bg-primary ms-2"><i class="bi bi-broadcast me-1"></i>多播位址</span>` :
+                                       (data.is_internal ? `<span class="badge bg-success ms-2">內網設備</span>` : `<span class="badge bg-danger ms-2">外部來源</span>`);
+                
+                let detailBlockHtml = '';
+                
+                if (data.is_multicast) {
+                    // 📡 1. 多播專屬面板：顯示百科解說
+                    detailBlockHtml = `
+                        <div class="row g-2">
+                            <div class="col-12">
+                                <div class="p-3 rounded border border-primary" style="background-color: rgba(13, 110, 253, 0.1);">
+                                    <span class="text-primary small d-block mb-2"><i class="bi bi-info-circle me-1"></i>Class D 多播與群播保留位址</span>
+                                    
+                                    <span class="fs-4 fw-bold text-white d-block mb-1">${data.multicast_desc}</span>
+                                    
+                                    <span class="text-white-50" style="font-size: 0.85rem; margin-top: 12px; display: block; border-top: 1px dashed rgba(13, 110, 253, 0.3); padding-top: 8px;">
+                                        * 此位址專門用於將封包同時傳送給多個指定的接收端，常用於區域網路路由協定交換、設備自動發現與影音串流。
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else if (data.is_internal) {
+                    // 🏠 2. 內網情境：顯示 MAC 位址與複製按鈕
+                    let macStr = data.mac_address || '無法解析 (無 ARP 快取)';
+                    let macColor = macStr.includes('無法解析') ? 'text-white-50' : 'text-info';
+                    
+                    let macParts = macStr.split(' (');
+                    let mainMac = macParts[0]; 
+                    let macSuffix = macParts.length > 1 ? '(' + macParts[1] : ''; 
+                    
+                    let copyBtn = macStr.includes('無法解析') ? '' : 
+                        `<button class="btn btn-sm btn-outline-info py-0 px-2 ms-3 flex-shrink-0" onclick="copyTextToClipboard('${mainMac}', 'MAC 位址')" title="複製 MAC"><i class="bi bi-clipboard"></i> 複製</button>`;
+                    
+                    detailBlockHtml = `
+                        <div class="row g-2">
+                            <div class="col-12">
+                                <div class="p-3 rounded border border-success" style="background-color: rgba(25, 135, 84, 0.1);">
+                                    <span class="text-success small d-block mb-2"><i class="bi bi-pc-display-horizontal me-1"></i>內網實體網卡位址 (MAC Address)</span>
+                                    
+                                    <div class="d-flex align-items-center">
+                                        <span class="fs-5 fw-bold ${macColor} font-monospace">${mainMac}</span>
+                                        ${copyBtn}
+                                    </div>
+                                    
+                                    ${macSuffix ? `<span class="${macColor} opacity-75 d-block mt-1 mb-2" style="font-size: 0.95rem;">${macSuffix}</span>` : ''}
+
+                                    <span class="text-white-50" style="font-size: 0.75rem; margin-top: 8px; display: block; border-top: 1px dashed rgba(25, 135, 84, 0.3); padding-top: 6px;">* 此資料由背景引擎自交換器 ARP 表動態擷取，或本機路由解析</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    // 🌍 3. 外網情境：中英文雙列優雅呈現 (終極霸氣大字體版)
+                    let zhCountry = geo.country_zh || '-';
+                    let enCountry = geo.country_en || '-';
+                    let zhCity = geo.city_zh || '-';
+                    let enCity = geo.city_en || '-';
+                    let zhIsp = geo.isp_zh || '-';
+                    let enIsp = geo.isp_en || '-';
+
+                    detailBlockHtml = `
+                        <div class="row g-2 mb-2">
+                            <div class="col-6">
+                                <div class="p-3 rounded h-100" style="background-color: #2d3748;">
+                                    <span class="text-white-50 d-block mb-2" style="font-size: 1.1rem;">國家 / 地區</span>
+                                    <span class="fw-bold fs-4 d-block mb-1">${zhCountry}</span>
+                                    <span class="text-white-50 font-monospace" style="font-size: 1.1rem;">${enCountry}</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="p-3 rounded h-100" style="background-color: #2d3748;">
+                                    <span class="text-white-50 d-block mb-2" style="font-size: 1.1rem;">城市 (City)</span>
+                                    <span class="fw-bold fs-4 d-block mb-1">${zhCity}</span>
+                                    <span class="text-white-50 font-monospace" style="font-size: 1.1rem;">${enCity}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row g-2">
+                            <div class="col-12">
+                                <div class="p-3 rounded" style="background-color: #2d3748;">
+                                    <span class="text-white-50 d-block mb-2" style="font-size: 1.1rem;">ISP 服務商 / 組織網域</span>
+                                    <span class="fw-bold text-warning fs-4 d-block mb-1">${zhIsp}</span>
+                                    <span class="text-white-50 font-monospace" style="font-size: 1.1rem;">${enIsp}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                // 組合最終版面
+                modalBody.innerHTML = `
+                    <div class="mb-3 border-bottom border-secondary pb-2">
+                        <span class="text-white-50 small d-block">目標 IP 位址</span>
+                        <span class="fs-5 fw-bold text-info font-monospace">${data.ip}</span> ${isInternalBadge}
+                    </div>
+                    <div class="mb-3">
+                        <span class="text-white-50 small d-block">DNS 反解紀錄 (PTR)</span>
+                        <span class="fw-bold ${dnsColor}"><i class="bi bi-hdd-network me-1"></i> ${data.hostname || '-'}</span>
+                    </div>
+                    ${detailBlockHtml}
+                `;
+            } else {
+                modalBody.innerHTML = `<div class="alert alert-danger mb-0">查詢失敗: ${data.message}</div>`;
+            }
+        })
+        .catch(err => {
+            console.error(err);
+            modalBody.innerHTML = `<div class="alert alert-danger mb-0">網路通訊失敗，無法連線至後端。</div>`;
+        });
+}
+
+// 供 Modal 內部使用的通用複製按鈕
+function copyTextToClipboard(text, typeName) {
+    navigator.clipboard.writeText(text).then(() => {
+        if(typeof window.showToast === 'function') window.showToast(`✅ 已複製 ${typeName}: ${text}`, 'success');
+    }).catch(err => console.error("複製失敗:", err));
+}
+
+// ========================================================
+// 🌞 深淺色切換引擎 (包含 LocalStorage 自動記憶)
+// ========================================================
+function toggleTheme() {
+    const body = document.body;
+    const btn = document.getElementById('themeToggleBtn');
+    const isLight = body.classList.toggle('light-theme');
+    
+    localStorage.setItem('flow_theme', isLight ? 'light' : 'dark');
+    
+    // 更改按鈕文字與外觀
+    if (isLight) {
+        btn.innerHTML = '<i class="bi bi-moon-stars-fill me-1 text-primary"></i>切換深色模式';
+        btn.classList.replace('btn-outline-secondary', 'btn-outline-primary');
+        btn.classList.replace('text-white', 'text-dark');
+    } else {
+        btn.innerHTML = '<i class="bi bi-sun-fill me-1 text-warning"></i>切換淺色模式';
+        btn.classList.replace('btn-outline-primary', 'btn-outline-secondary');
+        btn.classList.replace('text-dark', 'text-white');
+    }
+    
+    // 重新渲染圖表以套用新主題顏色
+    if (currentDisplayData && currentDisplayData.length > 0) {
+        renderCharts(currentDisplayData);
+    }
+}
+
+// 網頁載入時自動讀取之前的設定
+document.addEventListener('DOMContentLoaded', () => {
+    if (localStorage.getItem('flow_theme') === 'light') {
+        toggleTheme(); 
+    }
+});
+</script>
+{% endblock %}

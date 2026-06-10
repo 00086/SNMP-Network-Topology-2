@@ -1,0 +1,388 @@
+<div class="modal fade" id="globalSearchModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl" style="margin-top: 5vh; max-width: 1200px;">
+    <div class="modal-content bg-dark text-white shadow-lg border-secondary">
+      <div class="modal-header border-secondary py-2">
+        <h5 class="modal-title text-warning fw-bold"><i class="bi bi-search me-2"></i>全網進階尋址 (ARP / FDB / Route)</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body" style="padding: 1.5rem;">
+        <div class="input-group mb-3 shadow-sm">
+            <span class="input-group-text bg-black text-secondary border-secondary"><i class="bi bi-funnel"></i></span>
+            <input type="text" id="globalSearchInput" class="form-control bg-dark text-white border-secondary" placeholder="請輸入精確 IP 或 MAC 位址 (支援 * 或 ? 萬用字元)..." onkeypress="if(event.key === 'Enter') executeGlobalSearch()">
+            <button class="btn btn-warning fw-bold px-4" type="button" onclick="executeGlobalSearch()">尋找</button>
+        </div>
+        <div id="searchResults" class="custom-scroll" style="max-height: 60vh; overflow-y: auto; overflow-x: auto; padding-right: 5px;">
+            <div class="text-white-50 text-center mt-5">
+                <i class="bi bi-hdd-network display-4 d-block mb-2 opacity-50"></i>
+                在此輸入目標特徵，系統將即時遍歷所有設備的底層路由與學習表。<br><br>
+                💡 提示：系統已整合「<b>LLDP 實體連線感知</b>」與「<b>FDB 學習數量推演</b>」。<br>
+                串接多個設備的 Uplink / Downlink 埠將被自動判定為中繼並過濾，優先顯示最終端的實體連接孔位。<br>
+                若需要模糊比對，請加上萬用字元：<code>*</code> 代表任意字串，<code>?</code> 代表單一字元。
+            </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+    // 💡 防呆機制：確保通報函數絕對存在
+    if (typeof window.logFrontendAction !== 'function') {
+        window.logFrontendAction = function(action, target, details) {
+            fetch('/api/audit-logs/client', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: action, target: target, details: details, username: 'SystemUser' })
+            }).catch(e => console.error(e));
+        };
+    }
+
+    function openGlobalSearch() {
+        var searchModal = new bootstrap.Modal(document.getElementById('globalSearchModal'));
+        document.getElementById('globalSearchInput').value = '';
+        document.getElementById('searchResults').innerHTML = `
+            <div class="text-white-50 text-center mt-5">
+                <i class="bi bi-hdd-network display-4 d-block mb-2 opacity-50"></i>
+                在此輸入目標特徵，系統將即時遍歷所有設備的底層路由與學習表。<br><br>
+                💡 提示：系統已整合「<b>LLDP 實體連線感知</b>」與「<b>FDB 學習數量推演</b>」。<br>
+                串接多個設備的 Uplink / Downlink 埠將被自動判定為中繼並過濾，優先顯示最終端的實體連接孔位。<br>
+                若需要模糊比對，請加上萬用字元：<code>*</code> 代表任意字串，<code>?</code> 代表單一字元。
+            </div>`;
+        searchModal.show();
+        
+        // 🎤 稽核埋點：紀錄開啟尋址視窗 (純瀏覽軌跡)
+        window.logFrontendAction("前端瀏覽軌跡", "開啟全網尋址", "管理員開啟了全網進階尋址 (ARP / FDB / Route) 面板。");
+        
+        setTimeout(() => document.getElementById('globalSearchInput').focus(), 500);
+    }
+
+    function getConnectionType(node, portName, targetIp) {
+        let nodeIp = node.ip;
+        let pName = String(portName).toLowerCase().trim();
+        let extractPortId = (str) => { let m = str.match(/[\d\/]+/); return m ? m[0] : str.trim(); };
+        let corePName = extractPortId(pName);
+
+        if (/^(lag|lg|trk|bond|po|port-channel|eth-trunk)[-\s]?\d+/i.test(pName)) 
+            return { status: 'UPLINK', debug: '聚合骨幹' };
+
+        let rawData = {};
+        try { rawData = JSON.parse(node.snmp_raw || "{}"); } catch(e) {}
+        
+        let ifNames = rawData[4] || {};
+        let targetIfIndex = null;
+        for (let idx in ifNames) {
+            let checkName = (!ifNames[idx]) ? "" : String(ifNames[idx]).replace(/"/g, '').trim().toLowerCase();
+            if (checkName === pName || extractPortId(checkName) === corePName) {
+                targetIfIndex = String(idx); break;
+            }
+        }
+
+        let poePower = getPoePowerForPort(rawData, targetIfIndex);
+        let debugMsg = poePower ? `⚡ ${poePower}W` : `無電力`;
+
+        let isTargetInDB = false;
+        let isTargetAP = false;
+        if (targetIp && cachedTopologyData && cachedTopologyData.nodes) {
+            let knownTarget = cachedTopologyData.nodes.find(n => n.ip === targetIp);
+            if (knownTarget) {
+                isTargetInDB = true;
+                let devType = String(knownTarget.type || knownTarget.device_type || knownTarget.brand || '').toUpperCase();
+                let devLevel = parseInt(knownTarget.level || 0);
+                if (devType.includes('AP') || devType.includes('無線') || devType.includes('WIFI') || devType.includes('WIRELESS') || devLevel >= 4) {
+                    isTargetAP = true;
+                }
+            }
+        }
+
+        if (cachedTopologyData && cachedTopologyData.edges) {
+            for (let edge of cachedTopologyData.edges) {
+                let isUplinkPort = false;
+                let remoteNodeIp = null;
+                
+                if (edge.from === nodeIp) {
+                    let ports = (edge.from_port || '').toLowerCase().split(',');
+                    if (ports.some(ep => ep.trim() === pName || extractPortId(ep.trim()) === corePName)) { isUplinkPort = true; remoteNodeIp = edge.to; }
+                } else if (edge.to === nodeIp) {
+                    let ports = (edge.to_port || '').toLowerCase().split(',');
+                    if (ports.some(ep => ep.trim() === pName || extractPortId(ep.trim()) === corePName)) { isUplinkPort = true; remoteNodeIp = edge.from; }
+                }
+
+                if (isUplinkPort && remoteNodeIp) {
+                    if (remoteNodeIp === targetIp) return { status: 'DIRECT_DEVICE', debug: debugMsg + ' (拓樸直連)' };
+                    return { status: 'UPLINK', debug: debugMsg + ' (拓樸骨幹)' };
+                }
+            }
+        }
+
+        if (isTargetInDB && poePower) {
+            return { status: 'DIRECT_DEVICE', debug: debugMsg + ' (目標供電直連)' };
+        }
+
+        let macCount = 0;
+        if (targetIfIndex) {
+            let bpToIfIndex = rawData[11] || {}; 
+            let countFdb = (dict) => {
+                if(!dict) return;
+                Object.keys(dict).forEach(suffix => {
+                    let bPort = String(dict[suffix]);
+                    let ifIdx = bpToIfIndex[bPort] !== undefined ? String(bpToIfIndex[bPort]) : bPort;
+                    if (ifIdx === targetIfIndex) macCount++;
+                });
+            };
+            countFdb(rawData[10]); countFdb(rawData[12]);
+        }
+
+        if (macCount >= 3) {
+            if (poePower) return { status: 'DIRECT_DEVICE', debug: debugMsg + ` (MAC:${macCount} 供電接入)` };
+            if (isTargetAP) return { status: 'DIRECT_DEVICE', debug: debugMsg + ` (MAC:${macCount} AP直連)` };
+            return { status: 'UPLINK', debug: debugMsg + ` (MAC:${macCount} 中繼)` };
+        }
+
+        if (isTargetAP) return { status: 'DIRECT_DEVICE', debug: debugMsg + ` (AP認定)` };
+        if (poePower) return { status: 'DIRECT_DEVICE', debug: debugMsg + ` (MAC:${macCount} 供電接入)` };
+        
+        return { status: 'ACCESS', debug: debugMsg + ` (MAC:${macCount} 乾淨接入)` };
+    }
+	
+    function cleanStr(val) { return (!val) ? "" : String(val).replace('"', '').replace('\n', ' ').replace('\r', ' ').trim(); }
+
+    function executeGlobalSearch() {
+        if (!cachedTopologyData || !cachedTopologyData.nodes) return;
+        let rawQuery = document.getElementById('globalSearchInput').value.trim();
+        let resultsDiv = document.getElementById('searchResults');
+        
+        // 🎤 稽核埋點：紀錄執行全網搜尋的查詢條件 (前端介面操作)
+        if (rawQuery) {
+            window.logFrontendAction(
+                "前端介面操作", 
+                "執行全網尋址", 
+                `管理員發動了全網進階尋址，輸入之 IP 或 MAC 搜尋特徵值為：【 ${rawQuery} 】。`
+            );
+        }
+
+        if (!rawQuery) {
+            resultsDiv.innerHTML = '<div class="alert alert-warning py-2 text-dark fw-bold"><i class="bi bi-exclamation-circle me-2"></i>請輸入要搜尋的 IP 或 MAC 位址。</div>';
+            return;
+        }
+
+        let escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        let patternStr = escapeRegExp(rawQuery).replace(/\\\*/g, '.*').replace(/\\\?/g, '.');
+        let searchRegex;
+        try { searchRegex = new RegExp('(?<![a-zA-Z0-9])' + patternStr + '(?![a-zA-Z0-9])', 'i'); } 
+        catch(e) { searchRegex = new RegExp(patternStr, 'i'); }
+
+        let cleanQuery = rawQuery.replace(/[^a-fA-F0-9*?]/g, '').toLowerCase();
+        let cleanMacRegex = null;
+        if (cleanQuery.length > 0 && !rawQuery.includes('.')) {
+            let cleanPatternStr = escapeRegExp(cleanQuery).replace(/\\\*/g, '.*').replace(/\\\?/g, '.');
+            try { cleanMacRegex = new RegExp('(?<![a-zA-Z0-9])' + cleanPatternStr + '(?![a-zA-Z0-9])', 'i'); } 
+            catch(e) { cleanMacRegex = new RegExp(cleanPatternStr, 'i'); }
+        }
+
+        let matchObjects = [];
+
+        let targetNodes = cachedTopologyData.nodes.filter(n =>
+            searchRegex.test(n.ip) ||
+            searchRegex.test(n.sysName || '') ||
+            (cleanMacRegex && cleanMacRegex.test((n.mac || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase()))
+        );
+
+        targetNodes.forEach(targetNode => {
+            cachedTopologyData.edges.forEach(edge => {
+                let peerNodeId = null; let localPort = ''; let peerPort = '';
+                if (edge.from === targetNode.id) { peerNodeId = edge.to; localPort = edge.from_port || 'Unknown'; peerPort = edge.to_port || 'Unknown'; } 
+                else if (edge.to === targetNode.id) { peerNodeId = edge.from; localPort = edge.to_port || 'Unknown'; peerPort = edge.from_port || 'Unknown'; }
+
+                if (peerNodeId) {
+                    let peerNode = cachedTopologyData.nodes.find(n => n.id === peerNodeId);
+                    if (peerNode) {
+                        let badgeHtml = `<span class="badge bg-danger text-white fw-bold"><i class="bi bi-link-45deg me-1"></i>LLDP 實體對接</span>`;
+                        let deviceBadge = `<span class="text-white-50 me-2" style="font-size:0.8rem;">${targetNode.ip}</span><span class="fw-bold text-info" style="font-size:0.85rem;">${targetNode.sysName || targetNode.ip}</span>`;
+                        let matchText = `本機實體埠: <span class="text-success fw-bold">${localPort}</span> <i class="bi bi-arrow-right text-white-50 mx-2"></i> 對接設備: <span class="text-info">${peerNode.ip}</span> <span class="text-white-50">[${peerNode.sysName||''}]</span> <span class="text-secondary">(對端埠: ${peerPort})</span>`;
+                        
+                        matchObjects.push({ nodeIp: targetNode.ip, type: 'lldp', macClean: 'lldp_' + peerNode.ip, html: `<tr><td style="white-space:nowrap;">${deviceBadge}</td><td class="text-center" style="white-space:nowrap;">${badgeHtml}</td><td style="white-space:nowrap;">${matchText}</td></tr>`, score: 3000 });
+                    }
+                }
+            });
+        });
+
+        let resolvedMacToIp = new Map();
+        cachedTopologyData.nodes.forEach(node => {
+            if (!node.snmp_raw || node.snmp_raw === '{}') return;
+            try {
+                let rData = JSON.parse(node.snmp_raw);
+                let aData = rData[13]; 
+                if (aData) {
+                    Object.keys(aData).forEach(s => {
+                        let p = s.split('.');
+                        if (p.length >= 4) {
+                            let ip = p.slice(-4).join('.');
+                            if (searchRegex.test(ip)) {
+                                let mac = aData[s] || '';
+                                let macClean = mac.replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+                                if (macClean) resolvedMacToIp.set(macClean, ip);
+                            }
+                        }
+                    });
+                }
+            } catch(e) {}
+        });
+
+        let seenFdbConnections = new Set(); 
+
+        cachedTopologyData.nodes.forEach(node => {
+            if (!node.snmp_raw || node.snmp_raw === '{}') return;
+            let rawData;
+            try { rawData = JSON.parse(node.snmp_raw); } catch(e) { return; }
+            if (!Array.isArray(rawData)) return;
+
+            let sysName = node.sysName || node.ip;
+            let deviceBadge = `<span class="text-white-50 me-2" style="font-size:0.8rem;">${node.ip}</span><span class="fw-bold text-info" style="font-size:0.85rem;">${sysName}</span>`;
+            
+            let ifNames = rawData[4] || {};
+            let bpToIfIndex = rawData[11] || {}; 
+            
+            let processFdb = (fdbDict) => {
+                if (!fdbDict) return;
+                Object.keys(fdbDict).forEach(suffix => {
+                    let parts = suffix.split('.');
+                    let macHex = '', vlan = '';
+                    if (parts.length >= 7) { vlan = parts[0]; macHex = parts.slice(1).map(n => parseInt(n).toString(16).padStart(2, '0').toUpperCase()).join(':'); }
+                    else { macHex = parts.map(n => parseInt(n).toString(16).padStart(2, '0').toUpperCase()).join(':'); }
+                    
+                    let macClean = macHex.replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+                    let bPort = String(fdbDict[suffix]);
+                    let ifIdx = bpToIfIndex[bPort] !== undefined ? String(bpToIfIndex[bPort]) : bPort;
+                    let ifName = ifNames[ifIdx] ? cleanStr(ifNames[ifIdx]) : `Port ${ifIdx}`;
+
+                    let mappedIp = resolvedMacToIp.get(macClean);
+                    let isMatch = (mappedIp !== undefined) || searchRegex.test(macHex) || searchRegex.test(ifName) || (cleanMacRegex && cleanMacRegex.test(macClean));
+
+                    if (isMatch) {
+                        let connKey = node.ip + '_' + macClean + '_' + ifName;
+                        if (seenFdbConnections.has(connKey)) return;
+                        seenFdbConnections.add(connKey);
+
+                        let connInfo = getConnectionType(node, ifName, mappedIp);
+                        let connType = typeof connInfo === 'string' ? connInfo : connInfo.status;
+                        let debugStr = typeof connInfo === 'string' ? '' : (connInfo.debug || '');
+
+                        let isUplink = (connType === 'UPLINK');
+                        let isDirect = (connType === 'DIRECT_DEVICE');
+                        
+                        let score = isDirect ? 2000 : (isUplink ? 500 : 1000); 
+                        let badgeHtml = isUplink ? `<span class="badge bg-secondary text-light">中繼傳遞</span>` : `<span class="badge bg-primary text-warning fw-bold"><i class="bi bi-star-fill me-1"></i>終端接入點</span>`;
+                        
+                        if (debugStr) badgeHtml += `<br><span class="badge bg-dark border border-warning text-warning mt-1" style="font-size:0.7rem;">${debugStr}</span>`;
+
+                        let ipPrefix = mappedIp ? `IP: <span class="text-info">${mappedIp}</span> <i class="bi bi-arrow-left-right text-white-50 mx-2"></i> ` : '';
+                        let matchText = `${ipPrefix}MAC: <span class="text-warning">${macHex}</span> <i class="bi bi-arrow-right text-white-50 mx-2"></i> 實體埠: <span class="text-success fw-bold">${ifName}</span>`;
+                        matchObjects.push({ nodeIp: node.ip, type: 'fdb', macClean: macClean, html: `<tr><td style="white-space:nowrap;">${deviceBadge}</td><td class="text-center" style="white-space:nowrap;">${badgeHtml}</td><td style="white-space:nowrap;">${matchText}</td></tr>`, score: score });
+                    }
+                });
+            };
+
+            processFdb(rawData[12]); processFdb(rawData[10]); 
+
+            let arpData = rawData[13]; 
+            if (arpData) {
+                Object.keys(arpData).forEach(suffix => {
+                    let parts = suffix.split('.');
+                    if (parts.length >= 4) {
+                        let ip = parts.slice(-4).join('.'); let mac = arpData[suffix] || ''; let macClean = mac.replace(/[^a-fA-F0-9]/g, '').toLowerCase();
+                        
+                        let physicalPort = null;
+                        if (rawData[12]) {
+                            let fdbVals = Object.entries(rawData[12]).find(([k,v]) => {
+                                let mHex = k.split('.').slice(-6).map(n=>parseInt(n).toString(16).padStart(2,'0')).join(''); return mHex === macClean;
+                            });
+                            if (fdbVals) { let bp = String(fdbVals[1]); let ifId = bpToIfIndex[bp] !== undefined ? String(bpToIfIndex[bp]) : bp; physicalPort = ifNames[ifId] ? cleanStr(ifNames[ifId]) : `Port ${ifId}`; }
+                        }
+
+                        let isRuckusPrivate = false; let ruckusArpPort = rawData[16] || {}; let ifName = '';
+
+                        if (physicalPort) { ifName = physicalPort; } 
+                        else if (ruckusArpPort[ip]) { let pIdx = ruckusArpPort[ip]; ifName = ifNames[pIdx] ? cleanStr(ifNames[pIdx]) : `Port ${pIdx}`; isRuckusPrivate = true; } 
+                        else { let ifIdx = parts.slice(0, -4).join('.'); ifName = ifNames[ifIdx] ? cleanStr(ifNames[ifIdx]) : `L3介面 ${ifIdx}`; }
+
+                        let mappedIp = resolvedMacToIp.get(macClean);
+                        let isMatch = searchRegex.test(ip) || searchRegex.test(mac) || (cleanMacRegex && cleanMacRegex.test(macClean)) || (mappedIp !== undefined && mappedIp === ip);
+
+                        if (isMatch) {
+                            let connInfo = getConnectionType(node, ifName, ip);
+                            let connType = typeof connInfo === 'string' ? connInfo : connInfo.status;
+                            let debugStr = typeof connInfo === 'string' ? '' : (connInfo.debug || '');
+
+                            let isUplink = (connType === 'UPLINK');
+                            let isDirect = (connType === 'DIRECT_DEVICE');
+                            let badgeHtml = ''; let score = 0;
+                            let isPhysicalConfirmed = (physicalPort != null || isRuckusPrivate);
+
+                            if (isPhysicalConfirmed) {
+                                if (isDirect) { score = 2000; badgeHtml = `<span class="badge bg-primary text-warning fw-bold"><i class="bi bi-star-fill me-1"></i>終端接入點</span>`; }
+                                else if (isUplink) { score = 40; badgeHtml = `<span class="badge bg-secondary text-light">中繼傳遞</span>`; } 
+                                else { score = 100; badgeHtml = `<span class="badge bg-primary text-warning fw-bold"><i class="bi bi-star-fill me-1"></i>終端接入點</span>`; }
+                            } else {
+                                score = 10; badgeHtml = `<span class="badge bg-dark border border-secondary text-white-50">L3 閘道快取</span>`;
+                            }
+
+                            if (debugStr) badgeHtml += `<br><span class="badge bg-dark border border-warning text-warning mt-1" style="font-size:0.7rem;">${debugStr}</span>`;
+                            
+                            let displayIfName = physicalPort ? `<span class="text-success fw-bold">${ifName}</span> <small class="text-white-50">(FDB推演)</small>` : 
+                                                (isRuckusPrivate ? `<span class="text-success fw-bold">${ifName}</span>` : `<span class="text-warning">${ifName}</span> <small class="text-danger">(L3)</small>`);
+                            
+                            let matchText = `IP: <span class="text-info">${ip}</span> <i class="bi bi-arrow-left-right text-white-50 mx-2"></i> MAC: <span class="text-warning">${mac}</span> <i class="bi bi-arrow-right text-white-50 mx-2"></i> 介面: ${displayIfName}`;
+                            matchObjects.push({ nodeIp: node.ip, type: 'arp', macClean: macClean, html: `<tr><td style="white-space:nowrap;">${deviceBadge}</td><td class="text-center" style="white-space:nowrap;">${badgeHtml}</td><td style="white-space:nowrap;">${matchText}</td></tr>`, score: score });
+                        }
+                    }
+                });
+            }
+
+            let routeData = rawData[17]; 
+            if (routeData) {
+                Object.keys(routeData).forEach(destIp => {
+                    let nextHop = routeData[destIp] || '';
+                    if (searchRegex.test(destIp) || searchRegex.test(nextHop)) {
+                        let matchText = `目的網段: <span class="text-info">${destIp}</span> <i class="bi bi-arrow-right text-white-50 mx-2"></i> Next Hop: <span class="text-success">${nextHop}</span>`;
+                        matchObjects.push({ nodeIp: node.ip, type: 'route', html: `<tr><td style="white-space:nowrap;">${deviceBadge}</td><td class="text-center" style="white-space:nowrap;"><span class="badge bg-success text-light">路由表</span></td><td style="white-space:nowrap;">${matchText}</td></tr>`, score: 10 });
+                    }
+                });
+            }
+        });
+
+        let fdbKeys = new Set(matchObjects.filter(o => o.type === 'fdb').map(o => o.nodeIp + '_' + o.macClean));
+        matchObjects = matchObjects.filter(o => {
+            if (o.type === 'arp' && o.macClean && fdbKeys.has(o.nodeIp + '_' + o.macClean)) return false;
+            return true;
+        });
+
+        let uniqueHtmls = new Set(); let finalObjects = [];
+        matchObjects.forEach(o => { if (!uniqueHtmls.has(o.html)) { uniqueHtmls.add(o.html); finalObjects.push(o); } });
+
+        if (finalObjects.length > 0) {
+            finalObjects.sort((a, b) => b.score - a.score);
+            let finalHtmlList = finalObjects.map(o => o.html);
+
+            let tableHtml = `<table class="table table-dark table-striped table-hover border-secondary mt-3 mb-0 search-table" style="table-layout: fixed;">
+                                <thead class="text-secondary bg-black" style="position: sticky; top: 0; z-index: 1; box-shadow: 0 1px 2px rgba(0,0,0,0.5);">
+                                    <tr><th width="20%">來源設備</th><th width="25%" class="text-center">資料來源 / 狀態</th><th width="55%">解析結果</th></tr>
+                                </thead>
+                                <tbody>${finalHtmlList.join('')}</tbody>
+                             </table>`;
+                             
+            let hasPhysicalAccess = finalObjects.some(o => o.score >= 100);
+            let hintMsg = hasPhysicalAccess 
+                ? `<br><span style="font-size: 0.85rem; font-weight: normal; color: #adb5bd;">💡 系統已隱藏重複的 ARP 紀錄並將 Uplink 降級，優先顯示標有 <span class="badge bg-primary text-warning"><i class="bi bi-star-fill me-1"></i>終端接入點</span> 的最精確連接埠！</span>`
+                : `<br><span style="font-size: 0.85rem; font-weight: normal; color: #ffc107;">⚠️ <b>注意：</b>目前僅查獲「L3 閘道快取」與「中繼傳遞」紀錄，無實體接入點。此設備可能<b>已關機、休眠或斷線超過 5 分鐘</b>。</span>`;
+            
+            resultsDiv.innerHTML = `<div class="text-success fw-bold mb-2"><i class="bi bi-check-circle-fill me-1"></i>尋找完畢，共找到 <b>${finalObjects.length}</b> 筆精準資料。${hintMsg}</div>` + tableHtml;
+        } else {
+            resultsDiv.innerHTML = `
+                <div class="alert alert-danger text-white fw-bold py-3 mt-3 shadow" style="background-color: #dc3545; border: none;">
+                    <i class="bi bi-exclamation-triangle-fill me-2 fs-5"></i>
+                    全網找不到與「<span class="text-warning fs-5 mx-1">${rawQuery}</span>」相符的資料。<br>
+                    <span style="font-size: 0.85rem; font-weight: normal; display: block; margin-top: 5px;">👉 提示：若搜尋 IP 失敗，請確認該設備目前是否有連線，系統需透過 ARP 解析轉換。</span>
+                </div>`;
+        }
+    }
+</script>
