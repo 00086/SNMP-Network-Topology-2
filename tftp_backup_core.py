@@ -376,20 +376,31 @@ def trigger_tftp_backup(ip, username, password, secret, device_type):
                 
             else:
                 # -------------------------------------------------------------
-                # 🚀 模式 B：標準通道 —— 針對新世代文字檔機型 (1250 / 1510) 與 AP控制器
+                # 🚀 模式 B：標準通道 —— 針對新世代文字檔機型 (1250 / 1510 / DMS) 與 AP控制器
                 # -------------------------------------------------------------
-                # 補回 D-Link 1250/1510 嚴格要求的空格語法
-                cmd_1250 = f"copy running-config tftp: //{local_tftp_ip}/{filename}"
-                print(f"    [+] 送出 D-Link 新世代 (1250/1510) 標準指令: {cmd_1250}")
+                cmd_no_space = f"copy running-config tftp://{local_tftp_ip}/{filename}"
+                cmd_with_space = f"copy running-config tftp: //{local_tftp_ip}/{filename}"
                 
-                net_connect.write_channel(cmd_1250 + "\n")
+                print(f"    [+] [D-Link 雙軌測試] 嘗試語法 1 (無空格): {cmd_no_space}")
+                net_connect.write_channel(cmd_no_space + "\n")
                 time.sleep(2)
                 out = net_connect.read_channel()
                 print(f"    [>] 設備初步回覆: {out.strip()}")
                 
-                # 🔍 判斷是否為 DWS-3160 等打槍 copy 語法的 AP 控制器
-                if "Next possible completions" in out or "Invalid input" in out or "Unrecognized command" in out:
-                    print(f"    [!] 1250/1510 語法被拒絕，自動切換為 DWS AP 控制器專屬 TFTP 語法...")
+                # 🔍 判斷語法 1 是否被打槍 (出現 ^ 標記、Invalid 或是 Unrecognized)
+                if "Invalid input" in out or "^" in out or "Unrecognized command" in out:
+                    print(f"    [!] 語法 1 被拒絕，嘗試語法 2 (有空格): {cmd_with_space}")
+                    # 送出 Enter 清除可能卡住的提示字元
+                    net_connect.write_channel("\n"); time.sleep(1); net_connect.read_channel()
+                    
+                    net_connect.write_channel(cmd_with_space + "\n")
+                    time.sleep(2)
+                    out = net_connect.read_channel()
+                    print(f"    [>] 設備回覆: {out.strip()}")
+
+                # 🔍 終極判斷：如果兩招 copy 語法都失效，需要降級到 DWS-3160 AP 控制器
+                if "Next possible completions" in out or "Invalid input" in out or "Unrecognized command" in out or "^" in out:
+                    print(f"    [!] 所有 copy 語法皆被拒絕，自動切換為 DWS AP 控制器專屬 TFTP 語法...")
                     net_connect.write_channel("\n"); time.sleep(1); net_connect.read_channel()
                     
                     cmd_dws = f"upload cfg_toTFTP {local_tftp_ip} dest_file {filename}"
@@ -432,21 +443,21 @@ def trigger_tftp_backup(ip, username, password, secret, device_type):
                         return True
                         
                 else:
-                    # 雙 Enter 問答與完全退場
+                    # ── 處理 copy 語法成功後的「雙 Enter 問答」──
                     time.sleep(1)
                     if "host" in out.lower() or "address" in out.lower() or "?" in out:
-                        print(f"    [+] 偵測到 IP 確認詢問，手動回覆 Enter")
+                        print(f"    [+] 偵測到 IP 確認詢問，自動送出第一下 Enter")
                         net_connect.write_channel("\n")
                         time.sleep(1)
                         out = net_connect.read_channel()
                         
                     if "file" in out.lower() or "destination" in out.lower() or "?" in out:
-                        print(f"    [+] 偵測到檔名確認詢問，手動回覆 Enter")
+                        print(f"    [+] 偵測到檔名確認詢問，自動送出第二下 Enter")
                         net_connect.write_channel("\n")
                         time.sleep(1)
                         out = net_connect.read_channel()
                         
-                    print(f"✅ [前台結案] {ip} (D-Link 1250/1510) 問答完成，順利進入背景 TFTP 傳輸。")
+                    print(f"✅ [前台結案] {ip} (D-Link 1250/1510/DMS) 問答完成，順利進入背景 TFTP 傳輸。")
                     return True
             
         elif "fortinet" in device_type:
