@@ -23,6 +23,8 @@ var isGridVisible = true;
 var isDarkMode = false;
 var isShowIP = true;
 var isShowName = true;
+// 🌟 新增：追蹤 MGMT 管理線路的顯示狀態 (預設為 true 顯示)
+var isShowMgmtLines = true;
 var isShowLocation = false; 
 var isShowFlow = false; 
 var isShowNodeTraffic = false;
@@ -30,6 +32,10 @@ var nodeTrafficData = {};
 var nodeTrafficIntervalId = null;
 var flowAnimationTime = 0;
 var animationId = null;
+
+// 🌟 新增：收合設備的狀態追蹤變數
+var isGlobalCollapsed = false;  // 全域是否開啟收合模式
+var manualCollapseState = {};   // 記錄單點被雙擊手動改變狀態的設備 { 'IP': true/false }
 
 const TOPO_COLORS = {
     light: { link10G: '#0022aa', link1G: '#198754', link100M:'#fd7e14', down: '#dc3545', warning: '#d39e00', highlight:'#333333' },
@@ -139,43 +145,151 @@ function exportHTML() {
 
 function getHighResImageData(callback) {
     var container = document.getElementById('mynetwork');
-    var oldWidth = container.style.width;
-    var oldHeight = container.style.height;
+    if (!container || !network) {
+        if (typeof showToast === 'function') showToast("⚠️ 拓樸圖尚未初始化", "danger");
+        return;
+    }
+    
+    // 1. 備份狀態
+    var oldCssText = container.style.cssText;
+    var oldGrid = isGridVisible; 
+    var oldFlow = isShowFlow;
+    isGridVisible = false; 
+    isShowFlow = false;
 
-    var oldGrid = isGridVisible; var oldFlow = isShowFlow;
-    isGridVisible = false; isShowFlow = false;
+    try {
+        // 🌟 2. 絕對邊界計算 (精準找出最左、最右、最上、最下的極限座標)
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        var nodeIds = nodesDataSet.getIds();
+        
+        nodeIds.forEach(id => {
+            try {
+                var box = network.getBoundingBox(id);
+                if (box) {
+                    if (box.left < minX) minX = box.left;
+                    if (box.right > maxX) maxX = box.right;
+                    if (box.top < minY) minY = box.top;
+                    if (box.bottom > maxY) maxY = box.bottom;
+                }
+            } catch(e) {}
+        });
 
-    container.style.width = '3840px'; container.style.height = '2160px';
-    network.redraw(); network.fit(); 
+        // 防呆預設值
+        if (minX === Infinity) { minX = -500; maxX = 500; minY = -500; maxY = 500; }
 
+        // 🌟 3. 加入絕對值留白 (各留 80 座標單位的 Padding，確保邊緣文字不被切到)
+        minX -= 80; maxX += 80;
+        minY -= 80; maxY += 80;
+
+        var topoWidth = maxX - minX;
+        var topoHeight = maxY - minY;
+
+        // 🌟 4. 設定終極 8K 目標，計算出「絕對完美比例」的畫布大小
+        var TARGET_MAX_PIXELS = 8000; 
+        var scaleFactor = TARGET_MAX_PIXELS / Math.max(topoWidth, topoHeight);
+        
+        var exportWidth = Math.round(topoWidth * scaleFactor);
+        var exportHeight = Math.round(topoHeight * scaleFactor);
+
+        // (徹底移除會破壞比例的最低解析度限制，僅保留防止記憶體崩潰的最高限制)
+        var MAX_CANVAS_LIMIT = 12000;
+        if (exportWidth > MAX_CANVAS_LIMIT || exportHeight > MAX_CANVAS_LIMIT) {
+            let downScale = MAX_CANVAS_LIMIT / Math.max(exportWidth, exportHeight);
+            exportWidth = Math.round(exportWidth * downScale);
+            exportHeight = Math.round(exportHeight * downScale);
+            scaleFactor *= downScale; // 同步修正攝影機縮放比例
+        }
+
+        // 🌟 5. 撐開畫布
+        container.style.cssText = `position: fixed !important; top: 0 !important; left: 0 !important; width: ${exportWidth}px !important; height: ${exportHeight}px !important; z-index: -9999 !important; background-color: ${isDarkMode ? '#1f293a' : '#ffffff'} !important;`;
+        
+        network.setSize(`${exportWidth}px`, `${exportHeight}px`);
+        network.redraw(); 
+        
+        // 🌟 6. 放棄不可控的 fit()，改用數學級精準攝影機定位 (moveTo)
+        var centerX = minX + (topoWidth / 2);
+        var centerY = minY + (topoHeight / 2);
+
+        network.moveTo({
+            position: { x: centerX, y: centerY },
+            scale: scaleFactor, // 精準縮放，1 座標單位完美對應 scaleFactor 像素
+            animation: false
+        });
+
+    } catch(e) {
+        console.error("畫布準備失敗:", e);
+        if (typeof showToast === 'function') showToast("⚠️ 畫布準備失敗：" + e.message, "danger");
+        
+        container.style.cssText = oldCssText;
+        network.setSize('100%', '100%');
+        isGridVisible = oldGrid; isShowFlow = oldFlow;
+        network.redraw(); network.fit({ animation: false });
+        return;
+    }
+
+    // 等待瀏覽器渲染
     setTimeout(() => {
         try {
-            var canvas = container.getElementsByTagName("canvas")[0];
-            var dataURL = canvas.toDataURL("image/png", 1.0);
+            var canvas = network.canvas.frame.canvas;
+            if (!canvas) throw new Error("Vis.js Canvas 尚未準備完成");
 
-            container.style.width = oldWidth || '100%'; container.style.height = oldHeight || 'calc(100vh - 130px)';
-            isGridVisible = oldGrid; isShowFlow = oldFlow;
-            network.redraw(); network.fit();
+            // 填充底色並繪製
+            var tempCanvas = document.createElement('canvas');
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+            var ctx = tempCanvas.getContext('2d');
+            ctx.fillStyle = isDarkMode ? '#1f293a' : '#ffffff';
+            ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+            ctx.drawImage(canvas, 0, 0);
+
+            var dataURL = tempCanvas.toDataURL("image/png", 1.0);
+
+            // 還原狀態
+            container.style.cssText = oldCssText;
+            network.setSize('100%', '100%');
+            isGridVisible = oldGrid; 
+            isShowFlow = oldFlow;
+            network.redraw(); 
+            network.fit({ animation: false });
 
             callback(dataURL);
         } catch (e) {
-            console.error(e);
-            container.style.width = oldWidth || '100%'; container.style.height = oldHeight || 'calc(100vh - 130px)';
-            network.redraw(); network.fit();
+            console.error("高畫質渲染失敗:", e);
+            if (typeof showToast === 'function') showToast("⚠️ 影像輸出失敗：" + e.message, "danger");
+            
+            container.style.cssText = oldCssText;
+            network.setSize('100%', '100%');
+            isGridVisible = oldGrid; isShowFlow = oldFlow;
+            network.redraw(); network.fit({ animation: false });
         }
-    }, 1000); 
+    }, 1500); 
 }
 
 function exportPNG() {
     if (!network) return;
-    if (typeof showToast === 'function') showToast("📸 正在渲染 4K 超高畫質圖片，請稍候...", "info");
-    window.logFrontendAction("前端介面操作", "匯出拓樸資料", "管理員執行了【匯出 4K 高畫質 PNG】圖檔功能。");
+    if (typeof showToast === 'function') showToast("📸 正在渲染 8K 超高畫質圖片，請稍候...", "info");
+    window.logFrontendAction("前端介面操作", "匯出拓樸資料", "管理員執行了【匯出 8K 高畫質 PNG】圖檔功能。");
 
     getHighResImageData(function(dataURL) {
-        var link = document.createElement("a");
-        link.download = `Topology_4K_${new Date().toISOString().slice(0,10)}.png`;
-        link.href = dataURL; link.click();
-        if (typeof showToast === 'function') showToast("✅ 4K 高畫質 PNG 已成功下載！", "success");
+        // 🌟 核心防護：透過 Fetch 轉換 Base64 為 Blob，徹底解決 Chrome 拒絕下載超長資料的無聲崩潰問題！
+        fetch(dataURL)
+            .then(res => res.blob())
+            .then(blob => {
+                var url = window.URL.createObjectURL(blob);
+                var link = document.createElement("a");
+                link.download = `Topology_8K_${new Date().toISOString().slice(0,10)}.png`;
+                link.href = url; 
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                window.URL.revokeObjectURL(url);
+                
+                if (typeof showToast === 'function') showToast("✅ 8K 高畫質 PNG 已成功下載！", "success");
+            })
+            .catch(err => {
+                console.error("Blob 轉換失敗:", err);
+                if (typeof showToast === 'function') showToast("⚠️ 檔案寫入失敗：" + err.message, "danger");
+            });
     });
 }
 
@@ -440,12 +554,45 @@ function renderGraph(forceHierarchical = null) {
         let theme = isDarkMode ? TOPO_COLORS.dark : TOPO_COLORS.light;
         var baseColor = getLinkColor(e.speed || 1000, isDarkMode);
 
-        if (isEdgeDown) baseColor = theme.down;
-        else if (isEdgeWarning) baseColor = theme.warning;
+		// 🌟 新增：手動標註 MGMT 智慧樣式特判 (採用智慧孔號數字對齊防線，通殺所有廠牌長短孔名)
+		let isMgmtLink = false;
+		if (window.portSettingsCache && window.portSettingsCache.length > 0) {
+			let extractNum = function(str) { let m = String(str).match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+			isMgmtLink = window.portSettingsCache.some(p => {
+				if (p.is_manual_mgmt !== 1 && p.is_manual_mgmt !== true) return false;
+				if (p.ip === e.from) {
+					let pNum = extractNum(p.port_name);
+					let epArray = String(e.from_port).toLowerCase().split(',');
+					for (let ep of epArray) {
+						let cleanEp = ep.trim();
+						if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+					}
+				}
+				if (p.ip === e.to) {
+					let pNum = extractNum(p.port_name);
+					let epArray = String(e.to_port).toLowerCase().split(',');
+					for (let ep of epArray) {
+						let cleanEp = ep.trim();
+						if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+					}
+				}
+				return false;
+			});
+		}
 
-        newEdge.color = { color: baseColor, highlight: theme.highlight };
-        if (isEdgeDown) newEdge.dashes = [5, 5]; 
-        else if (isEdgeWarning) newEdge.dashes = [10, 5]; 
+        if (isMgmtLink) {
+            baseColor = '#8b0000';      // 🌟 強制設定為專業暗紅色
+            newEdge.dashes = [15, 10];  // 🌟 強制設定為明顯長虛線
+            newEdge.width = 3;          // 稍微加粗提高辨識度
+        } else if (isEdgeDown) {
+            baseColor = theme.down;
+            newEdge.dashes = [5, 5]; 
+        } else if (isEdgeWarning) {
+            baseColor = theme.warning;
+            newEdge.dashes = [10, 5]; 
+        }
+
+        newEdge.color = { color: baseColor, highlight: isMgmtLink ? '#ff4d4d' : theme.highlight };
         delete newEdge.arrows; 
         return newEdge;
     });
@@ -465,8 +612,12 @@ function renderGraph(forceHierarchical = null) {
     var options = {
         layout: { 
             hierarchical: hasSavedPositions ? false : { 
-                direction: 'UD', sortMethod: 'directed', levelSeparation: LEVEL_HEIGHT, 
-                nodeSpacing: 350, treeSpacing: 500, parentCentralization: true 
+                direction: 'UD', 
+				sortMethod: 'directed', 
+				levelSeparation: LEVEL_HEIGHT, 
+                nodeSpacing: 350, 
+				treeSpacing: 500, 
+				parentCentralization: true 
             } 
         },
         physics: { enabled: false },
@@ -474,11 +625,20 @@ function renderGraph(forceHierarchical = null) {
         nodes: { shape: 'box', margin: { top: 3, right: 3, bottom: 3, left: 3 } }, 
         interaction: { dragNodes: true, hover: true, multiselect: true }
     };
-    
+        
     network = new vis.Network(container, visData, options);
+    
+    // 🌟 移除強制重置，保留使用者手動收合的狀態！
+    // 這樣重新掃描、背景輪詢或載入版面時，收合狀態才不會被打回原形。
+
+    // 💡 強制重新計算顯示隱藏 -> 重生 Label -> 塞給 Vis.js
+    if (typeof updateNodeVisibility === 'function') {
+        updateNodeVisibility();
+    }
     updateAllLabels(); 
 
     network.on("afterDrawing", function(ctx) {
+        // 1. 繪製背景網格
         if (isGridVisible) {
             var viewPos = network.getViewPosition(); 
             var scale = network.getScale();
@@ -496,14 +656,22 @@ function renderGraph(forceHierarchical = null) {
             ctx.restore();
         }
 
+        // 2. 繪製節點旁流量標籤 (🌟 學校內網特調：動態 AP 智慧流量借調對調引擎)
         if (isShowNodeTraffic) {
             ctx.save(); ctx.textAlign = 'left'; ctx.textBaseline = 'top';
             var pos = network.getPositions();
             
             cachedTopologyData.nodes.forEach(n => {
                 let p = pos[n.id];
-                if (p && nodeTrafficData[n.ip]) {
-                    let myLvl = parseInt(n.level);
+                if (!p) return; // 節點隱藏時不處理
+
+                let txBps = 0, rxBps = 0, downTxBps = 0, downRxBps = 0;
+                let myLvl = parseInt(n.level);
+                let portData = nodeTrafficData[n.ip];
+                let hasValidData = false;
+
+                // ── 🚀 模式 A：若該 AP 有獨立登錄於設備庫，直接走常規標準計數 ──
+                if (portData && Object.keys(portData).length > 0) {
                     let edgePorts = new Set(), uplinkPorts = new Set(), downlinkPorts = new Set();
                     cachedTopologyData.edges.forEach(e => {
                         if (e.from === n.id || e.to === n.id) {
@@ -520,24 +688,18 @@ function renderGraph(forceHierarchical = null) {
                             }
                         }
                     });
-                    
-                    let txBps = 0, rxBps = 0, downTxBps = 0, downRxBps = 0;
-                    let portData = nodeTrafficData[n.ip];
-                    let rawData = {}; try { rawData = JSON.parse(n.snmp_raw || "{}"); } catch(e){}
-                    let ifNames = rawData[4] || {};
-                    let extractNum = function(str) { let m = str.match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
 
-                    // 💡 [新增] 準備 Fallback 變數，用於記錄該設備流量最大的實體埠
-                    let maxPortTx = 0, maxPortRx = 0, maxPortTotal = 0;
+                    let rawData = {}; try { rawData = JSON.parse(n.snmp_raw || "{}"); } catch(e){}
+                    let ifNames = rawData[4] || rawData[8] || {};
+                    let extractNum = function(str) { let m = str.match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+                    let maxPortTotal = 0, maxPortTx = 0, maxPortRx = 0;
 
                     for (let pIdx in portData) {
                         let portName = ifNames[pIdx] ? String(ifNames[pIdx]).replace('"', '').replace('\n', ' ').trim().toLowerCase() : `port ${pIdx}`;
                         let pNum = extractNum(portName);
                         let isTarget = false, isDownlink = false;
-                        
-                        // 判斷是否為虛擬/邏輯埠 (過濾掉 vlan, loopback, cpu, mgmt 等)
                         let isLogical = portName.includes('vlan') || portName.includes('loop') || portName.includes('tun') || portName.includes('null') || portName.includes('cpu') || portName.includes('mgmt');
-                        
+
                         downlinkPorts.forEach(dp => {
                             if (portName === dp || portName.includes(dp) || dp.includes(portName)) isDownlink = true;
                             let dpNum = extractNum(dp); if (pNum !== "" && dpNum !== "" && pNum === dpNum) isDownlink = true;
@@ -556,25 +718,59 @@ function renderGraph(forceHierarchical = null) {
                         if (isTarget) { txBps += portData[pIdx].out_bps; rxBps += portData[pIdx].in_bps; }
                         if (isDownlink) { downTxBps += portData[pIdx].out_bps; downRxBps += portData[pIdx].in_bps; }
                         
-                        // 💡 [新增] 紀錄單一實體埠的最大流量 (防呆 Fallback)
                         if (!isLogical) {
                             let pTotal = portData[pIdx].out_bps + portData[pIdx].in_bps;
-                            if (pTotal > maxPortTotal) {
-                                maxPortTotal = pTotal;
-                                maxPortTx = portData[pIdx].out_bps;
-                                maxPortRx = portData[pIdx].in_bps;
-                            }
+                            if (pTotal > maxPortTotal) { maxPortTotal = pTotal; maxPortTx = portData[pIdx].out_bps; maxPortRx = portData[pIdx].in_bps; }
                         }
                     }
 
-                    // 💡 [終極防呆補償] 
-                    // 如果是 L2~L6 設備，但因為 LLDP 未知埠口 (例如 Fortinet 沒給 Port 名稱) 導致匹配失敗 (流量為0)，
-                    // 我們就自動抓取該設備「流量最大」的那個實體孔 (通常就是 Uplink 骨幹) 作為標籤代表！
                     if (myLvl !== 1 && txBps === 0 && rxBps === 0 && maxPortTotal > 0) {
-                        txBps = maxPortTx;
-                        rxBps = maxPortRx;
+                        txBps = maxPortTx; rxBps = maxPortRx;
                     }
+                    if (txBps > 0 || rxBps > 0 || downTxBps > 0 || downRxBps > 0) hasValidData = true;
+                } 
+                // ── 🧠 模式 B：針對動態發現的零快取 AP，啟動全自動「交換器網孔借調引擎」 ──
+                else if (myLvl >= 4) {
+                    // 尋找與此 AP 相連的那條拓樸連線
+                    let connectedEdge = cachedTopologyData.edges.find(e => e.from === n.id || e.to === n.id);
+                    if (connectedEdge) {
+                        let peerId = (connectedEdge.from === n.id) ? connectedEdge.to : connectedEdge.from;
+                        let peerNode = cachedTopologyData.nodes.find(node => node.id === peerId);
+                        
+                        // 確保上層交換器擁有流量數據
+                        if (peerNode && nodeTrafficData[peerNode.ip]) {
+                            let switchPortStr = (connectedEdge.from === n.id) ? connectedEdge.to_port : connectedEdge.from_port;
+                            let switchRaw = {}; try { switchRaw = JSON.parse(peerNode.snmp_raw || "{}"); } catch(e){}
+                            let switchIfNames = switchRaw[4] || switchRaw[8] || {};
+                            let switchPortIdx = null;
+                            
+                            let cleanSwitchPorts = (switchPortStr || '').split(',').map(s => s.replace('"', '').replace('\n', ' ').trim().toLowerCase());
+                            let extractNum = function(str) { let m = str.match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+                            
+                            // 比對交換器網孔名稱，鎖定對接的實體 SNMP Index
+                            for (let idx in switchIfNames) {
+                                let name = String(switchIfNames[idx]).replace('"', '').replace('\n', ' ').trim().toLowerCase();
+                                if (cleanSwitchPorts.includes(name)) { switchPortIdx = idx; break; }
+                                let pNum1 = extractNum(name);
+                                for (let cp of cleanSwitchPorts) {
+                                    let pNum2 = extractNum(cp);
+                                    if (pNum1 && pNum2 && pNum1 === pNum2) { switchPortIdx = idx; break; }
+                                }
+                                if (switchPortIdx) break;
+                            }
+                            
+                            // 成功借調數據：執行真理對調 (交換器 OUT 瓦數 = AP 的 IN 速度)
+                            if (switchPortIdx && nodeTrafficData[peerNode.ip][switchPortIdx]) {
+                                rxBps = nodeTrafficData[peerNode.ip][switchPortIdx].out_bps || 0;
+                                txBps = nodeTrafficData[peerNode.ip][switchPortIdx].in_bps || 0;
+                                if (txBps > 0 || rxBps > 0) hasValidData = true;
+                            }
+                        }
+                    }
+                }
 
+                // ── 🎨 渲染畫布懸浮視窗 ──
+                if (hasValidData) {
                     let drawBox = (inVal, outVal, position) => {
                         let strIn = `▼ IN: ${formatBps(inVal)}`; let strOut = `▲ OUT: ${formatBps(outVal)}`;
                         ctx.font = 'bold 11px "Microsoft JhengHei", Arial, sans-serif';
@@ -599,8 +795,80 @@ function renderGraph(forceHierarchical = null) {
             ctx.restore();
         }
 
-        if (!isShowFlow) return;
+        // ========================================================
+        // 🌟 3. 繪製右上角的智慧角標 (AP 專屬 WIFI 符號 & 收合閃爍圖示)
+        // ========================================================
+        ctx.save();
         var pos = network.getPositions();
+        cachedTopologyData.nodes.forEach(n => {
+            if (!pos[n.id]) return;
+            let p = pos[n.id];
+            let w = n._lastW || 150;
+            let h = n._lastH || 60;
+            
+            // 初始基準座標 (右上角邊緣)
+            let baseX = p.x + w/2 - 4;
+            let baseY = p.y - h/2 + 4;
+            let offsetX = 0; // 用於多重角標並排時的向左偏移量
+
+            // 🌟 智慧判斷是否為 AP 設備
+            let devType = String(n.type || n.brand || '').toUpperCase();
+            let sysName = String(n.sysName || n.name || '').toUpperCase();
+            let isController = devType.includes('控制器') || devType.includes('CONTROLLER');
+            let isAP = !isController && (devType.includes('AP') || devType.includes('WIFI') || /\bAP\b/i.test(sysName));
+
+            // 🎯 繪製 WIFI 訊號角標 (AP 專屬)
+            if (isAP) {
+                let badgeX = baseX - offsetX;
+                
+                // 畫出舒適的青綠色圓形底框
+                ctx.beginPath();
+                ctx.arc(badgeX, baseY, 13, 0, 2 * Math.PI);
+                ctx.fillStyle = '#20c997'; 
+                ctx.fill();
+                ctx.strokeStyle = isDarkMode ? '#1f293a' : '#ffffff';
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+
+                // 畫出 📶 系統原生 Emoji
+                ctx.font = '14px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif'; 
+                ctx.fillStyle = '#ffffff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('📶', badgeX, baseY + 1);
+                
+                offsetX += 28; // 如果還有下一個角標，將它往左挪動 28px 避免重疊
+            }
+
+            // 🎯 繪製收合隱藏子節點閃爍角標
+            if (n._hasHiddenChildren) {
+                let badgeX = baseX - offsetX;
+
+                // ✨ 閃爍顏色特效：利用動畫時間在「青藍色」與「警告橘」之間持續切換
+                let isFlash = Math.floor(flowAnimationTime * 3) % 2 === 0;
+                ctx.fillStyle = isFlash ? '#0dcaf0' : '#fd7e14';
+
+                // 畫出圓形底框
+                ctx.beginPath();
+                ctx.arc(badgeX, baseY, 12, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.strokeStyle = isDarkMode ? '#1f293a' : '#ffffff';
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+
+                // 畫出 Bootstrap 的 bi-arrows-collapse 圖示
+                ctx.font = '14px "bootstrap-icons"'; 
+                ctx.fillStyle = '#ffffff';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('\uF146', badgeX, baseY + 1); 
+            }
+        });
+        ctx.restore();
+
+        // 4. 動態資料流動畫 (因為會消耗效能，放在最後，若沒開啟則提早結束)
+        if (!isShowFlow) return;
+        
         ctx.save();
         edgesDataSet.get().forEach(e => {
             var p0 = pos[e.from]; var p3 = pos[e.to]; 
@@ -644,12 +912,35 @@ function renderGraph(forceHierarchical = null) {
         }
     });
 
+    // 🌟 修正：開放 Level 2 以上的所有設備都可以被雙擊來收合自己的小孩
+    network.on("doubleClick", function (params) {
+        if (params.nodes.length > 0) {
+            let nodeId = params.nodes[0];
+            let node = cachedTopologyData.nodes.find(n => n.id === nodeId);
+            
+            // 只要不是最頂層的核心，大家都可以收合自己的小弟
+            if (node && parseInt(node.level) > 1) {
+                if (manualCollapseState[nodeId] === undefined) {
+                    manualCollapseState[nodeId] = !isGlobalCollapsed;
+                } else {
+                    manualCollapseState[nodeId] = !manualCollapseState[nodeId];
+                }
+                
+                if (typeof updateNodeVisibility === 'function') updateNodeVisibility();
+                if (typeof updateAllLabels === 'function') updateAllLabels();
+            }
+        }
+    });
+
     if(typeof bindLeftClickEvent === 'function') bindLeftClickEvent();
     if(typeof bindRightClickEvent === 'function') bindRightClickEvent();
+	
+	startCanvasAnimation(); // 🚀 啟動畫布全域動畫引擎
 } 
 
 function buildNodeLabel(node) { 
-    var parts = []; parts.push(node.brand || 'Unknown'); 
+    var parts = []; 
+    parts.push(node.brand || 'Unknown'); 
     if (node.model) parts.push(node.model); 
     if (isShowIP && node.ip) parts.push(`(${node.ip})`); 
     if (isShowName && node.sysName) parts.push(`[${node.sysName}]`); 
@@ -722,10 +1013,25 @@ function getBezierPoint(t, p0, p1, p2, p3) {
     return { x: (ax * tCubed) + (bx * tSquared) + (cx * t) + p0.x, y: (ay * tCubed) + (by * tSquared) + (cy * t) + p0.y }; 
 }
 
-function startFlowAnimation() { 
-    if (animationId) { cancelAnimationFrame(animationId); animationId = null; } 
-    function animate() { flowAnimationTime += 0.015; if (isShowFlow && network) { network.redraw(); } animationId = requestAnimationFrame(animate); } 
+// 🌟 升級版：全域畫布動畫引擎 (整合資料流與收合閃爍特效)
+function startCanvasAnimation() { 
+    if (animationId) return; // 已經在跑了就不重複啟動
+    function animate() { 
+        flowAnimationTime += 0.03; // 動畫速度
+        
+        // 判斷是否需要重繪：如果有開啟資料流，或是「目前有節點被收合」，就觸發重繪更新動畫！
+        let hasHidden = cachedTopologyData && cachedTopologyData.nodes.some(n => n._hasHiddenChildren);
+        if ((isShowFlow || hasHidden) && network) { 
+            network.redraw(); 
+        } 
+        animationId = requestAnimationFrame(animate); 
+    } 
     animate(); 
+}
+
+// 保留此名稱供舊有 UI 按鈕相容呼叫
+function startFlowAnimation() { 
+    startCanvasAnimation(); 
 }
 
 function startDynamicEdges() {
@@ -741,7 +1047,10 @@ function startDynamicEdges() {
                     if (!node || !traffic[node.ip]) return 0;
                     let bps = 0;
                     try {
-                        let raw = JSON.parse(node.snmp_raw); let ifNames = raw[4] || {}; let pNames = portNamesStr.split(',').map(s => s.trim().toLowerCase());
+                        let raw = JSON.parse(node.snmp_raw); 
+                        let ifNames = raw[4] || {}; 
+                        if (Object.keys(ifNames).length === 0) ifNames = raw[8] || {}; // 🌟 降級防線
+                        let pNames = portNamesStr.split(',').map(s => s.trim().toLowerCase());
                         Object.keys(ifNames).forEach(idx => {
                             let name = ifNames[idx].replace(/"/g, '').toLowerCase();
                             if (pNames.includes(name)) { let t = traffic[node.ip][idx]; if (t) bps += Math.max(t.in_bps, t.out_bps); }
@@ -754,7 +1063,38 @@ function startDynamicEdges() {
                 let baseColor = getLinkColor(speedMbps, isDarkMode);
                 let width = 2; let dashes = false; let finalColor = baseColor;
 
-                if (util > 0.8) { finalColor = '#dc3545'; width = 6; dashes = [10, 5]; } 
+                // 🌟 新增：手動標註 MGMT 智慧樣式特判 (採用智慧孔號數字對齊防線，通殺所有廠牌長短孔名)
+				let isMgmtLink = false;
+				if (window.portSettingsCache && window.portSettingsCache.length > 0) {
+					let extractNum = function(str) { let m = String(str).match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+					isMgmtLink = window.portSettingsCache.some(p => {
+						if (p.is_manual_mgmt !== 1 && p.is_manual_mgmt !== true) return false;
+						if (p.ip === e.from) {
+							let pNum = extractNum(p.port_name);
+							let epArray = String(e.from_port).toLowerCase().split(',');
+							for (let ep of epArray) {
+								let cleanEp = ep.trim();
+								if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+							}
+						}
+						if (p.ip === e.to) {
+							let pNum = extractNum(p.port_name);
+							let epArray = String(e.to_port).toLowerCase().split(',');
+							for (let ep of epArray) {
+								let cleanEp = ep.trim();
+								if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+							}
+						}
+						return false;
+					});
+				}
+
+                if (isMgmtLink) {
+                    edgesToUpdate.push({ id: edge.id, color: { color: '#8b0000', highlight: '#ff4d4d', hover: '#ff4d4d' }, width: 3, dashes: [15, 10] });
+                    return; // 🌟 抓到特權，直接不參與下方的業務流量演算
+                }
+
+                if (util > 0.8) { finalColor = '#dc3545'; width = 6; dashes = [10, 5]; }
                 else if (util > 0.5) { width = 5; dashes = [5, 5]; } 
                 else if (util > 0.1) { width = 3.5; } 
                 else if (maxBps > 0) { width = 2; } 
@@ -768,6 +1108,10 @@ function startDynamicEdges() {
 }
 
 document.addEventListener('keydown', function(e) {
+    // 🌟 核心防呆：如果使用者正在輸入框內打字，絕對不攔截方向鍵！讓游標可以自由左右移動。
+    const activeTag = document.activeElement ? document.activeElement.tagName.toLowerCase() : '';
+    if (['input', 'textarea', 'select'].includes(activeTag)) return;
+
     if (!network || !cachedTopologyData) return;
     var selectedNodes = network.getSelectedNodes();
     if (selectedNodes.length === 0) return;

@@ -15,6 +15,17 @@ if (typeof window.logFrontendAction !== 'function') {
     };
 }
 
+// 🌟 網孔設定全域記憶池 (包含 Uplink, MGMT 與記憶 IP)
+window.portSettingsCache = [];
+window.loadPortSettingsCache = async function() {
+    try {
+        let res = await fetch('/api/device/ports/cache');
+        window.portSettingsCache = await res.json();
+    } catch(e) { console.warn("無法載入網孔標註快取", e); }
+};
+// 網頁載入時預先抓取一次
+document.addEventListener("DOMContentLoaded", window.loadPortSettingsCache);
+
 function toggleGrid() { 
     isGridVisible = !isGridVisible; 
     var btnGrid = document.getElementById('btn-grid'); 
@@ -25,6 +36,210 @@ function toggleGrid() {
     } 
     window.logFrontendAction("前端瀏覽軌跡", "切換顯示設定", `管理員將「磁吸網格」顯示狀態切換為：【 ${isGridVisible ? '開啟' : '關閉'} 】。`);
     if (network) network.redraw(); 
+}
+
+// 🌟 新增：全域收合/展開按鈕觸發器
+function toggleCollapse() {
+    isGlobalCollapsed = !isGlobalCollapsed;
+    manualCollapseState = {}; // 切換全域時，清除所有單點手動記憶
+    
+    var btn = document.getElementById('btn-collapse');
+    if (isGlobalCollapsed) {
+        btn.classList.replace('btn-outline-secondary', 'btn-primary');
+        btn.classList.add('text-white');
+        btn.innerHTML = '<i class="bi bi-arrows-expand"></i>';
+    } else {
+        btn.classList.replace('btn-primary', 'btn-outline-secondary');
+        btn.classList.remove('text-white');
+        btn.innerHTML = '<i class="bi bi-arrows-collapse"></i>';
+    }
+    
+    window.logFrontendAction("前端瀏覽軌跡", "切換顯示設定", `管理員將「L4 設備收合」狀態切換為：【 ${isGlobalCollapsed ? '收合' : '展開'} 】。`);
+    
+    updateNodeVisibility();
+    updateAllLabels();
+}
+
+// 🌟 終極完美版：網路電流 BFS 引擎 + 智慧與手動 MGMT 線路過濾
+function updateNodeVisibility() {
+    if (!nodesDataSet || !cachedTopologyData || !edgesDataSet) return;
+
+    let nodeMap = {};
+    cachedTopologyData.nodes.forEach(n => {
+        n._hasHiddenChildren = false; 
+        nodeMap[n.id] = n;
+    });
+
+    let nodeMaxSpeed = {};
+    cachedTopologyData.nodes.forEach(n => nodeMaxSpeed[n.id] = 0);
+    cachedTopologyData.edges.forEach(e => {
+        let speed = parseInt(e.speed) || 1000;
+        if (speed > (nodeMaxSpeed[e.from] || 0)) nodeMaxSpeed[e.from] = speed;
+        if (speed > (nodeMaxSpeed[e.to] || 0)) nodeMaxSpeed[e.to] = speed;
+    });
+
+    let blockers = new Set();
+    cachedTopologyData.nodes.forEach(n => {
+        if (manualCollapseState[n.id]) blockers.add(n.id);
+        else if (isGlobalCollapsed && parseInt(n.level) === 3) blockers.add(n.id);
+    });
+
+    // 2. 建立線路地圖 (🌟 擴充：現在連 my_port 和 peer_port 的名字也記錄下來了)
+    let adjList = {};
+    cachedTopologyData.nodes.forEach(n => adjList[n.id] = []);
+    cachedTopologyData.edges.forEach(e => {
+        if (adjList[e.from] && adjList[e.to]) {
+            let speed = parseInt(e.speed) || 1000;
+            adjList[e.from].push({ peer: e.to, speed: speed, my_port: e.from_port, peer_port: e.to_port });
+            adjList[e.to].push({ peer: e.from, speed: speed, my_port: e.to_port, peer_port: e.from_port });
+        }
+    });
+
+    let visibleNodes = new Set();
+    let queue = [];
+    
+    //let minLevel = Math.min(...cachedTopologyData.nodes.map(n => parseInt(n.level) || 99));
+    //cachedTopologyData.nodes.forEach(n => {
+    //    if (parseInt(n.level) === minLevel) { visibleNodes.add(n.id); queue.push(n.id); }
+    //});
+	
+	// 🌟 修正後：讓 Level <= 3 骨幹交換器全數進入起始佇列，保證 106BONE 與下游樹狀結構永不消失
+    cachedTopologyData.nodes.forEach(n => {
+        let lvl = parseInt(n.level) || 99;
+        if (lvl <= 3) { 
+            visibleNodes.add(n.id); 
+            queue.push(n.id); 
+        }
+    });
+
+    while (queue.length > 0) {
+        let currId = queue.shift();
+        let currNode = nodeMap[currId];
+        let currLevel = parseInt(currNode.level) || 99;
+        let isCurrBlocker = blockers.has(currId);
+
+        adjList[currId].forEach(edgeInfo => {
+            let neighborId = edgeInfo.peer;
+            let linkSpeed = edgeInfo.speed;
+            let neighborNode = nodeMap[neighborId];
+            if (!neighborNode) return;
+            let neighborLevel = parseInt(neighborNode.level) || 99;
+
+            let canTraverse = true;
+            
+            // 🌟 修正：只有當鄰居是嚴格位於下游 (Level 數字更大) 時才阻斷，同 Level 橫向連線直接放行
+            if (isCurrBlocker && neighborLevel > currLevel) {
+                canTraverse = false; 
+            }
+
+            // 🌟 終極特判 1：手動 MGMT 阻斷！(全面採用智慧孔號數字對齊比對，完美適用 Cisco/Aruba 長孔名)
+            let isManualMgmt = false;
+            if (window.portSettingsCache && window.portSettingsCache.length > 0) {
+                let extractNum = function(str) { let m = String(str).match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+                isManualMgmt = window.portSettingsCache.some(p => {
+                    if (p.is_manual_mgmt !== 1 && p.is_manual_mgmt !== true) return false;
+                    if (p.ip === currId) {
+                        let pNum = extractNum(p.port_name);
+                        let epArray = String(edgeInfo.my_port).toLowerCase().split(',');
+                        for (let ep of epArray) {
+                            let cleanEp = ep.trim();
+                            if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+                        }
+                    }
+                    if (p.ip === neighborId) {
+                        let pNum = extractNum(p.port_name);
+                        let epArray = String(edgeInfo.peer_port).toLowerCase().split(',');
+                        for (let ep of epArray) {
+                            let cleanEp = ep.trim();
+                            if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+                        }
+                    }
+                    return false;
+                });
+            }
+
+            // 🌟 終極特判 2：如果被標註為手動 MGMT，或者自動判定為低速管理線路，直接封殺備援電流！
+            if (isManualMgmt || (nodeMaxSpeed[neighborId] >= 1000 && linkSpeed < 1000)) {
+                canTraverse = false;
+            }
+
+            if (canTraverse && !visibleNodes.has(neighborId)) {
+                visibleNodes.add(neighborId);
+                queue.push(neighborId);
+            }
+        });
+    }
+
+    // 4. 更新節點生死與圖示 (完全不變)
+    let nodeUpdates = [];
+    cachedTopologyData.nodes.forEach(n => {
+        let isVisible = visibleNodes.has(n.id);
+        nodeUpdates.push({ id: n.id, hidden: !isVisible });
+        
+        if (isVisible && blockers.has(n.id)) {
+            let hasBlockedEdges = false;
+            adjList[n.id].forEach(edgeInfo => {
+                let p = nodeMap[edgeInfo.peer];
+                if (p && (parseInt(p.level) || 99) >= (parseInt(n.level) || 99)) {
+                    hasBlockedEdges = true;
+                }
+            });
+            if (hasBlockedEdges) n._hasHiddenChildren = true;
+        }
+    });
+    nodesDataSet.update(nodeUpdates);
+
+    // 5. 終極線路修剪邏輯 (完全不變)
+    let edgeUpdates = [];
+    cachedTopologyData.edges.forEach(e => {
+        let fromVisible = visibleNodes.has(e.from);
+        let toVisible = visibleNodes.has(e.to);
+        let edgeHidden = false;
+
+        if (!fromVisible || !toVisible) {
+                edgeHidden = true; 
+            } else {
+                let fromNode = nodeMap[e.from];
+                let toNode = nodeMap[e.to];
+                let fromLvl = fromNode ? parseInt(fromNode.level) || 99 : 99;
+                let toLvl = toNode ? parseInt(toNode.level) || 99 : 99;
+
+                // 🌟 修正：只有當連線是由收合點連向「更下游子節點」時才隱藏線路；橫向同 Level 線路一律保持可見
+                if (blockers.has(e.from) && toLvl > fromLvl) { edgeHidden = true; } 
+                else if (blockers.has(e.to) && fromLvl > toLvl) { edgeHidden = true; }
+            }
+		
+		// 🌟 新增：如果管理員關閉了 MGMT 顯示，則強制將人工標註的管理線路自畫布隱藏 (同步升級智慧對齊)
+        if (!edgeHidden && !isShowMgmtLines) {
+            let extractNum = function(str) { let m = String(str).match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+            let isMgmtLinkChecked = window.portSettingsCache.some(p => {
+                if (p.is_manual_mgmt !== 1 && p.is_manual_mgmt !== true) return false;
+                if (p.ip === e.from) {
+                    let pNum = extractNum(p.port_name);
+                    let epArray = String(e.from_port).toLowerCase().split(',');
+                    for (let ep of epArray) {
+                        let cleanEp = ep.trim();
+                        if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+                    }
+                }
+                if (p.ip === e.to) {
+                    let pNum = extractNum(p.port_name);
+                    let epArray = String(e.to_port).toLowerCase().split(',');
+                    for (let ep of epArray) {
+                        let cleanEp = ep.trim();
+                        if (cleanEp === String(p.port_name).toLowerCase().trim() || (pNum !== "" && extractNum(cleanEp) === pNum)) return true;
+                    }
+                }
+                return false;
+            });
+            if (isMgmtLinkChecked) {
+                edgeHidden = true;
+            }
+        }
+		
+        edgeUpdates.push({ id: e.id, hidden: edgeHidden });
+    });
+    edgesDataSet.update(edgeUpdates);
 }
 
 function toggleFlow() { 
@@ -68,6 +283,18 @@ function updateSwitchUI(id, isShow) {
     } else { 
         btn.classList.replace('btn-secondary', 'btn-outline-secondary'); btn.classList.remove('text-white'); 
     } 
+}
+
+// 🌟 新增：獨立控制手動標註 MGMT 管理線路顯隱引擎
+function toggleShowMgmtLines() {
+    isShowMgmtLines = !isShowMgmtLines;
+    updateSwitchUI('btn-show-mgmt', isShowMgmtLines);
+    
+    // 重新呼叫電力尋路引擎更新畫布線路狀態
+    if (typeof updateNodeVisibility === 'function') updateNodeVisibility();
+    if (network) network.redraw();
+    
+    window.logFrontendAction("前端瀏覽軌跡", "切換顯示設定", `管理員將「MGMT 線路顯示」狀態切換為：【 ${isShowMgmtLines ? '開啟' : '隱藏'} 】。`);
 }
 
 function toggleDarkMode() {
@@ -209,6 +436,17 @@ function manageSlot(slotId, action, silent = false) {
             if (result.success) { 
                 cachedTopologyData.nodes.forEach(n => { delete n.x; delete n.y; }); 
                 activeSlot = null; 
+                
+                // 🌟 重置畫面時，一併解除所有收合狀態，回歸乾淨的預設值
+                isGlobalCollapsed = false;
+                manualCollapseState = {};
+                var btn = document.getElementById('btn-collapse');
+                if (btn) {
+                    btn.classList.replace('btn-primary', 'btn-outline-secondary');
+                    btn.classList.remove('text-white');
+                    btn.innerHTML = '<i class="bi bi-arrows-collapse"></i>';
+                }
+
                 if(typeof renderGraph === 'function') renderGraph(true); 
                 renderButtons(); 
                 if (!silent && typeof showToast === 'function') showToast("已還原為預設階層排列", "info"); 
@@ -244,12 +482,24 @@ function manageSlot(slotId, action, silent = false) {
         return typeof showToast === 'function' ? showToast("資料庫為空！請新增設備。", "warning") : alert("資料庫為空"); 
     }
     
-    // 💡 儲存版面 (同時抓取 Vis.js 物理引擎的視角與縮放比例)
+    // 💡 儲存版面
     if (action === 'save') { 
         var positions = network.getPositions(); 
+        
+        // 🌟 核心防呆：Vis.js 不會回傳被「收合隱藏」的節點座標！
+        // 必須從快取中把隱藏的 AP 座標手動補齊，否則存檔會遺失！
+        cachedTopologyData.nodes.forEach(n => {
+            if (!positions[n.id] && n.x !== undefined && n.y !== undefined) {
+                positions[n.id] = { x: n.x, y: n.y };
+            }
+        });
+
         var currentView = {
             position: network.getViewPosition(),
-            scale: network.getScale()
+            scale: network.getScale(),
+            // 🌟 記憶當下版面的專屬收合狀態
+            isGlobalCollapsed: typeof isGlobalCollapsed !== 'undefined' ? isGlobalCollapsed : false,
+            manualCollapseState: typeof manualCollapseState !== 'undefined' ? manualCollapseState : {}
         };
 
         fetch('/api/topology/slots/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slot: slotId, positions: positions, view: currentView }) })
@@ -261,7 +511,7 @@ function manageSlot(slotId, action, silent = false) {
             } 
         }); 
     } 
-    // 💡 讀取版面 (連同視角一起動畫飛過去)
+    // 💡 讀取版面
     else if (action === 'load') { 
         if (!silent && typeof showToast === 'function') showToast(`正在讀取版面 ${slotId} 與視角記憶...`, 'info');
         fetch('/api/topology/slots/load', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slot: slotId }) })
@@ -269,10 +519,35 @@ function manageSlot(slotId, action, silent = false) {
             if (res.success) { 
                 cachedTopologyData.nodes.forEach(n => { if (res.positions && res.positions[n.id]) { n.x = res.positions[n.id].x; n.y = res.positions[n.id].y; } }); 
                 activeSlot = slotId; 
+                
+                // 🌟 徹底切斷「狀態污染」：讀取時，強制套用該版面專屬的記憶！
+                if (res.view) {
+                    isGlobalCollapsed = res.view.isGlobalCollapsed === true;
+                    manualCollapseState = res.view.manualCollapseState || {};
+                } else {
+                    // 若舊存檔沒有收合資料，則恢復為全部展開，避免被上一個版面污染！
+                    isGlobalCollapsed = false;
+                    manualCollapseState = {};
+                }
+
+                // 同步更新上方的「全域收合按鈕」UI 外觀
+                var btn = document.getElementById('btn-collapse');
+                if (btn) {
+                    if (isGlobalCollapsed) {
+                        btn.classList.replace('btn-outline-secondary', 'btn-primary');
+                        btn.classList.add('text-white');
+                        btn.innerHTML = '<i class="bi bi-arrows-expand"></i>';
+                    } else {
+                        btn.classList.replace('btn-primary', 'btn-outline-secondary');
+                        btn.classList.remove('text-white');
+                        btn.innerHTML = '<i class="bi bi-arrows-collapse"></i>';
+                    }
+                }
+
                 if(typeof renderGraph === 'function') renderGraph(false); 
                 renderButtons(); 
 
-                // 💡 神奇魔法：如果資料庫有存視角，用滑順的動畫平移過去；沒有的話則還原成預設的 Fit (滿版)
+                // 動畫平移
                 if (res.view && res.view.position && res.view.scale) {
                     network.moveTo({
                         position: res.view.position,
@@ -338,4 +613,80 @@ function isPortUplink(nodeIp, portName) {
         }
     }
     return false;
+}
+
+// ========================================================
+// 📍 設備名稱/IP 地標閃爍搜尋定位引擎
+// ========================================================
+let flashingMarker = null;
+
+function findDeviceOnMap() {
+    let query = document.getElementById('topo-search-ip').value.trim().toLowerCase();
+    if (!query) return;
+
+    if (!nodesDataSet || !network) {
+        if(typeof window.showToast === 'function') window.showToast("網路拓樸尚未載入完畢", "warning");
+        return;
+    }
+    
+    // 優先精確比對 IP，其次模糊比對 SysName 或 IP
+    let allNodes = nodesDataSet.get();
+    let target = allNodes.find(n => n.ip === query);
+    
+    if (!target) {
+        target = allNodes.find(n => n.ip.toLowerCase().includes(query) || (n.sysName && n.sysName.toLowerCase().includes(query)));
+    }
+
+    if (target) {
+        // 1. 鏡頭聚焦並放大節點
+        network.focus(target.id, {
+            scale: 1.2,
+            animation: { duration: 800, easingFunction: 'easeInOutQuad' }
+        });
+        network.selectNodes([target.id]);
+
+        // 2. 移除現有殘留標記
+        if (flashingMarker) {
+            flashingMarker.remove();
+            flashingMarker = null;
+        }
+
+        // 3. 建立 DOM 紅色地標，植入拓樸圖畫布之上
+        flashingMarker = document.createElement('div');
+        flashingMarker.className = 'map-marker-pin';
+        flashingMarker.innerHTML = '<i class="bi bi-geo-alt-fill text-danger" style="filter: drop-shadow(0 0 8px rgba(255,255,255,0.8));"></i>';
+        
+        let container = document.getElementById('mynetwork'); 
+        container.appendChild(flashingMarker);
+
+        // 4. 動態追蹤：每幀更新標記位置 (即使使用者拖曳圖形，地標依然死死跟隨設備左上角)
+        let updateMarker = () => {
+            if (!flashingMarker) return;
+            let canvasPos = network.getPositions([target.id])[target.id];
+            if (canvasPos) {
+                // 將 Vis.js 畫布座標轉回前端 DOM 絕對座標
+                let domPos = network.canvasToDOM(canvasPos);
+                // 置於設備左上角 (依據節點大小做微調偏移)
+                flashingMarker.style.left = (domPos.x - 30) + 'px';
+                flashingMarker.style.top = (domPos.y - 45) + 'px';
+            }
+            requestAnimationFrame(updateMarker);
+        };
+        updateMarker();
+
+        // 5. 3 秒後自動消滅標記
+        setTimeout(() => {
+            if (flashingMarker) {
+                flashingMarker.remove();
+                flashingMarker = null;
+            }
+        }, 5000);
+        
+        document.getElementById('topo-search-ip').value = '';
+
+        if(typeof window.showToast === 'function') window.showToast(`✅ 已為您定位到設備：${target.sysName || target.ip}`, "success");
+
+    } else {
+        if(typeof window.showToast === 'function') window.showToast("❌ 找不到符合名稱或 IP 的設備", "danger");
+    }
 }
