@@ -1,0 +1,349 @@
+{% extends 'layout.html' %}
+
+{% block title %}資產與網孔配置盤點 - 網路拓樸管理系統{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
+<style>
+    /* 🌟 核心排版：外框固定不捲動，內部表格自適應捲動 (致敬日誌中心完美排版) */
+    html, body { height: 100vh; margin: 0; overflow: hidden !important; background-color: #1a202c; color: #e2e8f0; }
+    
+    /* 配合 layout.html 頂部選單的間距 */
+    .main-wrapper { height: calc(100vh - 90px); display: flex; flex-direction: column; overflow: hidden; margin-top: 10px; }
+    
+    .card-container { display: flex; flex-direction: column; height: 100%; background-color: #2d3748; border: 1px solid #4a5568; border-radius: 8px; }
+    .card-header { background-color: #2a4365; border-bottom: 1px solid #4a5568; flex-shrink: 0; }
+    
+    /* 表格獨立捲動區 */
+    .table-container { flex-grow: 1; overflow-y: auto; overflow-x: auto; background-color: #11151c; position: relative; }
+    
+    /* 自訂捲軸樣式 */
+    .table-container::-webkit-scrollbar { width: 8px; height: 8px; }
+    .table-container::-webkit-scrollbar-track { background: #1a202c; }
+    .table-container::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 4px; }
+    .table-container::-webkit-scrollbar-thumb:hover { background: #63b3ed; }
+
+    /* 🌟 修復 DataTables 深色主題配色覆蓋問題 (強制深色，封殺 Bootstrap 5 預設白底與變數) */
+    table.dataTable, table.dataTable tbody tr, table.dataTable tbody td {
+        background-color: transparent !important;
+        color: #e2e8f0 !important;
+        box-shadow: none !important; /* 封殺 BS5 預設的斑馬紋白色陰影 */
+    }
+    .table-dark { --bs-table-bg: transparent; margin-bottom: 0 !important; }
+    .table-dark thead th { background-color: #2d3748 !important; color: #63b3ed !important; border-bottom: 2px solid #4a5568 !important; position: sticky; top: 0; z-index: 10; }
+    
+    /* 🌟 為表格列補上極具質感的深色雙色斑馬紋 */
+    .table-dark tbody tr:nth-of-type(odd) { background-color: rgba(255, 255, 255, 0.03) !important; }
+    .table-dark tbody tr:nth-of-type(even) { background-color: rgba(0, 0, 0, 0.15) !important; }
+    
+    .table-dark td { border-bottom: 1px solid #2d3748 !important; vertical-align: middle; }
+    .table-dark tbody tr:hover td { background-color: rgba(99, 179, 237, 0.15) !important; color: #ffffff !important; }
+
+    /* 修復：DataTables 搜尋框與筆數下拉選單「白字白底」問題 */
+    .dataTables_wrapper .dataTables_length select,
+    .dataTables_wrapper .dataTables_filter input {
+        background-color: #1a202c !important; 
+        color: #63b3ed !important; 
+        border: 1px solid #4a5568 !important; 
+        border-radius: 4px; 
+        padding: 4px 8px;
+    }
+    /* 🌟 確保下拉選單點開時，裡面的選項也是深色底，不再刺眼 */
+    .dataTables_wrapper .dataTables_length select option {
+        background-color: #1a202c !important;
+        color: #e2e8f0 !important;
+    }
+    /* 搜尋與筆數文字標籤 */
+    .dataTables_wrapper .dataTables_length label,
+    .dataTables_wrapper .dataTables_filter label {
+        color: #a0aec0 !important;
+        font-weight: bold;
+    }
+    
+    /* 修復：DataTables 底部分頁條隱藏，改用我們自訂的狀態列 */
+    .dataTables_info, .dataTables_paginate { display: none !important; }
+    
+    /* 展開/收合按鈕樣式 */
+    td.details-control { text-align: center; color: #0dcaf0 !important; cursor: pointer; font-weight: bold; width: 40px; font-size: 1.2rem; }
+    tr.shown td.details-control { color: #ffc107 !important; }
+    
+    /* 內嵌子表格 (網孔清單) 專屬樣式 */
+    .child-table { background-color: #0f131a !important; border: 1px solid #4a5568; border-radius: 6px; margin: 8px 0; }
+    .child-table th { background-color: #1a202c !important; color: #a0aec0 !important; border-bottom: 1px solid #4a5568 !important; font-size: 0.95rem; }
+    .child-table td { border-bottom: 1px solid #2d3748 !important; font-size: 1.05rem; color: #e2e8f0 !important; }
+    .child-table tr:hover td { background-color: transparent !important; }
+    .child-table tr:last-child td { border-bottom: none !important; }
+    
+    /* 底部狀態列 */
+    /* 底部狀態列 (補上底部導角完美貼合卡片外框) */
+    .footer-bar { background-color: #1a202c; flex-shrink: 0; border-top: 1px solid #4a5568; border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid main-wrapper px-3">
+    <div class="card-container shadow">
+        <div class="card-header d-flex justify-content-between align-items-center py-2">
+            <h5 class="m-0 fw-bold text-info"><i class="bi bi-card-checklist me-2"></i>全網設備資產與網孔配置表</h5>
+            <div>
+                <button class="btn btn-sm btn-outline-light me-2 fw-bold" onclick="fetchInventoryData()"><i class="bi bi-arrow-clockwise me-1"></i>重新載入</button>
+                <button class="btn btn-sm btn-success fw-bold" onclick="exportToCSV()"><i class="bi bi-file-earmark-excel me-1"></i>匯出 Excel (CSV)</button>
+            </div>
+        </div>
+
+        <div class="table-container p-0">
+            <div id="loadingIndicator" class="text-center py-5 mt-5">
+                <div class="spinner-border text-info" role="status" style="width: 3rem; height: 3rem;"></div>
+                <div class="mt-3 text-white-50 fw-bold fs-5">正在從後端資料庫彙整資產與網孔數據...</div>
+            </div>
+            
+            <div class="p-3 pb-4" id="tableContent" style="display: none;">
+                <table id="inventoryTable" class="table table-dark w-100">
+                    <thead>
+                        <tr>
+                            <th></th> <th>設備 IP</th>
+                            <th>系統名稱 (SysName)</th>
+                            <th>廠牌</th>
+                            <th>型號</th>
+                            <th>韌體版本</th>
+                            <th class="text-center">被標註/記憶網孔數</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+        
+        <div class="footer-bar px-3 py-2 d-flex justify-content-between align-items-center">
+            <div id="page-info" class="fw-bold" style="font-size: 0.9rem; color: #a0aec0;">正在準備資料...</div>
+            <div id="pagination-controls" class="d-flex gap-1">
+                </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+
+<script>
+    let tableInstance = null;
+    let rawData = [];
+
+	// 💡 渲染「子表格」：動態生成這台設備所有的網孔 MAC 紀錄與 Alias 說明
+    function formatChildTable(d) {
+        if (!d.ports || d.ports.length === 0) {
+            return '<div class="text-center text-white-50 p-3" style="font-size: 1rem;"><i class="bi bi-info-circle me-1"></i>此設備目前尚無任何網孔記憶或手動標註紀錄。</div>';
+        }
+        
+        let html = '<table class="table table-sm table-borderless child-table w-100 mb-0">';
+        html += '<thead><tr><th style="width: 25%;" class="ps-3">實體網孔名稱 / 說明 (Alias)</th><th style="width: 15%;">管理屬性</th><th style="width: 20%;">介接終端 IP</th><th>真實 MAC 位址</th></tr></thead><tbody>';
+        
+        // 🌟 智慧自然排序 (Natural Sort)：讓瀏覽器像人類一樣理解文字中的數字，
+        // 確保 1/6 絕對會排在 1/20 之前，而不會被當成純字串排序！
+        let sortedPorts = [...d.ports].sort((a, b) => {
+            return String(a.port_name).localeCompare(String(b.port_name), undefined, { numeric: true, sensitivity: 'base' });
+        });
+
+        sortedPorts.forEach(p => {
+            let badges = '';
+            if (p.is_uplink) badges += '<span class="badge bg-info text-dark me-1" style="font-size:0.9rem;"><i class="bi bi-diagram-3-fill me-1"></i>Uplink</span><br>';
+            if (p.is_mgmt) badges += '<span class="badge bg-danger me-1 mt-1" style="font-size:0.9rem;"><i class="bi bi-shield-lock-fill me-1"></i>MGMT</span><br>';
+            if (!badges && p.connected_devices.length > 0) badges = '<span class="badge bg-success" style="font-size:0.9rem;"><i class="bi bi-pc-display me-1"></i>一般接入</span>';
+            if (!badges) badges = '<span class="text-white-50">-</span>';
+
+            let ipCol = ''; let macCol = '';
+            if (p.connected_devices.length > 0) {
+                p.connected_devices.forEach(dev => {
+                    // 🌟 完全對齊全網搜尋的黃金字體比例，放大並使用 Badge
+                    ipCol += `<div class="mb-1"><span class="badge bg-success" style="font-size: 1rem; padding: 6px 10px;">${dev.ip}</span></div>`;
+                    macCol += `<div class="mb-1"><span class="text-white-50 font-monospace" style="font-size: 1.05rem;">${dev.mac}</span></div>`;
+                });
+            } else {
+                ipCol = '<span class="text-white-50">-</span>'; macCol = '<span class="text-white-50">-</span>';
+            }
+
+            // 🌟 組合 Alias 標籤，如果有說明就顯示在網孔名稱正下方// 🌟 組合 Alias 標籤，改為同行並排顯示，不換行，節省垂直空間
+            let aliasHtml = p.alias ? `<span class="text-info ms-2" style="font-size: 0.9rem;"><i class="bi bi-tag me-1"></i>${p.alias}</span>` : '';
+
+            html += `<tr>
+                <td class="fw-bold align-middle ps-3 text-nowrap"><i class="bi bi-ethernet me-2 text-secondary"></i>${p.port_name}${aliasHtml}</td>
+                <td class="align-middle">${badges}</td>
+                <td class="align-middle">${ipCol}</td>
+                <td class="align-middle">${macCol}</td>
+            </tr>`;
+        });
+        
+        html += '</tbody></table>';
+        return html;
+    }
+
+    // 💡 客製化底部 Pagination 渲染邏輯
+    function updateCustomPagination() {
+        if (!tableInstance) return;
+        
+        let pageInfo = tableInstance.page.info();
+        let totalPages = pageInfo.pages;
+        let currPage = pageInfo.page;
+        
+        // 更新左下角文字
+        if (pageInfo.recordsTotal === 0) {
+            $('#page-info').text('無資料');
+            $('#pagination-controls').empty();
+            return;
+        }
+        $('#page-info').html(`<i class="bi bi-file-earmark-text text-info me-1"></i>PAGE <span class="text-white">${currPage + 1}</span> OF <span class="text-white">${totalPages}</span> (共 ${pageInfo.recordsDisplay} 台設備)`);
+        
+        // 更新右下角按鈕
+        let btnHtml = '';
+        btnHtml += `<button class="btn btn-sm btn-outline-secondary ${currPage === 0 ? 'disabled' : ''}" onclick="tableInstance.page('previous').draw('page')" title="上一頁"><i class="bi bi-chevron-left"></i></button>`;
+        
+        // 動態頁碼
+        let startPage = Math.max(0, currPage - 2);
+        let endPage = Math.min(totalPages - 1, currPage + 2);
+        
+        for (let i = startPage; i <= endPage; i++) {
+            let activeClass = i === currPage ? 'btn-info text-dark fw-bold' : 'btn-outline-secondary text-light';
+            btnHtml += `<button class="btn btn-sm ${activeClass}" onclick="tableInstance.page(${i}).draw('page')">${i + 1}</button>`;
+        }
+        
+        btnHtml += `<button class="btn btn-sm btn-outline-secondary ${currPage === totalPages - 1 ? 'disabled' : ''}" onclick="tableInstance.page('next').draw('page')" title="下一頁"><i class="bi bi-chevron-right"></i></button>`;
+        
+        $('#pagination-controls').html(btnHtml);
+    }
+
+    // 💡 呼叫 API 取回資料並掛載到 DataTables
+    function fetchInventoryData() {
+        $('#tableContent').hide();
+        $('#loadingIndicator').html('<div class="spinner-border text-info" style="width: 3rem; height: 3rem;"></div><div class="mt-3 text-white-50 fw-bold fs-5">正在從後端資料庫彙整資產與網孔數據...</div>').show();
+        $('#page-info').text('載入中...');
+        $('#pagination-controls').empty();
+        
+        if (tableInstance) {
+            tableInstance.destroy();
+            $('#inventoryTable tbody').empty();
+        }
+
+        fetch('/api/report/inventory_ports')
+            .then(res => res.json())
+            .then(res => {
+                if (res.success) {
+                    $('#loadingIndicator').hide();
+                    $('#tableContent').fadeIn();
+                    rawData = res.data;
+                    
+                    tableInstance = $('#inventoryTable').DataTable({
+                        data: rawData,
+                        columns: [
+                            { className: 'details-control', orderable: false, data: null, defaultContent: '<i class="bi bi-plus-square"></i>' },
+                            { data: 'ip', className: 'fw-bold text-info' },
+                            { data: 'sysName' },
+                            { data: 'brand' },
+                            { data: 'model' },
+                            { data: 'firmware' },
+                            { 
+                                data: 'ports', 
+                                className: 'text-center',
+                                render: function(data) {
+                                    let count = data ? data.length : 0;
+                                    return count > 0 ? `<span class="badge bg-primary rounded-pill px-2 fs-6 shadow-sm">${count}</span>` : '<span class="text-white-50">-</span>';
+                                }
+                            }
+                        ],
+                        order: [[1, 'asc']], // 預設依照 IP 排序
+                        pageLength: 20,      // 每頁顯示 20 筆，塞滿畫面不擁擠
+                        dom: '<"d-flex justify-content-between align-items-center mb-3"lf>rt', // 隱藏內建的 info 與 p
+                        language: { 
+                            url: '//cdn.datatables.net/plug-ins/1.13.6/i18n/zh-HANT.json',
+                            search: "<i class='bi bi-search text-info me-1'></i> 即時搜尋：",
+                            lengthMenu: "顯示 _MENU_ 筆"
+                        }
+                    });
+
+                    // 綁定 DataTable 重繪事件 (當搜尋或換頁時，同步更新底部我們客製化的 Pagination)
+                    tableInstance.on('draw', function() {
+                        updateCustomPagination();
+                    });
+                    updateCustomPagination();
+
+                    // 綁定點擊展開子表格事件
+                    $('#inventoryTable tbody').off('click', 'td.details-control');
+                    $('#inventoryTable tbody').on('click', 'td.details-control', function () {
+                        let tr = $(this).closest('tr');
+                        let row = tableInstance.row(tr);
+                        let icon = $(this).find('i');
+
+                        if (row.child.isShown()) {
+                            row.child.hide(); tr.removeClass('shown'); icon.removeClass('bi-dash-square').addClass('bi-plus-square');
+                        } else {
+                            row.child(formatChildTable(row.data())).show(); tr.addClass('shown'); icon.removeClass('bi-plus-square').addClass('bi-dash-square');
+                        }
+                    });
+                } else {
+                    $('#loadingIndicator').html(`<div class="alert alert-danger mx-auto text-start" style="max-width: 600px;"><i class="bi bi-exclamation-triangle-fill me-2 fs-4"></i><strong>資料庫檢索失敗：</strong><br><br>${res.message}</div>`);
+                    $('#page-info').text('載入失敗');
+                }
+            })
+            .catch(err => {
+                $('#loadingIndicator').html(`<div class="alert alert-danger mx-auto text-start" style="max-width: 600px;"><i class="bi bi-wifi-off me-2 fs-4"></i><strong>網路連線異常：</strong><br><br>無法連上後端 API 伺服器，請檢查網路狀態或檢視控制台錯誤。</div>`);
+                $('#page-info').text('連線錯誤');
+                console.error(err);
+            });
+    }
+
+// 💡 將子母表格資料打平，匯出成 Excel (CSV 格式)
+    function exportToCSV() {
+        if (!rawData || rawData.length === 0) {
+            if (typeof window.showToast === 'function') window.showToast('畫面上尚無任何資料可供匯出', 'warning');
+            return;
+        }
+
+        let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; 
+        // 🌟 表頭加入 網孔說明(Alias)
+        csvContent += "設備 IP,系統名稱,廠牌,型號,韌體版本,實體網孔名稱,網孔說明(Alias),網孔屬性,介接終端 IP,真實 MAC 位址\n";
+
+        rawData.forEach(dev => {
+            let baseInfo = `"${dev.ip}","${dev.sysName}","${dev.brand}","${dev.model}","${dev.firmware}"`;
+            
+            if (dev.ports && dev.ports.length > 0) {
+                dev.ports.forEach(p => {
+                    let attrs = [];
+                    if (p.is_uplink) attrs.push('Uplink');
+                    if (p.is_mgmt) attrs.push('MGMT');
+                    let attrStr = attrs.length > 0 ? attrs.join('|') : '一般接入';
+                    
+                    // 🌟 處理 Alias 內可能包含的雙引號
+                    let aliasStr = p.alias ? p.alias.replace(/"/g, '""') : '';
+                    
+                    if (p.connected_devices.length > 0) {
+                        p.connected_devices.forEach(conn => { 
+                            csvContent += `${baseInfo},"${p.port_name}","${aliasStr}","${attrStr}","${conn.ip}","${conn.mac}"\n`; 
+                        });
+                    } else { 
+                        csvContent += `${baseInfo},"${p.port_name}","${aliasStr}","${attrStr}","無","無"\n`; 
+                    }
+                });
+            } else { 
+                csvContent += `${baseInfo},"無網孔紀錄","","無","無","無"\n`; 
+            }
+        });
+
+        let encodedUri = encodeURI(csvContent);
+        let link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `全網資產與網孔配置表_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        if (typeof window.showToast === 'function') window.showToast('✅ 報表已成功匯出至 Excel！', 'success');
+    }
+
+    // 畫面載入完畢後自動向後端要資料
+    $(document).ready(function() {
+        fetchInventoryData();
+    });
+</script>
+{% endblock %}

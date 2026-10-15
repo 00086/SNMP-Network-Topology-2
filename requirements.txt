@@ -14,6 +14,13 @@ netmiko>=4.0.0
 # HTTP 請求套件 (用於觸發 ntfy.sh 手機推播)
 requests>=2.25.0
 
+# InfluxDB v2 連結
+influxdb-client >= 1.36.0
+
+# influxDB v3 連結
+# 但在程式碼中匯入時為 import influxdb_client_3
+#influxdb3-python >= 0.5.0
+
 #虛擬環境安裝
 #python -m venv venv
 #第一種執行方式
@@ -23,3 +30,15 @@ requests>=2.25.0
 #venv\Scripts\python.exe app.py
 #一行安裝
 #venv\Scripts\pip install Flask waitress pysnmp paramiko requests netmiko
+
+#telegraf 啟動
+#telegraf.exe --config telegraf.conf
+
+#InfluxDB啟動
+#.\influxd.exe 2>&1 | ForEach-Object {
+#    if ($_ -match '(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)') {
+#        $utcTime = [datetime]::Parse($Matches[1])
+#        $localTime = $utcTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.ffffff")
+#        $_ -replace $Matches[1], $localTime
+#    } else { $_ }
+#}

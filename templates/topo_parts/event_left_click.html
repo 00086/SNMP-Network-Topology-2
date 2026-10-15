@@ -112,9 +112,20 @@ function bindLeftClickEvent() {
                     </div>
 
                     <div class="mt-2 pt-2 border-top border-secondary">
-                        <button class="btn btn-outline-primary btn-sm w-100 fw-bold shadow-sm py-1" onclick="triggerDeviceBackup('${nodeData.ip}')" style="font-size: 0.8rem;">
-                            <i class="bi bi-cloud-download me-1"></i>立即備份設定檔
-                        </button>
+                        <div class="row g-2">
+                            ${(nodeData.is_backup == 1 || nodeData.is_backup === undefined || nodeData.is_backup === '1') ? `
+                            <div class="col-6">
+                                <button class="btn btn-outline-primary btn-sm w-100 fw-bold shadow-sm py-1" onclick="triggerDeviceBackup('${nodeData.ip}')" style="font-size: 0.8rem;" title="立即備份設定檔">
+                                    <i class="bi bi-cloud-download me-1"></i>備份設定
+                                </button>
+                            </div>
+                            <div class="col-6">
+                            ` : `<div class="col-12">`}
+                                <button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm py-1" onclick="openDeviceSpecsModal('${nodeData.ip}')" style="font-size: 0.8rem;" title="設定 SNMP 版本與實體網孔規格">
+                                    <i class="bi bi-ui-checks me-1"></i>設備規格
+                                </button>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="text-center mt-2 text-white-50" style="font-size:0.75rem;">💡 設備上按「右鍵」開啟虛擬面板與SNMP原始資料</div>
@@ -217,4 +228,180 @@ async function triggerDeviceBackup(ip) {
         console.error(err);
     }
 }
+
+// =========================================================
+// 🌟 設備規格資料庫設定引擎 (支援 Stack/Slot/Port 與 獨立速度)
+// =========================================================
+let deviceSpecsModalInstance = null;
+
+window.openDeviceSpecsModal = function(ip) {
+    let nodeData = nodesDataSet.get(ip);
+    if(!nodeData) return;
+    
+    if (!document.getElementById('deviceSpecsModal')) {
+        const modalHtml = `
+        <div class="modal fade" id="deviceSpecsModal" tabindex="-1" style="z-index: 1060;">
+          <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content bg-dark text-white border-info shadow-lg">
+              <div class="modal-header border-secondary py-2" style="background-color: #1a202c;">
+                <h6 class="modal-title text-info fw-bold"><i class="bi bi-ui-checks me-2"></i>設備規格設定 (<span id="spec-ip-display" class="text-warning"></span>)</h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+              </div>
+              <div class="modal-body p-3">
+                <input type="hidden" id="spec-ip-input">
+                
+                <div class="mb-3 p-3 border border-secondary rounded" style="background-color: rgba(13, 202, 240, 0.05);">
+                    <label class="form-label text-info fw-bold mb-1"><i class="bi bi-shield-lock-fill me-1"></i>1. SNMP 支援版本</label>
+                    <div class="text-white-50 small mb-2">指定設備輪詢的最佳通訊協議。</div>
+                    <select id="spec-snmp-version" class="form-select form-select-sm bg-black text-white border-secondary fw-bold">
+                        <option value="v2c">SNMP v2c (預設/標準)</option>
+                        <option value="v1">SNMP v1 (老舊設備降級)</option>
+                        <option value="v3">SNMP v3 (高安全加密)</option>
+                    </select>
+                </div>
+                
+                <div class="p-3 border border-secondary rounded" style="background-color: rgba(255, 193, 7, 0.05);">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                        <label class="form-label text-warning fw-bold m-0"><i class="bi bi-hdd-rack-fill me-1"></i>2. 實體網孔規格 (Port Specs)</label>
+                        <button class="btn btn-sm btn-outline-success py-0 px-2 fw-bold shadow-sm" style="font-size:0.75rem;" onclick="addPortSpecRow()"><i class="bi bi-plus-lg me-1"></i>新增規格</button>
+                    </div>
+                    <div class="text-white-50 small mb-3">支援 Stack/Slot/Port (例: 1/1/1-1/1/24 或 1:10)。</div>
+                    <div id="spec-port-list" class="custom-scroll" style="max-height: 250px; overflow-y: auto; overflow-x: hidden;"></div>
+                </div>
+              </div>
+              <div class="modal-footer border-secondary py-2 d-flex justify-content-between" style="background-color: #11151c;">
+                <button type="button" class="btn btn-sm btn-secondary fw-bold px-3" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-sm btn-info text-dark fw-bold px-4 shadow" onclick="saveDeviceSpecs()" id="btn-save-specs"><i class="bi bi-save-fill me-1"></i>儲存規格</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+    }
+    
+    document.getElementById('spec-ip-display').innerText = nodeData.sysName ? `${nodeData.sysName} - ${ip}` : ip;
+    document.getElementById('spec-ip-input').value = ip;
+    document.getElementById('spec-snmp-version').value = nodeData.snmp_version || 'v2c';
+    
+    let container = document.getElementById('spec-port-list');
+    container.innerHTML = '';
+    
+    let specs = [];
+    try { specs = JSON.parse(nodeData.port_specs || '[]'); } catch(e) {}
+    
+    if (specs.length === 0) {
+        window.addPortSpecRow('', 'RJ-45', '1G'); 
+    } else {
+        specs.forEach(s => window.addPortSpecRow(s.range, s.type, s.speed));
+    }
+    
+    let modalEl = document.getElementById('deviceSpecsModal');
+    if (!deviceSpecsModalInstance) deviceSpecsModalInstance = new bootstrap.Modal(modalEl);
+    deviceSpecsModalInstance.show();
+};
+
+// 🌟 智慧聯動：依照選擇的實體規格，自動匹配預設速度
+window.autoMatchSpeed = function(selectElem) {
+    let speedSelect = selectElem.parentElement.querySelector('.spec-speed');
+    let typeVal = selectElem.value;
+    
+    if (typeVal === 'RJ-45' || typeVal === 'SFP' || typeVal === 'Combo-1G') speedSelect.value = '1G';
+    else if (typeVal === 'SFP+' || typeVal === 'Combo-10G') speedSelect.value = '10G';
+    else if (typeVal === 'QSFP') speedSelect.value = '40G';
+};
+
+window.addPortSpecRow = function(rangeVal = '', typeVal = 'RJ-45', speedVal = '') {
+    // 💡 舊資料無痛升級防呆：如果舊的 JSON 只有 type 沒有 speed，根據 type 智慧補齊預設值
+    if (!speedVal) {
+        if (typeVal === 'RJ-45' || typeVal === 'SFP' || typeVal === 'Combo-1G') speedVal = '1G';
+        else if (typeVal === 'SFP+' || typeVal === 'Combo-10G') speedVal = '10G';
+        else if (typeVal.includes('QSFP')) speedVal = '40G';
+        else speedVal = '1G';
+    }
+
+    let container = document.getElementById('spec-port-list');
+    let div = document.createElement('div');
+    div.className = 'd-flex gap-2 mb-2 align-items-center spec-row';
+    div.innerHTML = `
+        <input type="text" class="form-control form-control-sm bg-black text-white border-secondary spec-range" style="width: 33%;" placeholder="例: 1/1/1-1/1/24" value="${rangeVal}" title="支援純數字、逗號、冒號、連接號、斜線">
+        
+        <select class="form-select form-select-sm bg-black text-white border-secondary spec-type fw-bold" style="width: 35%;" onchange="autoMatchSpeed(this)">
+            <option value="RJ-45" ${typeVal==='RJ-45'?'selected':''}>RJ-45 (電)</option>
+            <option value="SFP" ${typeVal==='SFP'?'selected':''}>SFP (光纖)</option>
+            <option value="Combo-1G" ${typeVal==='Combo-1G'?'selected':''}>RJ-45/SFP Combo</option>
+            <option value="SFP+" ${typeVal==='SFP+'?'selected':''}>SFP+ (光纖)</option>
+            <option value="Combo-10G" ${typeVal==='Combo-10G'?'selected':''}>RJ-45/SFP+ Combo</option>
+            <option value="QSFP" ${typeVal.includes('QSFP')?'selected':''}>QSFP (光纖)</option>
+        </select>
+        
+        <select class="form-select form-select-sm bg-black text-white border-secondary spec-speed fw-bold" style="width: 22%;">
+            <option value="1G" ${speedVal==='1G'?'selected':''}>1G</option>
+            <option value="10G" ${speedVal==='10G'?'selected':''}>10G</option>
+            <option value="25G" ${speedVal==='25G'?'selected':''}>25G</option>
+            <option value="40G" ${speedVal==='40G'?'selected':''}>40G</option>
+            <option value="100G" ${speedVal==='100G'?'selected':''}>100G</option>
+        </select>
+        
+        <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 shadow-sm" style="width: 10%;" onclick="this.parentElement.remove()"><i class="bi bi-trash-fill"></i></button>
+    `;
+    container.appendChild(div);
+};
+
+window.saveDeviceSpecs = function() {
+    let btn = document.getElementById('btn-save-specs');
+    let oriHtml = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>儲存中...';
+    
+    let ip = document.getElementById('spec-ip-input').value;
+    let snmp_version = document.getElementById('spec-snmp-version').value;
+    
+    let specs = [];
+    let isValid = true;
+    document.querySelectorAll('.spec-row').forEach(row => {
+        let range = row.querySelector('.spec-range').value.trim();
+        let type = row.querySelector('.spec-type').value;
+        let speed = row.querySelector('.spec-speed').value;
+        
+        if (range) {
+            // 🌟 範圍防呆驗證升級：新增支援斜線 ( / )，放行 1/1/1-1/1/24 此類格式
+            if (!/^[\d\-\:\,\/]+$/.test(range)) isValid = false;
+            specs.push({ range: range, type: type, speed: speed });
+        }
+    });
+    
+    if (!isValid) {
+        if(typeof showToast === 'function') showToast('⚠️ 網孔範圍格式有誤！請使用純數字、橫線(-)、冒號(:)、逗號(,)或斜線(/)表示。', 'warning');
+        else alert('⚠️ 網孔範圍格式有誤！請使用允許的符號表示範圍。');
+        btn.disabled = false; btn.innerHTML = oriHtml;
+        return;
+    }
+
+    let port_specs_json = JSON.stringify(specs);
+    
+    fetch('/api/device/specs', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ ip: ip, snmp_version: snmp_version, port_specs: port_specs_json })
+    })
+    .then(r => r.json())
+    .then(res => {
+        btn.disabled = false; btn.innerHTML = oriHtml;
+        if (res.success) {
+            if(typeof showToast === 'function') showToast(res.message, 'success');
+            if (deviceSpecsModalInstance) deviceSpecsModalInstance.hide();
+            
+            let nodeData = nodesDataSet.get(ip);
+            if (nodeData) {
+                nodeData.snmp_version = snmp_version;
+                nodeData.port_specs = port_specs_json;
+                nodesDataSet.update({id: ip, snmp_version: snmp_version, port_specs: port_specs_json});
+            }
+        } else {
+            if(typeof showToast === 'function') showToast("❌ 儲存失敗: " + res.message, 'danger');
+        }
+    }).catch(e => {
+        btn.disabled = false; btn.innerHTML = oriHtml;
+        if(typeof showToast === 'function') showToast("❌ 網路連線異常，儲存失敗！", 'danger');
+    });
+};
 </script>

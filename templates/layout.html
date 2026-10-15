@@ -16,9 +16,19 @@
 </head>
 <body>
 
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4 {% if request.args.get('iframe') == '1' %}d-none{% endif %}">
         <div class="container-fluid px-4">
-            <a class="navbar-brand" href="/dashboard"><i class="bi bi-diagram-3-fill me-2"></i>SNMP 網路拓樸智能管理平台</a>
+            
+            <div class="d-flex align-items-center">
+                
+                <a class="navbar-brand d-flex align-items-center m-0" href="/dashboard">
+                    <i class="bi bi-diagram-3-fill me-2"></i>SNMP 網路拓樸智能管理平台
+                    <span id="globalViewBadge" class="badge ms-2" style="font-size: 0.75rem; display: none;"></span>
+                </a>
+                
+			<div id="hqSiteSwitcher" class="ms-2 d-flex align-items-center" style="display: none !important;"></div>
+                
+            </div>
             <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
                 <span class="navbar-toggler-icon"></span>
             </button>
@@ -28,28 +38,41 @@
                         <a class="nav-link" href="/dashboard"><i class="bi bi-speedometer2 me-1"></i>戰情總覽</a>
                     </li>
 
-                    {% if not session.get('role') or session.get('role') in ['admin', 'operator'] %}
-                    <li class="nav-item">
-                        <a class="nav-link" href="/topology"><i class="bi bi-diagram-3-fill me-1"></i>拓樸圖檢視</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="/report"><i class="bi bi-graph-up me-1"></i>歷史流量報表</a>
-                    </li>
-					<li class="nav-item">
-                        <a class="nav-link" href="/flow-search"><i class="bi bi-search me-1"></i>流量明細檢索</a>
-					</li>
-                    {% endif %}
+                    {% if session.get('target_site_code') or not hq_mode_is_active %}
+                    
+                        {% if not session.get('role') or session.get('role') in ['admin', 'operator'] %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="/topology"><i class="bi bi-diagram-3-fill me-1"></i>拓樸圖檢視</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/report"><i class="bi bi-graph-up me-1"></i>歷史流量報表</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/flow-search"><i class="bi bi-search me-1"></i>流量明細檢索</a>
+                        </li>
+						<!-- 👇 🌟 新增獨立資安預警選單 -->
+						<li class="nav-item">
+							<a class="nav-link" href="/flow-security"><i class="bi bi-shield-slash-fill me-1 text-warning"></i>流量資安預警</a>
+						</li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="/inventory"><i class="bi bi-card-checklist me-1"></i>資產與網孔盤點</a>
+                        </li>
+                        {% endif %}
 
-					{% if not session.get('role') or session.get('role') in ['admin', 'operator', 'auditor'] %}
-                    <li class="nav-item">
-                        <a class="nav-link" href="/audit-logs"><i class="bi bi-shield-check me-1"></i>系統日誌中心</a>
-                    </li>
-                    {% endif %}
+                        {% if not session.get('role') or session.get('role') in ['admin', 'operator', 'auditor'] %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="/audit-logs"><i class="bi bi-shield-check me-1"></i>系統日誌中心</a>
+                        </li>
+                        {% endif %}
 
+                        {% if not session.get('role') or session.get('role') == 'admin' %}
+                        <li class="nav-item">
+                            <a class="nav-link" href="/devices"><i class="bi bi-hdd-network-fill me-1"></i>設備管理</a>
+                        </li>
+                        {% endif %}
+                        
+                    {% endif %}
                     {% if not session.get('role') or session.get('role') == 'admin' %}
-                    <li class="nav-item">
-                        <a class="nav-link" href="/devices"><i class="bi bi-hdd-network-fill me-1"></i>設備管理</a>
-                    </li>
                     <li class="nav-item">
                         <a class="nav-link" href="/settings"><i class="bi bi-gear-fill me-1"></i>系統設定</a>
                     </li>
@@ -70,7 +93,7 @@
         </div>
     </nav>
 
-    <div class="container-fluid px-4">
+    <div class="container-fluid {% if request.args.get('iframe') == '1' %}p-0 m-0{% else %}px-4{% endif %}">
         {% block content %}{% endblock %}
     </div>
 
@@ -151,6 +174,148 @@
                     );
                 }, 300);
             }
+        });
+
+		// 👇 🌟 新增：全域城市與行政區過濾狀態
+        window.hqCurrentCityFilter = 'ALL';
+        window.hqCurrentCityLabel = '總部全域視角';
+        window.hqCurrentDistrictFilter = 'ALL'; // 🌟 記憶點擊的行政區
+
+        window.filterHqCity = function(cityKey, label) {
+            window.hqCurrentCityFilter = cityKey;
+            window.hqCurrentDistrictFilter = 'ALL'; // 切換城市時，重置為「全區概況」
+            window.hqCurrentCityLabel = label;
+            
+            let lbl = document.getElementById('hqCityLabel');
+            if (lbl) lbl.innerText = label;
+            
+            if (typeof window.loadHqDashboard === 'function') {
+                window.loadHqDashboard();
+            }
+        };
+
+        // =======================================================
+        // 🌟 全域動態標籤引擎：升級為六都下拉選單
+        // =======================================================
+        window.refreshHQBadge = function() {
+            Promise.all([
+                fetch('/api/settings/hq_mode').then(r => r.json()).catch(() => ({})),
+                fetch('/api/settings/school_info').then(r => r.json()).catch(() => ({}))
+            ]).then(([hqData, schoolData]) => {
+                let badge = document.getElementById('globalViewBadge');
+                let switcher = document.getElementById('hqSiteSwitcher');
+                
+                const sessionTargetCode = "{{ session.get('target_site_code', '') }}";
+                const sessionTargetName = "{{ session.get('target_site_name', '') }}";
+
+                if (hqData.success && hqData.hq_view_mode === 'hq') {
+                    if (badge) badge.style.display = 'none'; 
+                    if (switcher) switcher.style.setProperty('display', 'inline-flex', 'important'); 
+                    
+                    if (sessionTargetCode) {
+                        // 🌟 狀態 A：已經鑽取進入分區 (顯示學校名稱 + 返回按鈕)
+                        switcher.innerHTML = `
+                            <span class="badge bg-dark border border-info text-info fs-6 py-1 me-2 shadow-sm">
+                                <i class="bi bi-pin-map-fill me-1"></i>${sessionTargetName}
+                            </span>
+                            <button class="btn btn-sm btn-outline-warning fw-bold shadow-sm" onclick="clearHqSite()" style="font-size: 0.8rem;">
+                                <i class="bi bi-arrow-return-left me-1"></i>返回總部全域
+                            </button>
+                        `;
+                    } else {
+                        // 👇 🌟 狀態 B：目前在總部大廳 (升級為六都下拉選單！)
+                        let lbl = window.hqCurrentCityLabel || '總部全域視角';
+                        switcher.innerHTML = `
+                            <div class="dropdown">
+                                <button class="btn btn-sm btn-primary border border-light text-white fw-bold shadow-sm dropdown-toggle" type="button" data-bs-toggle="dropdown" style="font-size: 0.95rem; padding: 3px 12px;">
+                                    <i class="bi bi-globe-asia-australia me-1"></i><span id="hqCityLabel">${lbl}</span>
+                                </button>
+                                <ul class="dropdown-menu dropdown-menu-dark shadow mt-1">
+                                    <li><a class="dropdown-item fw-bold text-info" href="#" onclick="filterHqCity('ALL', '總部全域視角')"><i class="bi bi-globe-asia-australia me-2"></i>總部全域視角 (顯示全部)</a></li>
+                                    <li><hr class="dropdown-divider"></li>
+                                    <li><a class="dropdown-item" href="#" onclick="filterHqCity('TPE', '臺北市學校')">臺北市學校</a></li>
+                                    <li><a class="dropdown-item" href="#" onclick="filterHqCity('NTPC', '新北市學校')">新北市學校</a></li>
+                                    <li><a class="dropdown-item" href="#" onclick="filterHqCity('TYC', '桃園市學校')">桃園市學校</a></li>
+                                    <li><a class="dropdown-item" href="#" onclick="filterHqCity('TC', '台中市學校')">台中市學校</a></li>
+                                    <li><a class="dropdown-item" href="#" onclick="filterHqCity('TN', '台南市學校')">台南市學校</a></li>
+                                    <li><a class="dropdown-item" href="#" onclick="filterHqCity('KHH', '高雄市學校')">高雄市學校</a></li>
+                                </ul>
+                            </div>
+                        `;
+                    }
+                } else {
+                    // 🌟 狀態 C：單一分區運作模式
+                    if (switcher) switcher.style.setProperty('display', 'none', 'important');
+                    let siteName = (schoolData.success && schoolData.name) ? schoolData.name : '單一分區運作';
+                    if (badge) {
+                        badge.className = 'badge bg-secondary text-white-50 ms-2 border border-secondary shadow-sm';
+                        badge.innerHTML = `<i class="bi bi-pin-map-fill me-1"></i>${siteName}`;
+                        badge.style.display = 'inline-block';
+                    }
+                }
+            });
+        };
+
+        // 🌟 解除鎖定，回歸總部大廳
+        window.clearHqSite = function() {
+            fetch('/api/hq/clear_site', { method: 'POST' })
+            .then(r => r.json()).then(res => {
+                if(res.success) window.location.href = '/dashboard';
+            });
+        };
+
+        // 🌟 載入與切換分區的輔助函式
+        window.loadHqSiteList = function() {
+            fetch('/api/hq/sites').then(r => r.json()).then(data => {
+                const listEl = document.getElementById('hqSiteList');
+                if (!data.success || !listEl) return;
+                
+                let html = `<li><a class="dropdown-item fw-bold text-info border-bottom border-secondary pb-2 mb-2" href="#" onclick="clearHqSite()"><i class="bi bi-globe-asia-australia me-2"></i>返回總部全域視角</a></li>`;
+                
+                if (data.sites.length === 0) {
+                    html += `<li><span class="dropdown-item text-muted">尚未有分區註冊</span></li>`;
+                } else {
+                    let currentDistrict = "";
+                    data.sites.forEach(site => {
+                        if (site.district !== currentDistrict) {
+                            html += `<li><h6 class="dropdown-header text-white-50 bg-black mt-1">${site.district || '未分類行政區'}</h6></li>`;
+                            currentDistrict = site.district;
+                        }
+                        let statusColor = site.status === 'down' ? 'text-danger' : (site.status === 'warning' ? 'text-warning' : 'text-success');
+                        html += `<li><a class="dropdown-item" href="#" onclick="switchHqSite('${site.site_code}', '${site.site_name}')">
+                            <i class="bi bi-circle-fill ${statusColor} me-2" style="font-size: 0.6rem;"></i>${site.site_name}
+                        </a></li>`;
+                    });
+                }
+                listEl.innerHTML = html;
+            });
+        };
+
+        window.switchHqSite = function(code, name) {
+            fetch('/api/hq/switch_site', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({site_code: code, site_name: name})
+            }).then(r => r.json()).then(res => {
+                if(res.success) {
+                    window.location.href = '/topology'; // 切換後直接導向該校拓樸圖
+                }
+            });
+        };
+
+        window.clearHqSite = function() {
+            fetch('/api/hq/clear_site', { method: 'POST' })
+            .then(r => r.json()).then(res => {
+                if(res.success) window.location.href = '/dashboard';
+            });
+        };
+
+        // 🌟 自動稽核引擎：載入網頁後自動打卡與刷新標籤
+        document.addEventListener("DOMContentLoaded", function() {
+            // ... (保留原本的 logFrontendAction 網址判定邏輯) ...
+
+            // 💡 網頁載入時自動呼叫一次刷新標籤
+            window.refreshHQBadge();
         });
 		
 		// ... 前面的 window.showToast 與 window.logFrontendAction 等程式碼維持不變 ...

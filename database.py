@@ -135,6 +135,12 @@ def init_telemetry_db(conn, db_tier='hot'):
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     
+    # 🌟 無痛升級：系統重啟時，自動幫舊庫補上 session_util 與 latency_ms 欄位
+    try: conn.execute("ALTER TABLE metrics_history ADD COLUMN session_util REAL DEFAULT 0.0")
+    except: pass
+    try: conn.execute("ALTER TABLE metrics_history ADD COLUMN latency_ms REAL DEFAULT 0.0")
+    except: pass
+    
     # 🌟 無痛升級：系統重啟時，自動幫舊的熱/溫/冷庫補上 session_util 欄位
     try: conn.execute("ALTER TABLE metrics_history ADD COLUMN session_util REAL DEFAULT 0.0")
     except: pass
@@ -235,6 +241,9 @@ def init_db():
         try: conn.execute("ALTER TABLE devices ADD COLUMN snmp_version TEXT DEFAULT 'v2c'")
         except: pass
         try: conn.execute("ALTER TABLE devices ADD COLUMN port_specs TEXT DEFAULT '[]'")
+        except: pass
+        # 🌟 無痛升級：新增延遲記錄欄位
+        try: conn.execute("ALTER TABLE devices ADD COLUMN latency_ms REAL DEFAULT 0.0")
         except: pass
         
         # 2. 基礎核心維運子表建置
@@ -442,6 +451,35 @@ def init_db():
     # 8. 啟動成功後，熱加載記憶體快取層
     reload_device_cache()
     reload_translation_cache() # 🌟 加載字典快取到記憶體
+    
+    # 👇 🌟 請在 init_db() 的最後一行補上這句：
+    init_security_db()
+
+# ==========================================
+# 🛡️ 8. 初始化 NetFlow 資安預警與閾值配置
+# ==========================================
+def init_security_db():
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        # 1. 建立資安攻擊事件資料表
+        conn.execute('''CREATE TABLE IF NOT EXISTS flow_security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            src_ip TEXT, dst_ip TEXT, attack_type TEXT, 
+            severity TEXT, details TEXT, status TEXT DEFAULT 'unhandled'
+        )''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_sec_events_ts ON flow_security_events(timestamp)')
+        
+        # 2. 寫入 6 大資安預警靈敏度閾值預設值 (全套 7 項設定)
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('sec_scan_threshold', '50')")
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('sec_ddos_threshold_mb', '500')")
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('sec_scan_window_mins', '5')")
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('sec_brute_threshold', '80')")
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('sec_exfil_threshold_mb', '1000')")
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('sec_mining_threshold', '20')")
+        conn.execute("INSERT OR IGNORE INTO system_settings (key, value) VALUES ('sec_lateral_threshold', '15')")
+        conn.commit()
+        conn.close()
 
 # ==========================================
 # 🧠 5. 記憶體快取維護核心管理引擎 (方案 4 落地)
@@ -522,16 +560,18 @@ def update_system_setting(key, value):
 def update_device_metrics_cache(updates):
     """
     🟢 方案 4 進階微創優化：
-    只在記憶體中精確修改 CPU/RAM 數值，完全不碰硬碟、不重新解算 JSON！
+    只在記憶體中精確修改 CPU/RAM/Latency 數值，完全不碰硬碟、不重新解算 JSON！
     """
     if not updates: return
-    lookup = {ip: (cpu, mem) for cpu, mem, ip in updates}
+    # 🌟 修正點：這裡必須接收 4 個參數 (cpu, mem, lat, ip)，才能對齊 snmp_core 傳來的陣列！
+    lookup = {ip: (cpu, mem, lat) for cpu, mem, lat, ip in updates}
     with _CACHE_LOCK:
         for dev in _DEVICE_CACHE:
             if dev['ip'] in lookup:
-                cpu, mem = lookup[dev['ip']]
+                cpu, mem, lat = lookup[dev['ip']]
                 dev['cpu_load'] = cpu
                 dev['mem_load'] = mem
+                dev['latency_ms'] = lat  # 🌟 同步將延遲寫入記憶體快取
 
 # ==========================================
 # 🛡️ 7. 💡 新增：高安全性三層式稽核日誌讀寫 API

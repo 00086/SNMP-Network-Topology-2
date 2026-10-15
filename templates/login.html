@@ -38,7 +38,24 @@
         <button class="btn btn-info w-100 fw-bold shadow-sm" onclick="doLogin()">登入系統 <i class="bi bi-box-arrow-in-right ms-1"></i></button>
     </div>
 
-    <script>
+	<script>
+        // =======================================================
+        // 🛡️ 幽靈遮罩清除器 & 畫面初始化設定
+        // =======================================================
+        document.addEventListener("DOMContentLoaded", function() {
+            // 🌟 終極防護：只要進到登入畫面，無條件殺死所有殘留的彈出視窗遮罩！
+            document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+            document.body.classList.remove('modal-open');
+            document.body.style = '';
+            
+            // 💡 貼心優化：畫面載入後，自動將游標聚焦在帳號輸入框，方便直接打字
+            const userAttr = document.getElementById('username');
+            if(userAttr) userAttr.focus();
+        });
+
+        // =======================================================
+        // 🔐 登入驗證邏輯
+        // =======================================================
         function doLogin() {
             const u = document.getElementById('username').value;
             const p = document.getElementById('password').value;

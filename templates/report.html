@@ -26,17 +26,64 @@
         flex-grow: 1;
         height: auto !important;
     }
+	
+	/* 🌞 淺色模式 (Light Theme) 覆蓋宣告引擎 (精準限縮範圍，不影響 layout) */
+    body.light-theme { background-color: #f8fafc !important; color: #1e293b !important; }
+    body.light-theme .card { background-color: #ffffff !important; border-color: #cbd5e1 !important; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1) !important; }
+    body.light-theme .card-header { background-color: #f1f5f9 !important; border-bottom: 1px solid #cbd5e1 !important; color: #0f172a !important; }
+    
+    /* 💡 針對輸入框與下拉選單精準變色，不再使用 .bg-dark 全域覆蓋 */
+    body.light-theme .form-select, body.light-theme .form-control { background-color: #ffffff !important; color: #1e293b !important; border-color: #cbd5e1 !important; }
+    
+    /* 💡 針對說明文字的半透明變色 */
+    body.light-theme .container-fluid .text-white-50 { color: #64748b !important; }
+    
+    /* 🌟 修復全螢幕放大按鈕在淺色模式下的對比度 */
+    body.light-theme .btn-outline-info { color: #0284c7; border-color: #0ea5e9; }
+    body.light-theme .btn-outline-info:hover { background-color: #e0f2fe; color: #0369a1; }
+    
+    /* 修復日期選擇器 icon 顏色反轉 */
+    body.light-theme ::-webkit-calendar-picker-indicator { filter: none; }
+	
+	/* 🌟 修復淺色模式下，中央提示文字與黃色圖示在白底上隱形的問題 */
+    body.light-theme #emptyMsg,
+    body.light-theme #emptyMsg .text-white-50 { color: #64748b !important; font-weight: bold; }
+    body.light-theme .text-warning { color: #d97706 !important; }
+	
+	/* 🌟 徹底修復深色模式下，輸入框與下拉選單的「白底白字」隱形問題 */
+    .form-select, .form-control, input, select { 
+        background-color: #1a202c !important; 
+        color: #e2e8f0 !important; 
+        border: 1px solid #4a5568 !important; 
+    }
+    
+    /* 針對下拉選單裡面的每一個選項 (Option) 強制套用深色底色 */
+    .form-select option, select option {
+        background-color: #1a202c !important;
+        color: #e2e8f0 !important;
+    }
+
+    /* 確保欄位在點擊(Focus)時，底色依然維持深色，不會突然反白 */
+    .form-select:focus, .form-control:focus {
+        background-color: #1a202c !important; 
+        color: #e2e8f0 !important;
+    }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="container-fluid mt-2">
-    <h4 class="mb-3 text-info fw-bold">
-        <i class="bi bi-graph-up me-2"></i>設備歷史流量趨勢圖 
-        <span id="mainTitleRange" class="text-white-50 fs-6">(最近 15 分鐘)</span>
-    </h4>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h4 id="mainTitleHeader" class="m-0 text-info fw-bold">
+            <i class="bi bi-graph-up me-2"></i>設備歷史流量趨勢圖 
+            <span id="mainTitleRange" class="text-white-50 fs-6">(最近 15 分鐘)</span>
+        </h4>
+        <button id="themeToggleBtn" class="btn btn-sm btn-outline-secondary text-white shadow-sm" onclick="toggleTheme()">
+            <i class="bi bi-sun-fill me-1 text-warning"></i>切換淺色模式
+        </button>
+    </div>
     
-<div class="row g-2 mb-3 align-items-end">
+    <div class="row g-2 mb-3 align-items-end">
         <div class="col-md-3">
             <label class="form-label text-white-50 small mb-1">目標設備</label>
             <select id="deviceSelect" class="form-select shadow-sm" onchange="onDeviceChange()">
@@ -52,7 +99,7 @@
         <div class="col-md-6">
             <label class="text-white-50 small mb-1">時間範圍</label>
             <div class="d-flex align-items-center">
-                <select id="reportTimeRange" class="form-select bg-dark text-white border-secondary me-2" style="max-width: 220px;" onchange="toggleCustomTimeDiv('reportTimeRange', 'reportCustomDiv'); fetchTrafficData();">
+                <select id="reportTimeRange" class="form-select bg-dark text-white border-secondary me-2" style="max-width: 220px;" onchange="toggleCustomTimeDiv('reportTimeRange', 'reportCustomDiv'); fetchAllData();">
                     <option value="15m" selected>最近 15 分鐘</option>
                     <option value="30m">最近 30 分鐘</option>
                     <option value="1h">最近 1 小時</option>
@@ -68,18 +115,24 @@
                 <button class="btn btn-outline-info" onclick="forceRefreshData()" title="立即重新載入"><i class="bi bi-arrow-clockwise"></i></button>
             </div>
             <div id="reportCustomDiv" class="d-none align-items-center mt-2">
-                <input type="datetime-local" id="reportStart" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width: 220px;" onchange="fetchTrafficData()">
+                <input type="datetime-local" id="reportStart" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width: 220px;" onchange="fetchAllData()">
                 <span class="mx-1 text-white-50">~</span>
-                <input type="datetime-local" id="reportEnd" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width: 220px;" onchange="fetchTrafficData()">
+                <input type="datetime-local" id="reportEnd" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width: 220px;" onchange="fetchAllData()">
             </div>
         </div>
     </div>
 
     <div class="card shadow" id="reportCard">
         <div class="card-header d-flex justify-content-between align-items-center py-2">
-            <div>
-                <span id="chartTitle" class="fs-6">流量趨勢分析</span>
-                <span class="badge bg-secondary ms-2">即時讀取資料庫</span>
+            <div class="d-flex align-items-center gap-2">
+                <div class="btn-group shadow-sm" role="group">
+                    <input type="radio" class="btn-check" name="chartMode" id="modeTraffic" autocomplete="off" checked onchange="switchMode('traffic')">
+                    <label class="btn btn-outline-info btn-sm fw-bold px-3" for="modeTraffic"><i class="bi bi-water me-1"></i>流量分析</label>
+
+                    <input type="radio" class="btn-check" name="chartMode" id="modeLatency" autocomplete="off" onchange="switchMode('latency')">
+                    <label class="btn btn-outline-warning btn-sm fw-bold px-3" for="modeLatency"><i class="bi bi-activity me-1"></i>延遲分析</label>
+                </div>
+                <span class="badge bg-secondary ms-2 d-none d-md-inline">即時讀取資料庫</span>
             </div>
             <div>
                 <button type="button" class="btn btn-sm btn-outline-info fw-bold" onclick="toggleFullscreenReport()" title="全螢幕切換">
@@ -101,10 +154,12 @@
 <script>
     let trafficChartInstance = null;
     let currentTrafficData = {};
+    let currentMetricsData = null; // 🌟 儲存延遲數據
     let globalIfNames = {};
     let globalIfAliases = {}; 
     let currentTitleRangeText = '(最近 15 分鐘)'; 
-    let lastLoggedQuery = ""; // 防止相同條件重複洗頻
+    let lastLoggedQuery = ""; 
+    let currentMode = 'traffic'; // 🌟 預設為流量模式
 
     function init() {
         let now = new Date();
@@ -119,7 +174,11 @@
             let sel = document.getElementById('deviceSelect');
             sel.innerHTML = '<option value="">-- 請選擇設備 --</option>';
             devs.forEach(d => {
-                if(d.status !== 'down' && d.visible === 1) {
+                // 🌟 核心修改：只允許「防火牆、交換器、AP控制器」出現，排除 AP
+                let devType = d.type ? d.type.trim() : '';
+                let allowedTypes = ['防火牆', '交換器', 'AP控制器'];
+                
+                if(d.status !== 'down' && d.visible === 1 && allowedTypes.includes(devType)) {
                     let opt = document.createElement('option');
                     opt.value = d.ip;
                     opt.text = `${d.name || d.ip} (${d.ip})`;
@@ -127,6 +186,64 @@
                     sel.appendChild(opt);
                 }
             });
+        });
+    }
+
+    // 🌟 模式切換器 (優化 UX 提示)
+    function switchMode(mode) {
+        currentMode = mode;
+        let pSel = document.getElementById('portSelect');
+        let header = document.getElementById('mainTitleHeader');
+        
+        if (mode === 'latency') {
+            // 💡 UX 優化：延遲是針對整台設備的，不需要選網孔！
+            // 把原本選的 Port 記下來，並把選單文字改成提示語
+            pSel.dataset.savedPort = pSel.value; 
+            pSel.innerHTML = '<option value="">⚡ 設備整體指標 (不需選網孔)</option>';
+            pSel.disabled = true; 
+            
+            header.innerHTML = '<i class="bi bi-activity me-2"></i>設備歷史延遲趨勢圖 <span id="mainTitleRange" class="text-white-50 fs-6">' + currentTitleRangeText + '</span>';
+            header.className = "m-0 text-warning fw-bold";
+        } else {
+            header.innerHTML = '<i class="bi bi-graph-up me-2"></i>設備歷史流量趨勢圖 <span id="mainTitleRange" class="text-white-50 fs-6">' + currentTitleRangeText + '</span>';
+            header.className = "m-0 text-info fw-bold";
+            
+            // 💡 切回流量模式時，如果已經有選設備，就把網孔清單畫回來
+            if (document.getElementById('deviceSelect').value) {
+                pSel.disabled = false;
+                rebuildPortOptions(); // 重新建置網孔清單
+                if (pSel.dataset.savedPort) {
+                    pSel.value = pSel.dataset.savedPort; // 嘗試恢復剛才選的網孔
+                }
+            }
+        }
+        
+        forceRefreshData(); // 重新拉取該模式的資料
+    }
+
+    // 💡 抽離出重建網孔清單的共用函數
+    function rebuildPortOptions() {
+        let pSel = document.getElementById('portSelect');
+        pSel.innerHTML = '<option value="">-- 請選擇連接埠 --</option>';
+        
+        let ports = Object.keys(globalIfNames).filter(idx => {
+            let n = globalIfNames[idx].replace(/"/g, '').toLowerCase();
+            return !n.includes('vlan') && !n.includes('loop') && !n.includes('tun') && !n.includes('null') && !n.includes('cpu');
+        });
+        
+        ports.sort((a,b) => parseInt(a) - parseInt(b));
+
+        ports.forEach(pIdx => {
+            let opt = document.createElement('option');
+            opt.value = pIdx;
+            let pName = globalIfNames[pIdx].replace(/"/g, '').trim();
+            // 確保調用外部函數防呆
+            let pAlias = '';
+            if (globalIfAliases[pIdx]) {
+                pAlias = (typeof decodeHexIfNeeded === 'function') ? decodeHexIfNeeded(globalIfAliases[pIdx]) : globalIfAliases[pIdx];
+            }
+            opt.text = pAlias ? `${pName} (${pAlias})` : pName;
+            pSel.appendChild(opt);
         });
     }
 
@@ -141,7 +258,44 @@
             if(trafficChartInstance) trafficChartInstance.destroy();
             document.getElementById('trafficChart').style.display = 'none';
             document.getElementById('emptyMsg').style.display = 'block';
-            document.getElementById('emptyMsg').innerHTML = '<i class="bi bi-bar-chart me-2 fs-4"></i><br>請由上方選擇設備與連接埠';
+            document.getElementById('emptyMsg').innerHTML = '<i class="bi bi-bar-chart me-2 fs-4"></i><br>請由上方選擇設備';
+            return;
+        }
+        
+        let opt = sel.options[sel.selectedIndex];
+        try {
+            let raw = JSON.parse(opt.dataset.raw);
+            globalIfNames = raw[4] || {};
+            globalIfAliases = raw[9] || {}; 
+        } catch(e) { 
+            globalIfNames = {}; 
+            globalIfAliases = {};
+        }
+
+        // 🌟 如果目前在延遲模式下切換設備，依舊保持鎖定狀態
+        if (currentMode === 'latency') {
+            pSel.innerHTML = '<option value="">⚡ 設備整體指標 (不需選網孔)</option>';
+            pSel.disabled = true;
+        } else {
+            rebuildPortOptions();
+            pSel.disabled = false;
+        }
+        
+        fetchAllData();
+    }
+
+    function onDeviceChange() {
+        let sel = document.getElementById('deviceSelect');
+        let ip = sel.value;
+        let pSel = document.getElementById('portSelect');
+
+        if(!ip) {
+            pSel.innerHTML = '<option value="">請先選擇設備</option>';
+            pSel.disabled = true;
+            if(trafficChartInstance) trafficChartInstance.destroy();
+            document.getElementById('trafficChart').style.display = 'none';
+            document.getElementById('emptyMsg').style.display = 'block';
+            document.getElementById('emptyMsg').innerHTML = '<i class="bi bi-bar-chart me-2 fs-4"></i><br>請由上方選擇設備';
             return;
         }
         
@@ -168,27 +322,27 @@
             let opt = document.createElement('option');
             opt.value = pIdx;
             let pName = globalIfNames[pIdx].replace(/"/g, '').trim();
-            // 💡 這裡呼叫 utils.js 裡的 decodeHexIfNeeded
             let pAlias = globalIfAliases[pIdx] ? decodeHexIfNeeded(globalIfAliases[pIdx]) : '';
             opt.text = pAlias ? `${pName} (${pAlias})` : pName;
             pSel.appendChild(opt);
         });
         
-        pSel.disabled = false;
-        fetchTrafficData();
+        // 如果目前是延遲模式，就維持 disabled
+        pSel.disabled = (currentMode === 'latency');
+        
+        fetchAllData();
     }
 
     function forceRefreshData() {
-        // 清除防呆紀錄，讓重新整理按鈕一定能發出稽核軌跡
         lastLoggedQuery = "";
-        fetchTrafficData();
+        fetchAllData();
     }
 
-    function fetchTrafficData() {
+    // 🌟 全新統合的資料抓取引擎
+    function fetchAllData() {
         let ip = document.getElementById('deviceSelect').value;
         if(!ip) return; 
 
-        // 💡 這裡呼叫 utils.js 裡的 buildTimeQueryString
         let timeQuery = buildTimeQueryString('reportTimeRange', 'reportStart', 'reportEnd');
         if (!timeQuery) return; 
 
@@ -202,54 +356,71 @@
         } else {
             currentTitleRangeText = `(${rangeText})`;
         }
-        document.getElementById('mainTitleRange').innerText = currentTitleRangeText;
+        
+        let titleEl = document.getElementById('mainTitleRange');
+        if(titleEl) titleEl.innerText = currentTitleRangeText;
 
-        let apiUrl = `/api/traffic/${ip}?${timeQuery}`;
-
-        fetch(apiUrl).then(res=>res.json()).then(data => {
-            if(data.success) {
-                currentTrafficData = data.data;
-                renderChart();
-            }
-        });
+        // 根據目前選擇的模式抓取不同 API
+        if (currentMode === 'traffic') {
+            fetch(`/api/traffic/${ip}?${timeQuery}`).then(res=>res.json()).then(data => {
+                if(data.success) {
+                    currentTrafficData = data.data;
+                    renderChart();
+                }
+            });
+        } else if (currentMode === 'latency') {
+            fetch(`/api/metrics/${ip}?${timeQuery}`).then(res=>res.json()).then(data => {
+                if(data.success) {
+                    currentMetricsData = data;
+                    renderChart();
+                }
+            });
+        }
     }
 
+    // 🌟 智慧派發器：決定要畫哪種圖
     function renderChart() {
+        if (currentMode === 'latency') {
+            renderLatencyChart();
+        } else {
+            renderTrafficChart();
+        }
+    }
+
+    // ==========================================
+    // 📊 繪製「網路流量」圖表
+    // ==========================================
+    function renderTrafficChart() {
         let pSel = document.getElementById('portSelect');
         let pIdx = pSel.value;
-        if(!pIdx) return;
+        if(!pIdx) {
+            document.getElementById('trafficChart').style.display = 'none';
+            document.getElementById('emptyMsg').style.display = 'block';
+            document.getElementById('emptyMsg').innerHTML = '<i class="bi bi-diagram-2 me-2 fs-4 text-info"></i><br>請由上方選擇連接埠以顯示流量';
+            if (trafficChartInstance) trafficChartInstance.destroy();
+            return;
+        }
         
         let displayLabel = pSel.options[pSel.selectedIndex].text;
-        document.getElementById('chartTitle').innerText = `${displayLabel} - 歷史流量趨勢 ${currentTitleRangeText}`;
-
-        // ==========================================
-        // 🌟 ISMS 稽核埋點：紀錄歷史流量調閱軌跡
-        // ==========================================
         let dSel = document.getElementById('deviceSelect');
         let devText = dSel.options[dSel.selectedIndex].text;
-        let timeCleanText = currentTitleRangeText.replace(/[()]/g, ''); // 移除括號讓文字更乾淨
         
-        // 組合當前查詢條件，防止同一個畫面不斷重新渲染洗頻
-        let currentQuery = `${devText}|${displayLabel}|${timeCleanText}`;
-
-        if (lastLoggedQuery !== currentQuery && !displayLabel.includes('請選擇連接埠')) {
-            if (typeof window.logFrontendAction === 'function') {
-                window.logFrontendAction(
-                    "前端介面操作", 
-                    "調閱歷史流量報表", 
-                    `管理員調閱了歷史流量走勢圖。目標設備：【 ${devText} 】，指定連接埠：【 ${displayLabel} 】，篩選區間：【 ${timeCleanText} 】。`
-                );
-            }
-            lastLoggedQuery = currentQuery;
-        }
-        // ==========================================
-
         if(!currentTrafficData[pIdx] || currentTrafficData[pIdx].labels.length === 0) {
             document.getElementById('trafficChart').style.display = 'none';
             document.getElementById('emptyMsg').style.display = 'block';
             document.getElementById('emptyMsg').innerHTML = `<i class="bi bi-clock-history me-2 fs-4 text-warning"></i><br>此時間區間內，該連接埠找不到任何歷史流量資料`;
             if (trafficChartInstance) trafficChartInstance.destroy();
             return;
+        }
+
+        let timeCleanText = currentTitleRangeText.replace(/[()]/g, '');
+        let currentQuery = `Traffic|${devText}|${displayLabel}|${timeCleanText}`;
+
+        if (lastLoggedQuery !== currentQuery) {
+            if (typeof window.logFrontendAction === 'function') {
+                window.logFrontendAction("前端介面操作", "調閱歷史流量報表", `管理員調閱了歷史流量走勢圖。目標設備：【 ${devText} 】，指定連接埠：【 ${displayLabel} 】，篩選區間：【 ${timeCleanText} 】。`);
+            }
+            lastLoggedQuery = currentQuery;
         }
         
         let d = currentTrafficData[pIdx];
@@ -259,10 +430,14 @@
         const ctx = document.getElementById('trafficChart').getContext('2d');
         if (trafficChartInstance) trafficChartInstance.destroy();
         
-        Chart.defaults.color = '#cbd5e0';
+        const isLight = document.body.classList.contains('light-theme');
+        const textColor = isLight ? '#1e293b' : '#cbd5e0';
+        const gridColor = isLight ? '#e2e8f0' : '#4a5568';
+        const crosshairColor = isLight ? '#f59e0b' : '#ffe066';
+        
+        Chart.defaults.color = textColor;
         Chart.defaults.font.family = 'system-ui, -apple-system, sans-serif';
 
-        // 💡 將數據轉換為上下鏡像 (上傳 Tx 轉為負數)
         let maxDownload = d.max_out_bps || []; 
         let maxUpload = (d.max_in_bps || []).map(v => -v);
         let avgDownload = d.avg_out_bps || []; 
@@ -284,16 +459,14 @@
                 responsive: true, maintainAspectRatio: false,
                 interaction: { mode: 'index', intersect: false },
                 plugins: { 
-                    legend: { position: 'bottom', labels: {color: '#fff'} }, 
-                    // 💡 提示框自動將負數轉回正數顯示
+                    legend: { position: 'bottom', labels: { color: textColor, font: { weight: 'bold' } } }, 
                     tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': ' + formatBps(Math.abs(c.raw)); } } } 
                 },
                 scales: { 
-                    x: { ticks: { color: '#adb5bd', font: { size: 11 }, maxTicksLimit: 12 }, grid: { display: false } }, 
-                    y: { ticks: { color: '#adb5bd', font: { size: 11 }, callback: function(v) { return formatBps(Math.abs(v)); } }, grid: { color: '#4a5568' } } 
+                    x: { ticks: { color: textColor, font: { size: 12, weight: 'bold' }, maxTicksLimit: 12 }, grid: { display: false } }, 
+                    y: { ticks: { color: textColor, font: { size: 12, weight: 'bold' }, callback: function(v) { return formatBps(Math.abs(v)); } }, grid: { color: gridColor } } 
                 }
             },
-            // 💡 補齊漂亮的黃色十字游標線 (Crosshair)
             plugins: [{
                 id: 'crosshair',
                 afterDraw: function(chart) {
@@ -304,17 +477,112 @@
                         const maxY = Math.max(...yCoords);
                         const ctx = chart.ctx;
                         ctx.save(); ctx.beginPath(); ctx.moveTo(x, minY); ctx.lineTo(x, maxY); ctx.lineWidth = 1.5;
-                        ctx.strokeStyle = '#ffe066'; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.restore();
+                        ctx.strokeStyle = crosshairColor; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.restore();
+                    }
+                }
+            }]
+        });
+    }
+
+    // ==========================================
+    // 📈 繪製「網路延遲 (Latency)」圖表
+    // ==========================================
+    function renderLatencyChart() {
+        let dSel = document.getElementById('deviceSelect');
+        let devText = dSel.options[dSel.selectedIndex].text;
+        
+        if (!currentMetricsData || !currentMetricsData.labels || currentMetricsData.labels.length === 0) {
+            document.getElementById('trafficChart').style.display = 'none';
+            document.getElementById('emptyMsg').style.display = 'block';
+            document.getElementById('emptyMsg').innerHTML = `<i class="bi bi-clock-history me-2 fs-4 text-warning"></i><br>此時間區間內，找不到該設備的歷史延遲資料`;
+            if (trafficChartInstance) trafficChartInstance.destroy();
+            return;
+        }
+
+        let timeCleanText = currentTitleRangeText.replace(/[()]/g, '');
+        let currentQuery = `Latency|${devText}|${timeCleanText}`;
+
+        if (lastLoggedQuery !== currentQuery) {
+            if (typeof window.logFrontendAction === 'function') {
+                window.logFrontendAction("前端介面操作", "調閱歷史延遲報表", `管理員調閱了歷史網路延遲走勢圖。目標設備：【 ${devText} 】，篩選區間：【 ${timeCleanText} 】。`);
+            }
+            lastLoggedQuery = currentQuery;
+        }
+        
+        document.getElementById('emptyMsg').style.display = 'none';
+        document.getElementById('trafficChart').style.display = 'block';
+
+        const ctx = document.getElementById('trafficChart').getContext('2d');
+        if (trafficChartInstance) trafficChartInstance.destroy();
+        
+        const isLight = document.body.classList.contains('light-theme');
+        const textColor = isLight ? '#1e293b' : '#cbd5e0';
+        const gridColor = isLight ? '#e2e8f0' : '#4a5568';
+        const crosshairColor = isLight ? '#ef4444' : '#ff6b6b'; // 延遲模式用紅色十字線
+        
+        Chart.defaults.color = textColor;
+        Chart.defaults.font.family = 'system-ui, -apple-system, sans-serif';
+
+        // 從 currentMetricsData 取出我們剛剛在 routes.py 新增的 latency_ms 陣列
+        let latData = currentMetricsData.latency_ms || [];
+
+        trafficChartInstance = new Chart(ctx, {
+            type: 'line',
+            data: { 
+                labels: currentMetricsData.labels, 
+                datasets: [ 
+                    { 
+                        label: '⚡ 網路延遲 (Latency)', 
+                        data: latData, 
+                        borderColor: '#f59e0b', // 橘黃色警告色
+                        backgroundColor: 'rgba(245, 158, 11, 0.15)', 
+                        fill: true, 
+                        tension: 0.3, 
+                        pointRadius: 0, 
+                        borderWidth: 2, 
+                        hitRadius: 8 
+                    }
+                ] 
+            },
+            options: {
+                animation: false, 
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: { 
+                    legend: { position: 'bottom', labels: { color: textColor, font: { weight: 'bold' } } }, 
+                    tooltip: { callbacks: { label: function(c) { return c.dataset.label + ': ' + c.raw + ' ms'; } } } 
+                },
+                scales: { 
+                    x: { ticks: { color: textColor, font: { size: 12, weight: 'bold' }, maxTicksLimit: 12 }, grid: { display: false } }, 
+                    y: { 
+                        ticks: { 
+                            color: textColor, 
+                            font: { size: 12, weight: 'bold' }, 
+                            callback: function(v) { return v + ' ms'; } 
+                        }, 
+                        grid: { color: gridColor },
+                        beginAtZero: true
+                    } 
+                }
+            },
+            plugins: [{
+                id: 'crosshair',
+                afterDraw: function(chart) {
+                    if (chart.tooltip?.opacity > 0 && chart.tooltip.dataPoints && chart.tooltip.dataPoints.length > 0) {
+                        const x = chart.tooltip.caretX;
+                        const yCoords = chart.tooltip.dataPoints.map(dp => dp.element.y);
+                        const minY = Math.min(...yCoords);
+                        const maxY = Math.max(...yCoords);
+                        const ctx = chart.ctx;
+                        ctx.save(); ctx.beginPath(); ctx.moveTo(x, minY); ctx.lineTo(x, maxY); ctx.lineWidth = 1.5;
+                        ctx.strokeStyle = crosshairColor; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.restore();
                     }
                 }
             }]
         });
     }
 	
-	// ==========================================
-    // 💡 報表全螢幕縮放控制函式
-    // ==========================================
-    function toggleFullscreenReport() {
+	function toggleFullscreenReport() {
         let card = document.getElementById('reportCard');
         let icon = document.getElementById('fullscreenIconReport');
         
@@ -322,20 +590,48 @@
             card.classList.remove('report-fullscreen');
             icon.classList.remove('bi-fullscreen-exit'); 
             icon.classList.add('bi-arrows-fullscreen');
-            document.body.style.overflow = 'auto'; // 恢復網頁滾動
+            document.body.style.overflow = 'auto'; 
         } else {
             card.classList.add('report-fullscreen');
             icon.classList.remove('bi-arrows-fullscreen'); 
             icon.classList.add('bi-fullscreen-exit');
-            document.body.style.overflow = 'hidden'; // 鎖定網頁背景滾動
+            document.body.style.overflow = 'hidden'; 
         }
         
-        // 延遲重繪圖表，確保滿版填滿
         if (trafficChartInstance) { 
             setTimeout(() => trafficChartInstance.resize(), 300); 
         }
     }
 
     document.addEventListener("DOMContentLoaded", init);
+	
+    function toggleTheme() {
+        const body = document.body;
+        const btn = document.getElementById('themeToggleBtn');
+        const isLight = body.classList.toggle('light-theme');
+        
+        localStorage.setItem('report_theme', isLight ? 'light' : 'dark');
+        
+        if (isLight) {
+            btn.innerHTML = '<i class="bi bi-moon-stars-fill me-1 text-primary"></i>切換深色模式';
+            btn.classList.replace('btn-outline-secondary', 'btn-outline-primary');
+            btn.classList.replace('text-white', 'text-dark');
+        } else {
+            btn.innerHTML = '<i class="bi bi-sun-fill me-1 text-warning"></i>切換淺色模式';
+            btn.classList.replace('btn-outline-primary', 'btn-outline-secondary');
+            btn.classList.replace('text-dark', 'text-white');
+        }
+        
+        // 若圖表存在，則強制重繪以套用新顏色
+        if (trafficChartInstance) {
+            renderChart(); 
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        if (localStorage.getItem('report_theme') === 'light') {
+            toggleTheme();
+        }
+    });
 </script>
 {% endblock %}

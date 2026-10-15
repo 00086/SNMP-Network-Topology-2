@@ -84,9 +84,13 @@
                     <span class="text-secondary" style="font-size: 0.75rem;">總量</span>
                     <span id="stat-total-devices" class="text-info fw-bold ms-1" style="font-size: 1rem;">0</span>
                 </div>
-                <div class="border-start ps-2" title="目前勾選顯示於拓樸圖上的設備數量">
+                <div class="border-start px-2" title="目前勾選顯示於拓樸圖上的設備數量">
                     <span class="text-secondary" style="font-size: 0.75rem;">顯示</span>
                     <span id="stat-visible-devices" class="text-success fw-bold ms-1" style="font-size: 1rem;">0</span>
+                </div>
+                <div class="border-start ps-2" title="目前勾選參與自動/手動備份設定檔的設備數量">
+                    <span class="text-secondary" style="font-size: 0.75rem;">備份</span>
+                    <span id="stat-backup-devices" class="text-warning fw-bold ms-1" style="font-size: 1rem; color: #ffc107 !important;">0</span>
                 </div>
             </div>
             <div class="btn-group shadow-sm">
@@ -102,15 +106,9 @@
             <button class="btn btn-outline-primary btn-sm fw-bold shadow-sm ms-2 text-nowrap px-2" onclick="openScanModal()"><i class="bi bi-radar"></i> 網段探索</button>
             <button class="btn btn-outline-secondary btn-sm fw-bold shadow-sm ms-1 text-nowrap px-2" onclick="openLldpModal()"><i class="bi bi-diagram-3"></i> LLDP 探索</button>
             <button class="btn btn-success btn-sm shadow-sm ms-1 text-nowrap px-2" onclick="addRow()"><i class="bi bi-plus-lg"></i> 新增</button>
-			<div class="dropdown ms-2">
-                <button class="btn btn-warning btn-sm shadow-sm text-always-dark fw-bold text-nowrap px-2 dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
-                    <i class="bi bi-cloud-download"></i> 備份設定
-                </button>
-                <ul class="dropdown-menu shadow">
-                    <li><a class="dropdown-item fw-bold text-primary" href="#" onclick="executeBatchBackup('visible')"><i class="bi bi-eye"></i> 備份顯示設備 <span id="backup-visible-count" class="badge bg-primary ms-1">0</span></a></li>
-                    <li><a class="dropdown-item fw-bold text-success" href="#" onclick="executeBatchBackup('all')"><i class="bi bi-hdd-network"></i> 備份 L1~L4 全網設備 <span id="backup-all-count" class="badge bg-success ms-1">0</span></a></li>
-                </ul>
-            </div>
+			<button class="btn btn-warning btn-sm shadow-sm ms-2 text-always-dark fw-bold text-nowrap px-2" id="btn-batch-backup" onclick="executeBatchBackup()">
+                <i class="bi bi-cloud-download"></i> 備份設備設定
+            </button>
 			<button class="btn btn-info btn-sm shadow-sm ms-2 text-dark fw-bold text-nowrap px-2" onclick="openManualLinkModal()"><i class="bi bi-link"></i> 強制手動連線</button>
         </div>
     </div>
@@ -127,15 +125,17 @@
         <table class="table table-hover mb-0" id="deviceTable">
             <thead>
                 <tr>
+                    <tr>
                     <th width="4%" class="text-center">顯示</th>
+                    <th width="3%" class="text-center" title="是否啟用設定檔自動/手動備份"><span class="badge bg-secondary text-white shadow-sm" style="font-size: 0.85rem; padding: 0.3em 0.5em;">備份</span></th>
                     <th width="10%">IP 位址</th>
 					<th width="13%">設備名稱(Hostname)</th>
 					<th width="10%">設備種類</th> 
 					<th width="3%" class="text-center" title="是否支援 PoE 供電"><span class="badge text-dark shadow-sm" style="background-color: #ffc107; font-size: 0.85rem; border: 1px solid #d39e00; padding: 0.3em 0.5em;">PoE</span></th>					
                     <th width="10%">設備廠牌</th>
 					<th width="13%">設備型號</th>
-					<th width="5%">層級</th>
-					<th width="13%">Community</th>
+					<th width="4%">層級</th>  
+					<th width="11%">Community</th>
 					<th width="9%">放置區域</th> 
 					<th width="6%">目前狀態</th>
 					<th width="4%" class="text-center"><i class="bi bi-trash"></i></th>
@@ -209,7 +209,7 @@
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
       </div>
       <div class="bg-light p-3 border-bottom text-center">
-         <p class="text-muted small mb-2">系統將利用目前清單中 <strong>層級 1~4</strong> 的設備，發送 SNMP 查詢其 LLDP 鄰居表。</p>
+         <p class="text-muted small mb-2">系統將利用目前清單中 <strong>層級 1~5</strong> 的設備，發送 SNMP 查詢其 LLDP 鄰居表。</p>
          <button class="btn btn-secondary btn-sm text-white fw-bold px-4" id="btnStartLldp" onclick="startLldpScan()">開始掃描 LLDP 鄰居</button>
          <h6 class="fw-bold text-success mt-2 mb-0 d-none" id="lldpSummary" style="font-size:0.9rem;"></h6>
       </div>
@@ -250,7 +250,7 @@
       </div>
       <div class="modal-body">
         <div id="ml-step-1">
-            <div class="alert alert-warning py-2 mb-3"><i class="bi bi-exclamation-circle me-1"></i> <strong>步驟一：</strong>請精準勾選要牽線的 2 台網管型設備 (限 Level 2~4)。</div>
+            <div class="alert alert-warning py-2 mb-3"><i class="bi bi-exclamation-circle me-1"></i> <strong>步驟一：</strong>請精準勾選要牽線的 2 台網管型設備 (限 Level 1~5)。</div>
             <div class="list-group custom-scroll" style="max-height: 350px; overflow-y: auto; background-color: var(--table-bg);" id="ml-device-list"></div>
             <div class="text-end mt-3"><button class="btn btn-info text-dark fw-bold" onclick="mlGoToStep2()">下一步：選擇網孔 <i class="bi bi-arrow-right"></i></button></div>
         </div>
@@ -305,15 +305,21 @@
         const rows = tbody.querySelectorAll('tr');
         let total = rows.length;
         let visible = 0;
+        let backup = 0; // 🌟 新增備份計數器
+        
         rows.forEach(row => {
-            const checkbox = row.querySelector('.visible-cb');
-            if (checkbox && checkbox.checked) visible++;
+            const visCb = row.querySelector('.visible-cb');
+            const bakCb = row.querySelector('.dev-backup');
+            if (visCb && visCb.checked) visible++;
+            if (bakCb && bakCb.checked) backup++;
         });
+        
         document.getElementById('stat-total-devices').innerText = total;
         document.getElementById('stat-visible-devices').innerText = visible;
-		
-		// 💡 呼叫更新備份下拉選單的數量
-        updateBackupCounts();
+        
+        // 🌟 更新頂端儀表板上的備份數字
+        let statBak = document.getElementById('stat-backup-devices');
+        if (statBak) statBak.innerText = backup;
     }
 
     function exportData(fmt) { window.location.href = `/api/backup/export/${fmt}`; }
@@ -427,12 +433,19 @@
                 statusBadge = `<span id="${badgeId}" class="badge badge-default badge-status" style="cursor: pointer;" onclick="manualPing(this, '${dev.ip || ''}')" title="點擊檢測"><i class="bi bi-play-fill text-success"></i>點擊檢測</span>`;
             }
 
+            let backupChecked = (dev.is_backup === undefined || dev.is_backup == 1 || dev.is_backup === '1') ? 'checked' : '';
             const tr = document.createElement('tr');
             tr.innerHTML = `
                 <td class="text-center align-middle">
                     <div class="d-flex justify-content-center align-items-center h-100">
                         <input class="form-check-input mt-1 visible-cb dev-show" type="checkbox" ${visibleChecked} 
                             onchange="updateData(${index}, 'visible', this.checked ? 1 : 0); updateDeviceStats(); if(this.checked) { manualPing(document.getElementById('${badgeId}'), '${dev.ip || ''}'); }">
+                    </div>
+                </td>
+                <td class="text-center align-middle">
+                    <div class="d-flex justify-content-center align-items-center h-100">
+                        <input class="form-check-input mt-1 backup-cb dev-backup" type="checkbox" ${backupChecked} 
+                            onchange="updateData(${index}, 'is_backup', this.checked ? 1 : 0); updateDeviceStats();">
                     </div>
                 </td>
                 <td class="align-middle"><input type="text" class="form-control form-control-sm ip-input dev-ip text-start" value="${dev.ip || ''}" placeholder="IP位址" onchange="updateData(${index}, 'ip', this.value)"></td>
@@ -498,7 +511,7 @@
     function updateData(index, field, value) { currentDevices[index][field] = value; }
 
     function addRow() {
-        currentDevices.unshift({ ip: '', name: '', level: 3, community: 'public', location: '', visible: 1, type: '交換器', brand: 'Unknown', model: '', is_poe: 0, status: 'down' });
+        currentDevices.unshift({ ip: '', name: '', level: 3, community: 'public', location: '', visible: 1, is_backup: 1, type: '交換器', brand: 'Unknown', model: '', is_poe: 0, status: 'down' });
         renderTable(); document.querySelector('.table-container').scrollTop = 0;
     }
 
@@ -510,6 +523,7 @@
             
             updatedDevices.push({
                 visible: row.querySelector('.dev-show').checked ? 1 : 0,
+                is_backup: row.querySelector('.dev-backup').checked ? 1 : 0,
                 ip: ipVal,
                 name: row.querySelector('.dev-name').value.trim(),
                 type: row.querySelector('.dev-type').value,
@@ -650,8 +664,8 @@
     }
 
     function startLldpScan() {
-        const targetDevs = currentDevices.filter(d => parseInt(d.level || 3) <= 4 && d.ip && d.ip.trim() !== '');
-        if (targetDevs.length === 0) return alert("清單中沒有層級 1~4 的設備可供探索。");
+        const targetDevs = currentDevices.filter(d => parseInt(d.level || 3) <= 5 && d.ip && d.ip.trim() !== '');
+        if (targetDevs.length === 0) return alert("清單中沒有層級 1~5 的設備可供探索。");
 
         document.getElementById('btnStartLldp').disabled = true;
         document.getElementById('lldpLoading').classList.remove('d-none');
@@ -819,7 +833,7 @@
         if (!manualLinkModalInstance) manualLinkModalInstance = new bootstrap.Modal(document.getElementById('manualLinkModal'));
         fetch('/api/devices').then(r => r.json()).then(res => {
             let html = '';
-            res.filter(d => d.level >= 2 && d.level <= 4).forEach(d => {
+            res.filter(d => d.level >= 1 && d.level <= 5).forEach(d => {
                 html += `<label class="list-group-item bg-dark text-white border-secondary d-flex justify-content-between align-items-center ml-dev-row" style="cursor:pointer;">
                     <div><input class="form-check-input me-3 ml-dev-cb" type="checkbox" value="${d.ip}" data-comm="${d.community}" data-name="${d.name}">
                     <span class="fw-bold text-info">${d.ip}</span> <span class="text-white-50 ms-2">${d.name}</span></div>
@@ -856,16 +870,48 @@
         }).catch(e => { document.getElementById('ml-loading').classList.add('d-none'); alert("網路錯誤，讀取網孔失敗。"); });
     }
     
-    function mlSubmit() {
+	function mlSubmit() {
         let pA = document.getElementById('ml-port-a').value, pB = document.getElementById('ml-port-b').value;
         if (!pA || !pB) return alert("請確認雙方皆有成功讀取並選擇連接埠！");
-        fetch('/api/manual_links', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ node_a: mlData.ipA, port_a: pA, node_b: mlData.ipB, port_b: pB }) }).then(r => r.json()).then(res => {
-            if(res.status === 'ok') { alert("✅ 手動連線建立成功！拓樸圖將於下次掃描時生效。"); manualLinkModalInstance.hide(); } else alert("錯誤：" + res.message);
+        
+        // 🌟 狀態鎖定：將按鈕換成讀取圈圈，防止管理員重覆連擊
+        let btn = document.querySelector('#ml-step-2 .btn-success');
+        let oriHtml = btn.innerHTML;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>儲存中...';
+        btn.disabled = true;
+
+        fetch('/api/manual_links', { 
+            method: 'POST', 
+            headers: {'Content-Type': 'application/json'}, 
+            body: JSON.stringify({ node_a: mlData.ipA, port_a: pA, node_b: mlData.ipB, port_b: pB }) 
+        })
+        .then(r => {
+            // 🌟 安全檢查：如果後端不幸噴了 500 或 404，立刻主動拋出異常，不讓它沉默
+            if (!r.ok) throw new Error(`伺服器回應異常 (HTTP 狀態碼: ${r.status})`);
+            return r.json();
+        })
+        .then(res => {
+            // 還原按鈕狀態
+            btn.innerHTML = oriHtml; btn.disabled = false;
+            
+            if(res.status === 'ok') { 
+                alert("✅ 手動連線建立成功！拓樸圖將於下次掃描時生效。"); 
+                manualLinkModalInstance.hide(); 
+                if(typeof loadDevices === 'function') loadDevices(); // 自動重新整理清單
+            } else {
+                alert("❌ 儲存失敗：" + res.message); 
+            }
+        })
+        .catch(e => {
+            // 🌟 終極救援：補上原本缺失的 catch 區塊，徹底告別人為操作死鎖！
+            btn.innerHTML = oriHtml; btn.disabled = false;
+            alert("⚠️ 傳送連線失敗：" + e.message + "\n\n💡 提示：請檢查 Python 終端機主控台，確認 discover_topology 演算引擎是否因 mgmt 關鍵字產生相容性中斷。");
         });
     }
 	
 	// ================= 智慧備份與吐司總結邏輯 =================
-    function getValidBackupDevices(mode) {
+	// 🌟 智慧篩選：只取出清單中 (1)層級在L1~L5 (2)是交換器/防火牆/AP控制器 (3)有打勾「備份」的設備
+    function getValidBackupDevices() {
         let targets = [];
         const tbody = document.getElementById('deviceTbody');
         const rows = tbody ? tbody.querySelectorAll('tr') : [];
@@ -875,58 +921,33 @@
             let type = (dev.type || '').trim();
             let ip = (dev.ip || '').trim();
             
-            let isValid = (level >= 1 && level <= 4) && (type === '防火牆' || type === '交換器' || type === 'AP控制器') && ip !== '';
+            // 基礎防線：層級、種類、必須要有IP
+            let isValid = (level >= 1 && level <= 5) && (type === '防火牆' || type === '交換器' || type === 'AP控制器') && ip !== '';
             
-            if (isValid) {
-                if (mode === 'all') {
+            if (isValid && rows[index]) {
+                const bakCb = rows[index].querySelector('.dev-backup');
+                // 只有被勾選備份的才加入任務清單
+                if (bakCb && bakCb.checked) {
                     targets.push(dev);
-                } else if (mode === 'visible') {
-                    if (rows[index]) {
-                        const cb = rows[index].querySelector('.visible-cb');
-                        if (cb && cb.checked) targets.push(dev);
-                    } else if (dev.visible === undefined || dev.visible == 1) {
-                        targets.push(dev);
-                    }
                 }
             }
         });
         return targets;
     }
 
-    function updateBackupCounts() {
-        let visibleTargets = getValidBackupDevices('visible');
-        let allTargets = getValidBackupDevices('all');
-        let vCountElem = document.getElementById('backup-visible-count');
-        let aCountElem = document.getElementById('backup-all-count');
-        if(vCountElem) vCountElem.innerText = visibleTargets.length;
-        if(aCountElem) aCountElem.innerText = allTargets.length;
-    }
-
-    async function executeBatchBackup(mode) {
-        // =========================================================================
-        // 🌟 智慧修正 1：將常數定義強制提升至函式最頂端，徹底根除時序性未定義崩潰 Bug！
-        // 🌟 智慧修正 2：在這裡直接改為 10，即可將全網並行上限安全升級為 10 台！
-        // =========================================================================
+    async function executeBatchBackup() {
         const CONCURRENCY_LIMIT = 8; 
 
-        // 1. 強制收起下拉選單
-        try {
-            const btn = document.querySelector('.dropdown-toggle');
-            if (btn) {
-                let dropdownInstance = bootstrap.Dropdown.getInstance(btn);
-                if (dropdownInstance) dropdownInstance.hide();
-            }
-            document.body.click();
-        } catch(e) {}
-
-        const targets = getValidBackupDevices(mode);
-        if (targets.length === 0) return alert('找不到符合條件的設備！\n(僅限清單中 Level 1~4 的防火牆、交換器與AP控制器)');
+        // 1. 取得所有符合條件的設備
+        const targets = getValidBackupDevices();
         
-        let modeText = mode === 'visible' ? '顯示中' : '全網(L1~L4)';
-        // 🎯 現在變數在最上面，這裡的動態話術絕對能完美連動、不再卡死！
-        if (!confirm(`確定要對 ${modeText} 的 ${targets.length} 台核心設施進行「並行批次備份」嗎？\n(系統將以 ${CONCURRENCY_LIMIT} 台為一組並發執行，這會大幅縮短備份時間！)`)) return;
+        if (targets.length === 0) {
+            return alert('找不到符合條件的設備！\n(請確認清單中是否有 L1~L5 的防火牆/交換器，並且有勾選「備份」欄位)');
+        }
+        
+        if (!confirm(`確定要對清單中勾選備份的 ${targets.length} 台核心設施進行「並行批次備份」嗎？\n(系統將以 ${CONCURRENCY_LIMIT} 台為一組並發執行，這會大幅縮短備份時間！)`)) return;
 
-        const btn = document.querySelector('.dropdown-toggle');
+        const btn = document.getElementById('btn-batch-backup');
         const originalHtml = btn.innerHTML;
         if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>並行處理中'; }
 
@@ -935,9 +956,7 @@
         let completedCount = 0;
         let failedList = [];
 
-        let currentIndex = 0; // 💡 移除了原本在下方重複、卡死的舊 CONCURRENCY_LIMIT 宣告行
-
-        // 🌟 啟動碼表計時器
+        let currentIndex = 0; 
         const startTime = Date.now();
 
         if(typeof window.showToast === 'function') window.showToast(`🚀 啟動多機並行引擎，目標 ${targets.length} 台 (最高併發數: ${CONCURRENCY_LIMIT})...`, 'info');
@@ -966,13 +985,13 @@
                         if(typeof window.showToast === 'function') window.showToast(`[進度 ${completedCount}/${targets.length}] ✅ ${name} (${ip}) 備份完成！`, 'success');
                     } else {
                         failCount++;
-                        failedList.push(`${name} (${ip})`); // 記錄完整的名稱與 IP
+                        failedList.push(`${name} (${ip})`); 
                         if(typeof window.showToast === 'function') window.showToast(`[進度 ${completedCount}/${targets.length}] ❌ ${name} (${ip}) 備份失敗`, 'danger');
                     }
                 } catch (e) {
                     completedCount++;
                     failCount++;
-                    failedList.push(`${name} (${ip})`); // 記錄完整的名稱與 IP
+                    failedList.push(`${name} (${ip})`); 
                     if(typeof window.showToast === 'function') window.showToast(`[進度 ${completedCount}/${targets.length}] ❌ ${name} (${ip}) 網路/系統異常`, 'danger');
                 }
                 
@@ -980,26 +999,18 @@
             }
         }
 
-        // 啟動 Worker
         const workers = [];
         for (let i = 0; i < CONCURRENCY_LIMIT; i++) {
             workers.push(backupWorker());
         }
 
-        // 等待所有 Worker 完工
         await Promise.all(workers);
         
-        // 🌟 停止碼表並計算耗時
         const endTime = Date.now();
-        const timeTaken = ((endTime - startTime) / 1000).toFixed(1); // 換算成秒，取小數點後一位
+        const timeTaken = ((endTime - startTime) / 1000).toFixed(1); 
         
         if (btn) { btn.disabled = false; btn.innerHTML = originalHtml; }
         
-        // ==========================================
-        // 🌟 最終成果發表 (總結吐司與日誌寫入)
-        // ==========================================
-        
-        // 1. 準備彈出的 Toast 訊息內容 (調整顏色對比，確保綠底/黃底都能清晰看見)
         let summaryMsg = `<strong>並行批次備份任務完畢</strong><br>
                           ⏱️ 總耗時: <span class="text-white fw-bold">${timeTaken} 秒</span><br>
                           🎯 總計: <strong>${targets.length}</strong> 台<br>
@@ -1008,31 +1019,28 @@
                           
         if (failCount > 0) {
             summaryMsg += `<hr class="my-1 border-secondary"><strong>失敗設備清單:</strong><br><small>` + failedList.join('<br>') + `</small>`;
-            // 失敗時，延長顯示時間到 20 秒，讓管理員有足夠時間查看
             if(typeof window.showToast === 'function') window.showToast(summaryMsg, 'warning', 20000); 
         } else {
-            // 全數成功時，顯示 10 秒
             if(typeof window.showToast === 'function') window.showToast(summaryMsg, 'success', 10000);
         }
         
-        // 2. 準備寫入資料庫的日誌內容
-        let auditDetails = `並行批次備份任務結束。範圍: ${modeText}，總耗時: ${timeTaken} 秒。總計: ${targets.length} 台，成功: ${successCount} 台，失敗: ${failCount} 台。`;
+        let auditDetails = `並行批次備份任務結束。總耗時: ${timeTaken} 秒。總計: ${targets.length} 台，成功: ${successCount} 台，失敗: ${failCount} 台。`;
         if (failCount > 0) {
             auditDetails += `\n❌ 失敗設備清單: ${failedList.join(', ')}`;
         }
         
-        // 3. 呼叫後端 API 寫入系統日誌 (補上 username 避免被擋)
         fetch('/api/audit-logs/client', {
             method: 'POST', 
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
                 action: '批次備份總結', 
-                target: `全網並發引擎 (${modeText})`, 
+                target: `全網並發引擎`, 
                 details: auditDetails,
-                username: 'SystemEngine' // 💡 確保 API 認可此紀錄
+                username: 'SystemEngine' 
             })
         }).catch(err => console.error("日誌寫入失敗:", err));
     }
+
 </script>
 
 {% endblock %}

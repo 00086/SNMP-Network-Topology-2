@@ -5,31 +5,25 @@ import asyncio
 import os
 import zipfile
 import signal
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool  # 🌟 加入這行專屬的崩潰攔截器
-#from concurrent.futures import ThreadPoolExecutor  # 🌟 換成 ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 
-# 🌟 宣告全域除錯模式開關 (預設關閉 False，開啟為 True)
 GLOBAL_DEBUG_MODE = False
-GLOBAL_TRAP_ENABLED = True  # 🌟 新增：全域 UDP 162 Trap 接收服務控制開關 (預設開啟)
+GLOBAL_TRAP_ENABLED = True
 
-# ==========================================
-# ⚙️ 全域監控與快取配置控制項
-# ==========================================
-DEBUG_SSH_LOG = False       # 💡 設為 True 則會在終端機狂噴 SSH 爬蟲紀錄；設為 False 則保持無聲乾淨
-DEBUG_PA_LOG = True         # 💡 新增：Palo Alto API 終端機全面偵錯開關 (預設開啟)
+DEBUG_SSH_LOG = False
+DEBUG_PA_LOG = True
 
-ARUBA_SSH_CACHE = {}        # 💡 Aruba CX 光纖數據記憶快取庫，防止背景輪詢填零覆蓋
-PALO_ALTO_CACHE = {}        # 💡 新增：Palo Alto 光纖數據 API 記憶快取庫
+ARUBA_SSH_CACHE = {}
+PALO_ALTO_CACHE = {}
 
 def debug_print(message):
-    """安全除錯印出函式：只有在開關開啟時才會在終端機輸出"""
     global GLOBAL_DEBUG_MODE
     if GLOBAL_DEBUG_MODE:
         print(message, flush=True)
 
 def _init_child_process():
-    """ 防止子進程洗版 """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 try:
@@ -53,144 +47,179 @@ from database import (
     get_db, read_db_devices, write_db_devices
 )
 
+PING_SEMAPHORE = threading.Semaphore(8)
+
 # ==========================================
-# 🧱 1. 多進程獨立執行單元 (Fail-Fast 快速止損版)
+# 🧱 1. 純非同步單機採集單元
 # ==========================================
-def _process_snmp_single_device(ip, community, brand, is_poe=0, has_sensor=0, debug_mode=False):
-    import asyncio
+async def _async_process_snmp_single_device(snmpEngine, ip, community, brand, is_poe=0, has_sensor=0, snmp_version='v2c', debug_mode=False):
     import subprocess
     import platform
-    import sys
     import re
     
-    # 🌟 核心修正：接收主進程傳入的開關狀態，並同步給子進程的全域空間
     global GLOBAL_DEBUG_MODE
     GLOBAL_DEBUG_MODE = debug_mode
-    
-    from pysnmp.hlapi.v3arch.asyncio import (
-        SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
-        ObjectType, ObjectIdentity, bulk_cmd, next_cmd
-    )
-    from utils import parse_snmp_val
 
     def _fast_ping(target_ip):
         try:
             if platform.system().lower() == 'windows':
-                res = subprocess.run(['ping', '-n', '1', '-w', '500', target_ip], capture_output=True, text=True, timeout=1.5, creationflags=0x08000000)
-                return "TTL=" in res.stdout.upper()
+                res = subprocess.run(['ping', '-n', '1', '-w', '800', target_ip], capture_output=True, text=True, timeout=1.5, creationflags=0x08000000)
+                if "TTL=" in res.stdout.upper():
+                    m = re.search(r'(?:time|時間)\s*[=<]\s*([0-9\.]+)\s*ms', res.stdout, re.IGNORECASE)
+                    return True, float(m.group(1)) if m else 1.0
+                return False, 999.0
             else:
-                res = subprocess.run(['ping', '-c', '1', '-W', '1', target_ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1.5)
-                return res.returncode == 0
+                res = subprocess.run(['ping', '-c', '1', '-W', '1', target_ip], capture_output=True, text=True, timeout=1.5)
+                if res.returncode == 0:
+                    m = re.search(r'time=([0-9\.]+)\s*ms', res.stdout, re.IGNORECASE)
+                    return True, float(m.group(1)) if m else 1.0
+                return False, 999.0
         except:
-            return False
-    
+            return False, 999.0
+
     def extract_float(val):
         try:
             m = re.search(r'[-+]?\d*\.\d+|\d+', str(val))
             return float(m.group()) if m else 0.0
         except: return 0.0
 
-    def ext_num(val):
-        try:
-            m = re.search(r'[-+]?\d*\.\d+|\d+', str(val))
-            return float(m.group()) if m else 0.0
-        except: return 0.0
-    
-    # 💡 終極防護防禦：起手式直接把 poe_w、temp_c 以及 admin/oper_status 初始化！
-    out_dict = {"ip": ip, "in": {}, "out": {}, "cpu": 0.0, "mem": 0.0, "poe_w": 0.0, "temp_c": 0.0, "success": False, "ping_ok": False, "admin_status": {}, "oper_status": {}}
+    out_dict = {"ip": ip, "in": {}, "out": {}, "cpu": 0.0, "mem": 0.0, "poe_w": 0.0, "temp_c": 0.0, "session_util": 0.0, "latency_ms": 0.0, "success": False, "ping_ok": False, "admin_status": {}, "oper_status": {}}
 
-    async def run_snmp_task():
-        try:
-            engine = SnmpEngine()
-            auth = CommunityData(community, mpModel=1)
-            ctx = ContextData()
-            b = str(brand).lower()
-            is_dlink = 'd-link' in b
+    ctx = AsyncContextData()
+    b = str(brand).lower()
+    is_dlink = 'd-link' in b
+    is_v1_mode = (snmp_version == 'v1')
 
-            async def async_walk(oid_prefix, force_next=False):
-                if not oid_prefix: return {}
-                results = {}
-                try:
-                    if force_next:
-                        t_timeout = 1.5 if is_dlink else 1.0  
-                        max_steps = 32                        
-                        t_retries = 1                         
-                    else:
-                        t_timeout = 2.0 if is_dlink else 1.2
-                        max_steps = 50
-                        t_retries = 1
-
-                    transport = await UdpTransportTarget.create((ip, 161), timeout=t_timeout, retries=t_retries)
-                    current_oid = ObjectType(ObjectIdentity(oid_prefix))
-                    
-                    for _ in range(max_steps):
-                        if force_next:
-                            err, stat, idx, binds = await next_cmd(engine, auth, transport, ctx, current_oid)
-                        else:
-                            err, stat, idx, binds = await bulk_cmd(engine, auth, transport, ctx, 0, 15, current_oid)
-                                                        
-                        if err or stat or not binds: break
-                        out_of_tree = False
-                        for row in binds:
-                            name, val = row[0] if isinstance(row, list) else row
+    async def async_smart_walk(oid_prefix_v2, oid_prefix_v1, force_next=False):
+        nonlocal is_v1_mode
+        results = {}
+        if not force_next and not is_v1_mode:
+            try:
+                auth_v2 = AsyncCommunityData(community, mpModel=1)
+                transport_v2 = await AsyncUdpTransportTarget.create((ip, 161), timeout=1.2, retries=1)
+                current_oid = AsyncObjectType(AsyncObjectIdentity(oid_prefix_v2))
+                for _ in range(50):
+                    err, stat, idx, binds = await bulk_cmd(snmpEngine, auth_v2, transport_v2, ctx, 0, 15, current_oid)
+                    if err or stat or not binds: break
+                    out_of_tree = False
+                    for row in binds:
+                        try:
+                            name, val = row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else row
                             oid_str = str(name)
-                            if not oid_str.startswith(oid_prefix): out_of_tree = True; break
+                            if not oid_str.startswith(oid_prefix_v2):
+                                out_of_tree = True; break
                             val_str = parse_snmp_val(val)
-                            if val_str: results[oid_str.replace(oid_prefix + '.', '')] = val_str
-                            current_oid = ObjectType(ObjectIdentity(name))
-                        if out_of_tree: break
-                except: pass
-                return results
+                            if val_str:
+                                results[oid_str.replace(oid_prefix_v2 + '.', '')] = val_str
+                            current_oid = AsyncObjectType(AsyncObjectIdentity(name))
+                        except Exception: continue
+                    if out_of_tree: break
+                if results: return results
+            except Exception:
+                is_v1_mode = True
 
-            # ========================================================
-            # 💡 全面回歸循序快速採集 (Sequential Await)
-            # ========================================================
-            res_map = {}
-            res_map["in"] = await async_walk('1.3.6.1.2.1.31.1.1.1.6')
-            res_map["out"] = await async_walk('1.3.6.1.2.1.31.1.1.1.10')
-            
-            # 🌟 新增：快速輪詢順便索要網孔實體開關狀態與連線狀態
-            res_map["admin_status"] = await async_walk('1.3.6.1.2.1.2.2.1.7')  # ifAdminStatus
-            res_map["oper_status"] = await async_walk('1.3.6.1.2.1.2.2.1.8')   # ifOperStatus
-            
-            out_dict["in"] = res_map.get("in", {})
-            out_dict["out"] = res_map.get("out", {})
-            if not out_dict["in"] and not out_dict["out"]:
-                alive_check = await async_walk('1.3.6.1.2.1.1.2')
-                if not alive_check:
-                    engine.close_dispatcher()
-                    return 
-            out_dict["success"] = True
+        target_oid_v1 = oid_prefix_v1 if oid_prefix_v1 else oid_prefix_v2
+        try:
+            auth_v1 = AsyncCommunityData(community, mpModel=0)
+            transport_v1 = await AsyncUdpTransportTarget.create((ip, 161), timeout=1.5, retries=1)
+            current_oid = AsyncObjectType(AsyncObjectIdentity(target_oid_v1))
+            for _ in range(32):
+                err, stat, idx, binds = await next_cmd(snmpEngine, auth_v1, transport_v1, ctx, current_oid)
+                if err or stat or not binds: break
+                out_of_tree = False
+                for row in binds:
+                    try:
+                        name, val = row[0] if isinstance(row, (list, tuple)) and len(row) > 0 else row
+                        oid_str = str(name)
+                        if not oid_str.startswith(target_oid_v1):
+                            out_of_tree = True; break
+                        val_str = parse_snmp_val(val)
+                        if val_str:
+                            results[oid_str.replace(target_oid_v1 + '.', '')] = val_str
+                        current_oid = AsyncObjectType(AsyncObjectIdentity(name))
+                    except Exception: continue
+                if out_of_tree: break
+        except Exception: pass
+        return results
 
-            res_map["cpu_std"] = await async_walk('1.3.6.1.2.1.25.3.3.1.2')
-            res_map["mem_size"] = await async_walk('1.3.6.1.2.1.25.2.3.1.5')
-            res_map["mem_used"] = await async_walk('1.3.6.1.2.1.25.2.3.1.6')
+    try:
+        walk_tasks = [
+            async_smart_walk('1.3.6.1.2.1.31.1.1.1.6', '1.3.6.1.2.1.2.2.1.10'),
+            async_smart_walk('1.3.6.1.2.1.31.1.1.1.10', '1.3.6.1.2.1.2.2.1.16'),
+            async_smart_walk('1.3.6.1.2.1.2.2.1.7', None),
+            async_smart_walk('1.3.6.1.2.1.2.2.1.8', None)
+        ]
+        walk_results = await asyncio.gather(*walk_tasks)
 
+        out_dict["in"] = walk_results[0]
+        out_dict["out"] = walk_results[1]
+        out_dict["admin_status"] = walk_results[2]
+        out_dict["oper_status"] = walk_results[3]
+
+        if not out_dict["in"] and not out_dict["out"]:
+            alive_check = await async_smart_walk('1.3.6.1.2.1.1.2', None)
+            if not alive_check:
+                loop = asyncio.get_running_loop()
+                ping_ok, latency = await loop.run_in_executor(None, _fast_ping, ip)
+                out_dict["ping_ok"] = ping_ok
+                out_dict["latency_ms"] = latency if ping_ok else 999.0
+                return out_dict
+
+        out_dict["success"] = True
+        out_dict["ping_ok"] = True
+        out_dict["latency_ms"] = 1.0
+
+        res_map = {
+            "cpu_std": await async_smart_walk('1.3.6.1.2.1.25.3.3.1.2', None),
+            "mem_size": await async_smart_walk('1.3.6.1.2.1.25.2.3.1.5', None),
+            "mem_used": await async_smart_walk('1.3.6.1.2.1.25.2.3.1.6', None)
+        }
+
+        if 'ruckus' in b or 'foundry' in b:
+            res_map["cpu_brand"] = await async_smart_walk('1.3.6.1.4.1.1991.1.1.2.1.52', None)
+            res_map["mem_brand"] = await async_smart_walk('1.3.6.1.4.1.1991.1.1.2.1.53', None)
+        elif 'cisco' in b:
+            res_map["cpu_brand"] = await async_smart_walk('1.3.6.1.4.1.9.9.109.1.1.1.1.7', None)
+        elif 'palo' in b or 'pan' in b or 'pa-' in b:
+            res_map["session_brand"] = await async_smart_walk('1.3.6.1.4.1.25461.2.1.2.3.3', None)
+            res_map["cpu_brand"] = await async_smart_walk('1.3.6.1.4.1.25461.2.1.2.3.16.1.2', None)
+
+        if is_poe:
+            res_map["poe_std_mw"] = await async_smart_walk('1.3.6.1.2.1.105.1.3.1.1.4', None)
             if 'ruckus' in b or 'foundry' in b:
-                res_map["cpu_brand"] = await async_walk('1.3.6.1.4.1.1991.1.1.2.1.52')
-                res_map["mem_brand"] = await async_walk('1.3.6.1.4.1.1991.1.1.2.1.53')
-            elif 'cisco' in b:
-                res_map["cpu_brand"] = await async_walk('1.3.6.1.4.1.9.9.109.1.1.1.1.7')
+                res_map["poe_brand"] = await async_smart_walk('1.3.6.1.4.1.1991.1.1.2.14.2.2.1.6', None)
+            if is_dlink:
+                res_map["poe_brand"] = await async_smart_walk('1.3.6.1.4.1.171.10.76.12.22.1.1.9', None, force_next=True)
 
-            if is_poe:
-                res_map["poe_std_mw"] = await async_walk('1.3.6.1.2.1.105.1.3.1.1.4')
-                if 'ruckus' in b or 'foundry' in b: 
-                    res_map["poe_brand"] = await async_walk('1.3.6.1.4.1.1991.1.1.2.14.2.2.1.6')
-                if is_dlink: 
-                    res_map["poe_brand"] = await async_walk('1.3.6.1.4.1.171.10.76.12.22.1.1.9', force_next=True)
+        if has_sensor:
+            res_map["temp_std"] = await async_smart_walk('1.3.6.1.2.1.99.1.1.1', None)
+            if 'ruckus' in b or 'foundry' in b:
+                res_map["temp_brand"] = await async_smart_walk('1.3.6.1.4.1.1991.1.1.2.13.1.1.4', None)
+            if 'cisco' in b:
+                res_map["temp_brand"] = await async_smart_walk('1.3.6.1.4.1.9.9.13.1.3.1.3', None)
+            if 'mikrotik' in b:
+                res_map["temp_brand"] = await async_smart_walk('1.3.6.1.4.1.14988.1.1.3', None)
 
-            if has_sensor:
-                res_map["temp_std"] = await async_walk('1.3.6.1.2.1.99.1.1.1')
-                if 'ruckus' in b or 'foundry' in b: 
-                    res_map["temp_brand"] = await async_walk('1.3.6.1.4.1.1991.1.1.2.13.1.1.4')
-                if 'cisco' in b: 
-                    res_map["temp_brand"] = await async_walk('1.3.6.1.4.1.9.9.13.1.3.1.3')
-                if 'mikrotik' in b: 
-                    res_map["temp_brand"] = await async_walk('1.3.6.1.4.1.14988.1.1.3')
+        session_val = 0.0
+        pa_mp_cpu = 0.0
+        pa_dp_cpu = 0.0
+        is_palo_alto_dev = 'palo' in b or 'pan' in b or 'pa-' in b
 
-            # ========================================================
-            # 📊 數據解算
-            # ========================================================
+        if is_palo_alto_dev:
+            if "session_brand" in res_map and res_map["session_brand"]:
+                try: session_val = float(list(res_map["session_brand"].values())[0])
+                except: pass
+            std_cpu = res_map.get("cpu_std", {})
+            if std_cpu:
+                try:
+                    sorted_keys = sorted(std_cpu.keys(), key=lambda x: int(x))
+                    if len(sorted_keys) > 0: pa_mp_cpu = float(std_cpu[sorted_keys[0]])
+                    if len(sorted_keys) > 1:
+                        dp_vals = [float(std_cpu[k]) for k in sorted_keys[1:]]
+                        pa_dp_cpu = sum(dp_vals) / len(dp_vals)
+                except: pass
+            out_dict["cpu"] = round(pa_dp_cpu, 1)
+        else:
             cpu_vals = []
             if "cpu_brand" in res_map and res_map["cpu_brand"]:
                 cpu_vals = [float(v) for v in res_map["cpu_brand"].values() if str(v).replace('.','').isdigit()]
@@ -198,263 +227,293 @@ def _process_snmp_single_device(ip, community, brand, is_poe=0, has_sensor=0, de
                 cpu_vals = [float(v) for v in res_map["cpu_std"].values() if str(v).replace('.','').isdigit()]
             if cpu_vals: out_dict["cpu"] = round(sum(cpu_vals)/len(cpu_vals), 1)
 
-            mem_val = 0.0
-            if "mem_brand" in res_map and res_map["mem_brand"]:
-                try: mem_val = float(list(res_map["mem_brand"].values())[0])
-                except: pass
-            if mem_val == 0.0:
-                sizes = res_map.get("mem_size", {})
-                useds = res_map.get("mem_used", {})
-                for idx, sz in sizes.items():
-                    if idx in useds and float(sz) > 0:
-                        mem_val = (float(useds[idx]) / float(sz)) * 100; break
-            out_dict["mem"] = round(mem_val, 1)
-            
-            poe_w = 0.0
-            if is_poe:
-                sum_mw = 0
-                if "poe_std_mw" in res_map and res_map["poe_std_mw"]:
-                    for v in res_map["poe_std_mw"].values():
-                        val = extract_float(v)
-                        if 500 <= val < 95000 and val != 1500: sum_mw += val
-                        elif 0.5 <= val < 500: poe_w += val
-                
-                if "poe_brand" in res_map and res_map["poe_brand"] and ('ruckus' in b or 'foundry' in b):
-                    for v in res_map["poe_brand"].values():
-                        val = extract_float(v)
-                        if 500 <= val < 95000: sum_mw += val
-                        elif 0.5 <= val < 500: poe_w += val
-                            
-                poe_w += sum_mw / 1000.0
-                
-                if "poe_brand" in res_map and res_map["poe_brand"] and is_dlink:
-                    for v in res_map["poe_brand"].values():
-                        val = extract_float(v)
-                        if val > 500:          
-                            poe_w += val / 1000.0
-                        elif val > 95.0:       
-                            poe_w += val / 10.0
-                        elif 0.1 <= val <= 95.0: 
-                            poe_w += val
-                        
-            out_dict["poe_w"] = round(poe_w, 1)
+        mem_val = 0.0
+        if "mem_brand" in res_map and res_map["mem_brand"]:
+            try: mem_val = float(list(res_map["mem_brand"].values())[0])
+            except: pass
+        if mem_val == 0.0:
+            sizes = res_map.get("mem_size", {})
+            useds = res_map.get("mem_used", {})
+            for idx, sz in sizes.items():
+                if idx in useds and float(sz) > 0:
+                    mem_val = (float(useds[idx]) / float(sz)) * 100; break
 
-            temp_c = 0.0
-            if has_sensor:
-                temps = []
-                if "temp_std" in res_map and res_map["temp_std"]:
-                    for v in res_map["temp_std"].values():
+        out_dict["mem"] = round(mem_val, 1)
+        out_dict["session_util"] = round(session_val, 1)
+
+        poe_w = 0.0
+        if is_poe:
+            sum_mw = 0
+            if "poe_std_mw" in res_map and res_map["poe_std_mw"]:
+                for v in res_map["poe_std_mw"].values():
+                    val = extract_float(v)
+                    if 500 <= val < 95000 and val != 1500: sum_mw += val
+                    elif 0.5 <= val < 500: poe_w += val
+            if "poe_brand" in res_map and res_map["poe_brand"] and ('ruckus' in b or 'foundry' in b):
+                for v in res_map["poe_brand"].values():
+                    val = extract_float(v)
+                    if 500 <= val < 95000: sum_mw += val
+                    elif 0.5 <= val < 500: poe_w += val
+            poe_w += sum_mw / 1000.0
+            if "poe_brand" in res_map and res_map["poe_brand"] and is_dlink:
+                for v in res_map["poe_brand"].values():
+                    val = extract_float(v)
+                    if val > 500: poe_w += val / 1000.0
+                    elif val > 95.0: poe_w += val / 10.0
+                    elif 0.1 <= val <= 95.0: poe_w += val
+
+        out_dict["poe_w"] = round(poe_w, 1)
+
+        temp_c = 0.0
+        if has_sensor:
+            temps = []
+            if "temp_std" in res_map and res_map["temp_std"]:
+                for v in res_map["temp_std"].values():
+                    t = extract_float(v)
+                    if 0 < t < 150: temps.append(t)
+            if "temp_brand" in res_map and res_map["temp_brand"]:
+                if 'ruckus' in b or 'foundry' in b:
+                    for v in res_map["temp_brand"].values():
+                        t = extract_float(v) / 2.0
+                        if 0 < t < 150: temps.append(t)
+                elif 'cisco' in b:
+                    for v in res_map["temp_brand"].values():
                         t = extract_float(v)
                         if 0 < t < 150: temps.append(t)
-                if "temp_brand" in res_map and res_map["temp_brand"]:
-                    if 'ruckus' in b or 'foundry' in b:
-                        for v in res_map["temp_brand"].values():
-                            t = extract_float(v) / 2.0
+                elif 'mikrotik' in b:
+                    for k, v in res_map["temp_brand"].items():
+                        if str(k).endswith('.10') or str(k) == '10':
+                            t = extract_float(v) / 10.0
                             if 0 < t < 150: temps.append(t)
-                    elif 'cisco' in b:
-                        for v in res_map["temp_brand"].values():
-                            t = extract_float(v)
-                            if 0 < t < 150: temps.append(t)
-                    elif 'mikrotik' in b:
-                        for k, v in res_map["temp_brand"].items():
-                            if str(k).endswith('.10') or str(k) == '10':
-                                t = extract_float(v) / 10.0
-                                if 0 < t < 150: temps.append(t)
-                if temps: temp_c = round(max(temps), 1)
-            out_dict["temp_c"] = temp_c
+            if temps: temp_c = round(max(temps), 1)
+        out_dict["temp_c"] = temp_c
 
-            # 🌟 補上這兩行賦值，將快速輪詢抓到的實體狀態塞進回傳物件中
-            out_dict["admin_status"] = res_map.get("admin_status", {})
-            out_dict["oper_status"] = res_map.get("oper_status", {})
+    except Exception:
+        loop = asyncio.get_running_loop()
+        ping_ok, latency = await loop.run_in_executor(None, _fast_ping, ip)
+        out_dict["ping_ok"] = ping_ok
+        out_dict["latency_ms"] = latency if ping_ok else 999.0
 
-            engine.close_dispatcher()
-        except: pass
-
-    debug_print(f"👉 [流量輪詢] 子進程開始處理 IP: {ip} ...")
-    try:
-        import asyncio
-        loop = asyncio.new_event_loop()
-        loop.set_exception_handler(lambda loop, context: None) 
-        asyncio.set_event_loop(loop)
-        
-        loop.run_until_complete(asyncio.wait_for(run_snmp_task(), timeout=12.0))
-        loop.close()
-        debug_print(f"✅ [流量輪詢] 子進程成功完成 IP: {ip}")
-    except Exception as e: 
-        debug_print(f"❌ [流量輪詢] 子進程卡死或逾時！強制中斷 IP: {ip} (原因: {type(e).__name__})")
-        pass
-
-    if not out_dict["success"]:
-        out_dict["ping_ok"] = _fast_ping(ip)
-    
     return out_dict
 
 # ==========================================
 # 📊 2. 異步單點採集單元
 # ==========================================
-async def async_get_device_info(snmpEngine, ip, community):
+async def async_get_device_info(snmpEngine, ip, community, snmp_version='v2c'):
     sys_descr, sys_name, sys_location = "無回應", "", ""
-    try:
-        transport = await AsyncUdpTransportTarget.create((ip, 161), timeout=1.0, retries=1)
-        err, stat, idx, varBinds = await get_cmd(
-            snmpEngine, AsyncCommunityData(community, mpModel=1), transport, AsyncContextData(), 
-            AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.1.0')), AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.5.0')), AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.6.0'))
-        )
-        if not err and not stat:
-            for varBind in varBinds:
-                oid = str(varBind[0])
-                val = parse_snmp_val(varBind[1]).replace('\r', '').replace('\n', ' | ')
-                if '1.3.6.1.2.1.1.1.0' in oid: sys_descr = val
-                elif '1.3.6.1.2.1.1.5.0' in oid: sys_name = val
-                elif '1.3.6.1.2.1.1.6.0' in oid: sys_location = val
-    except: pass
+    
+    if snmp_version != 'v1':
+        try:
+            transport = await AsyncUdpTransportTarget.create((ip, 161), timeout=0.8, retries=1)
+            err, stat, idx, varBinds = await get_cmd(
+                snmpEngine, AsyncCommunityData(community, mpModel=1), transport, AsyncContextData(), 
+                AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.1.0')), AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.5.0')), AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.6.0'))
+            )
+            if not err and not stat:
+                for varBind in varBinds:
+                    oid = str(varBind[0])
+                    val = parse_snmp_val(varBind[1]).replace('\r', '').replace('\n', ' | ')
+                    if '1.3.6.1.2.1.1.1.0' in oid: sys_descr = val
+                    elif '1.3.6.1.2.1.1.5.0' in oid: sys_name = val
+                    elif '1.3.6.1.2.1.1.6.0' in oid: sys_location = val
+                if sys_descr != "無回應":
+                    return sys_descr, sys_name, sys_location
+        except: pass
+
+    if snmp_version == 'v1' or sys_descr == "無回應":
+        try:
+            transport = await AsyncUdpTransportTarget.create((ip, 161), timeout=1.5, retries=1)
+            err, stat, idx, varBinds = await get_cmd(
+                snmpEngine, AsyncCommunityData(community, mpModel=0), transport, AsyncContextData(), 
+                AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.1.0')), AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.5.0')), AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.6.0'))
+            )
+            if not err and not stat:
+                for varBind in varBinds:
+                    oid = str(varBind[0])
+                    val = parse_snmp_val(varBind[1]).replace('\r', '').replace('\n', ' | ')
+                    if '1.3.6.1.2.1.1.1.0' in oid: sys_descr = val
+                    elif '1.3.6.1.2.1.1.5.0' in oid: sys_name = val
+                    elif '1.3.6.1.2.1.1.6.0' in oid: sys_location = val
+        except: pass
+    
     return sys_descr, sys_name, sys_location
 
-# 💡 將原本的 (snmpEngine, ip, community) 替換為以下這行：
-async def async_get_device_full_data(snmpEngine, ip, community, sys_descr="", ssh_user="", ssh_pass=""):
-    auth = AsyncCommunityData(community, mpModel=1)
-    # 🌟 降低為 1，代表對這台交換器「一次只問一個表」，不要一次發 3 個請求塞爆它，這樣反而會跑得更順、不會當機！
-    sem = asyncio.Semaphore(1)
+async def async_get_device_full_data(snmpEngine, ip, community, sys_descr="", ssh_user="", ssh_pass="", snmp_version='v2c'):
+    is_v1_device = (snmp_version == 'v1') or "超時" in str(sys_descr) or "無回應" in str(sys_descr) or "dgs-1100" in str(sys_descr).lower()
+    
+    if not is_v1_device:
+        try:
+            transport_test = await AsyncUdpTransportTarget.create((ip, 161), timeout=1.2, retries=1)
+            err, stat, idx, binds = await get_cmd(snmpEngine, AsyncCommunityData(community, mpModel=1), transport_test, AsyncContextData(), AsyncObjectType(AsyncObjectIdentity('1.3.6.1.2.1.1.2.0')))
+            if err or stat: is_v1_device = True
+        except: is_v1_device = True
+
+    auth = AsyncCommunityData(community, mpModel=0 if is_v1_device else 1)
+    sem = asyncio.Semaphore(4)
+
     async def walk(oid_prefix):
         async with sem:
             results = {}
             try:
-                transport = await AsyncUdpTransportTarget.create((ip, 161), timeout=2.0, retries=2)
+                transport = await AsyncUdpTransportTarget.create((ip, 161), timeout=2.0 if is_v1_device else 1.5, retries=1)
                 ctx = AsyncContextData()
                 current_oid = AsyncObjectType(AsyncObjectIdentity(oid_prefix))
-                for _ in range(150): 
-                    err, stat, idx, binds = await bulk_cmd(snmpEngine, auth, transport, ctx, 0, 15, current_oid)
+                for _ in range(120): 
+                    if is_v1_device:
+                        err, stat, idx, binds = await next_cmd(snmpEngine, auth, transport, ctx, current_oid)
+                    else:
+                        err, stat, idx, binds = await bulk_cmd(snmpEngine, auth, transport, ctx, 0, 15, current_oid)
+                    
                     if err or stat or not binds: break
                     out_of_tree = False
+                    
                     for row in binds:
-                        name, val = row[0] if isinstance(row, list) else row
-                        oid_str = str(name)
-                        if not oid_str.startswith(oid_prefix): out_of_tree = True; break
-                        val_str = parse_snmp_val(val)
-                        if val_str: results[oid_str.replace(oid_prefix + '.', '')] = val_str
-                        current_oid = AsyncObjectType(AsyncObjectIdentity(name))
+                        try:
+                            if isinstance(row, (list, tuple)) and len(row) > 0:
+                                name, val = row[0]
+                            else:
+                                name, val = row
+                                
+                            oid_str = str(name)
+                            if not oid_str.startswith(oid_prefix): 
+                                out_of_tree = True
+                                break
+                            val_str = parse_snmp_val(val)
+                            if val_str: 
+                                results[oid_str.replace(oid_prefix + '.', '')] = val_str
+                            current_oid = AsyncObjectType(AsyncObjectIdentity(name))
+                        except Exception:
+                            continue
                     if out_of_tree: break
             except: pass
             return results
 
-    # =====================================================================
-    # 📡 啟動非同步多執行緒資料採集 (Asynchronous Bulk Data Polling)
-    # 備註：此區塊收集的順序會直接對應到回傳陣列 (res) 的索引值 (0 ~ 34)
-    # =====================================================================
     res = await asyncio.gather(
-        # --- [區塊 A：LLDP 鄰居網路拓樸發現 (0 ~ 3)] ---
-        walk('1.0.8802.1.1.2.1.4.1.1.9'),       # 0: LLDP 鄰居設備名稱 (Rem Sys Name)
-        walk('1.0.8802.1.1.2.1.4.1.1.7'),       # 1: LLDP 鄰居連接埠 ID (Rem Port Id)
-        walk('1.0.8802.1.1.2.1.4.1.1.6'),       # 2: LLDP 鄰居連接埠描述 (Rem Port Desc)
-        walk('1.0.8802.1.1.2.1.4.1.1.8'),       # 3: LLDP 鄰居系統描述 (Rem Sys Desc)
+        walk('1.0.8802.1.1.2.1.4.1.1.9'),       # 0: LLDP RemSysName
+        walk('1.0.8802.1.1.2.1.4.1.1.7'),       # 1: LLDP RemPortId
+        walk('1.0.8802.1.1.2.1.4.1.1.6'),       # 2: LLDP RemPortDesc
+        walk('1.0.8802.1.1.2.1.4.1.1.8'),       # 3: LLDP RemSysDesc
         
-        # --- [區塊 B：實體介面基礎資訊 (4 ~ 9)] ---
-        walk('1.3.6.1.2.1.31.1.1.1.1'),         # 4: 介面名稱 ifName (如 GigabitEthernet1/0/1)
-        walk('1.3.6.1.2.1.31.1.1.1.15'),        # 5: 介面最高速度 ifHighSpeed (單位 Mbps)
-        walk('1.3.6.1.2.1.2.2.1.5'),            # 6: 介面基礎速度 ifSpeed (舊版 OID，單位 bps)
-        walk('1.3.6.1.2.1.2.2.1.6'),            # 7: 介面硬體 MAC 位址 ifPhysAddress
-        walk('1.3.6.1.2.1.2.2.1.2'),            # 8: 介面描述 ifDescr (通常同 ifName)
-        walk('1.3.6.1.2.1.31.1.1.1.18'),        # 9: 介面自訂別名 ifAlias (管理員填寫的說明)
+        walk('1.3.6.1.2.1.31.1.1.1.1'),         # 4: ifName
+        walk('1.3.6.1.2.1.31.1.1.1.15'),        # 5: ifHighSpeed
+        walk('1.3.6.1.2.1.2.2.1.5'),            # 6: ifSpeed
+        walk('1.3.6.1.2.1.2.2.1.6'),            # 7: ifPhysAddress
+        walk('1.3.6.1.2.1.2.2.1.2'),            # 8: ifDescr
+        walk('1.3.6.1.2.1.31.1.1.1.18'),        # 9: ifAlias
         
-        # --- [區塊 C：終端設備尋址 - MAC / ARP 表 (10 ~ 17)] ---
-        walk('1.3.6.1.2.1.17.4.3.1.2'),         # 10: Bridge MIB - 轉發資料庫 (FDB / MAC Address Table)
-        walk('1.3.6.1.2.1.17.1.4.1.2'),         # 11: Bridge MIB - 橋接埠與 ifIndex 映射表
-        walk('1.3.6.1.2.1.17.7.1.2.2.1.2'),     # 12: Q-BRIDGE MIB - 包含 VLAN 標籤的 MAC 轉發資料庫
-        walk('1.3.6.1.2.1.4.22.1.2'),           # 13: 傳統 IPv4 ARP 快取表 (IP 對應 MAC)
-        walk('1.3.6.1.2.1.4.35.1.4'),           # 14: 新版 IP 網路層實體位址表 (支援 IPv6)
-        walk('1.3.6.1.2.1.3.1.1.2'),            # 15: 舊版位址轉換表 (部分老舊設備需要)
-        walk('1.3.6.1.4.1.1991.1.1.2.1.35.1.3'),# 16: Ruckus/Foundry 專用 ARP 對應埠口表
-        walk('1.3.6.1.2.1.4.21.1.7'),           # 17: IPv4 路由表下一跳位址 (ipRouteNextHop)
+        walk('1.3.6.1.2.1.17.4.3.1.2'),         # 10: FDB
+        walk('1.3.6.1.2.1.17.1.4.1.2'),         # 11: Bridge Port to ifIndex
+        walk('1.3.6.1.2.1.17.7.1.2.2.1.2'),     # 12: Q-BRIDGE FDB
+        walk('1.3.6.1.2.1.4.22.1.2'),           # 13: ARP Table
+        walk('1.3.6.1.2.1.4.35.1.4'),           # 14: IP Physical Table
+        walk('1.3.6.1.2.1.3.1.1.2'),            # 15: AT Table
+        walk('1.3.6.1.4.1.1991.1.1.2.1.35.1.3'),# 16: Ruckus ARP Port
+        walk('1.3.6.1.2.1.4.21.1.7'),           # 17: Route NextHop
         
-        # --- [區塊 D：硬體特規與 PoE 供電感測 (18 ~ 21)] ---
-        walk('1.3.6.1.2.1.105.1.3.1.1.4'),      # 18: PoE 埠口供電等級 (Power Class 0~4)
-        walk('1.3.6.1.4.1.1991.1.1.2.14.2.2.1.6'), # 19: Ruckus/Foundry LLDP 鄰居 IP 解析 (特規)
-        walk('1.3.6.1.4.1.9.9.402.1.2.1.7'),    # 20: Cisco PoE 實時瓦數消耗 (cpeExtPsePortPwrConsumption)
-        walk('1.3.6.1.4.1.171.10.76.12.22.1.1.9'), # 21: D-Link PoE 實時瓦數消耗 (特規)
+        walk('1.3.6.1.2.1.105.1.3.1.1.4'),      # 18: PoE Class
+        walk('1.3.6.1.4.1.1991.1.1.2.14.2.2.1.6'), # 19: Ruckus LLDP Mgmt IP
+        walk('1.3.6.1.4.1.9.9.402.1.2.1.7'),    # 20: Cisco PoE mW
+        walk('1.3.6.1.4.1.171.10.76.12.22.1.1.9'), # 21: D-Link PoE mW
         
-        # --- [區塊 E：設備狀態與網路錯誤封包品質 (22 ~ 25)] ---
-        walk('1.3.6.1.2.1.1.3'),                # 22: 系統連續運行時間 (sysUpTime)
-        walk('1.3.6.1.2.1.2.2.1.14'),           # 23: 介面接收錯誤封包數 (ifInErrors) - 查修線路關鍵
-        walk('1.3.6.1.2.1.2.2.1.20'),           # 24: 介面發送錯誤封包數 (ifOutErrors)
-        walk('1.3.6.1.2.1.105.1.3.1.1.2'),      # 25: PoE 埠口供電偵測狀態 (On/Off/Searching)
+        walk('1.3.6.1.2.1.1.3'),                # 22: sysUpTime
+        walk('1.3.6.1.2.1.2.2.1.14'),           # 23: ifInErrors
+        walk('1.3.6.1.2.1.2.2.1.20'),           # 24: ifOutErrors
+        walk('1.3.6.1.2.1.105.1.3.1.1.2'),      # 25: PoE Detection Status
         
-        # --- [區塊 F：資源監控 (CPU/RAM/溫度) (26 ~ 31)] ---
-        walk('1.3.6.1.4.1.1991.1.1.2.13.1.1.4'),# 26: Ruckus/Foundry 溫度感測器
-        walk('1.3.6.1.4.1.1991.1.1.2.2.1.1.2'), # 27: Ruckus/Foundry CPU 使用率
-        walk('1.3.6.1.4.1.1991.1.1.2.3.1.1.3'), # 28: Ruckus/Foundry 記憶體使用率
-        walk('1.3.6.1.4.1.9.9.13.1.3.1.3'),     # 29: Cisco 溫度感測器
-        walk('1.3.6.1.4.1.14988.1.1.3'),        # 30: MikroTik 硬體監控 (溫度/電壓)
-        walk('1.3.6.1.2.1.99.1.1.1'),           # 31: 通用實體感測器 MIB (支援多廠牌溫度/風扇)
+        walk('1.3.6.1.4.1.1991.1.1.2.13.1.1.4'),# 26: Ruckus Temp
+        walk('1.3.6.1.4.1.1991.1.1.2.2.1.1.2'), # 27: Ruckus CPU
+        walk('1.3.6.1.4.1.1991.1.1.2.3.1.1.3'), # 28: Ruckus MEM
+        walk('1.3.6.1.4.1.9.9.13.1.3.1.3'),     # 29: Cisco Temp
+        walk('1.3.6.1.4.1.14988.1.1.3'),        # 30: MikroTik Temp
+        walk('1.3.6.1.2.1.99.1.1.1'),           # 31: Entity Sensor MIB
         
-        # --- [區塊 G：進階診斷 - 網孔管理與光學模組 (32 ~ 34)] ---
-        walk('1.3.6.1.2.1.2.2.1.7'),            # 32: ifAdminStatus (管理員狀態 - 區分正常斷線與強制 Shutdown)
-        walk('1.3.6.1.4.1.1991.1.1.3.3.6.1.4'), # 33: Ruckus DOM Tx Power (光纖模組發送功率，單位 µW)
-        walk('1.3.6.1.4.1.1991.1.1.3.3.6.1.5'), # 34: Ruckus DOM Rx Power (光纖模組接收功率，單位 µW)
+        walk('1.3.6.1.2.1.2.2.1.7'),            # 32: ifAdminStatus
+        walk('1.3.6.1.4.1.1991.1.1.3.3.6.1.4'), # 33: Ruckus DOM Tx
+        walk('1.3.6.1.4.1.1991.1.1.3.3.6.1.5'), # 34: Ruckus DOM Rx
         
-        # --- [區塊 H：多廠牌光纖 DOM (舊 HP / 實體關聯 / 新 Aruba CX) (35 ~ 39)] ---
-        walk('1.3.6.1.4.1.11.2.14.11.5.1.122.1.1.2'), # 35: 舊版 HP/Aruba 專屬 Tx Power
-        walk('1.3.6.1.4.1.11.2.14.11.5.1.122.1.1.3'), # 36: 舊版 HP/Aruba 專屬 Rx Power
-        walk('1.3.6.1.2.1.47.1.1.1.1.7'),             # 37: ENTITY-MIB 實體設備名稱 (通用多廠牌 DOM 識別)
-        walk('1.3.6.1.4.1.47196.4.1.1.3.38.1.1.9'),   # 38: 新版 Aruba CX 專屬 Tx Power (千分之一 dBm 或 µW)
-        walk('1.3.6.1.4.1.47196.4.1.1.3.38.1.1.10'),  # 39: 新版 Aruba CX 專屬 Rx Power
+        walk('1.3.6.1.4.1.11.2.14.11.5.1.122.1.1.2'), # 35: HP/Aruba Tx
+        walk('1.3.6.1.4.1.11.2.14.11.5.1.122.1.1.3'), # 36: HP/Aruba Rx
+        walk('1.3.6.1.2.1.47.1.1.1.1.7'),             # 37: Entity Physical Name
+        walk('1.3.6.1.4.1.47196.4.1.1.3.38.1.1.9'),   # 38: Aruba CX Tx
+        walk('1.3.6.1.4.1.47196.4.1.1.3.38.1.1.10'),  # 39: Aruba CX Rx
         
-        # 💡 挖寶發現：Ruckus ICX 真實光學 OID (回傳格式如 "-001.8428 dBm Normal")
-        walk('1.3.6.1.4.1.1991.1.1.3.3.10.1.3'),      # 40: Ruckus ICX 實際 Tx 字串
-        walk('1.3.6.1.4.1.1991.1.1.3.3.10.1.4')       # 41: Ruckus ICX 實際 Rx 字串
+        walk('1.3.6.1.4.1.1991.1.1.3.3.10.1.3'),      # 40: Ruckus ICX Tx String
+        walk('1.3.6.1.4.1.1991.1.1.3.3.10.1.4'),      # 41: Ruckus ICX Rx String
+        
+        walk('1.3.6.1.4.1.12356.101.14.4.3.1.3'),     # 42: FG AP Name
+        walk('1.3.6.1.4.1.12356.101.14.4.4.1.3'),     # 43: FG AP IP
+        walk('1.3.6.1.4.1.12356.101.14.4.4.1.14'),    # 44: FG AP Version
+        walk('1.3.6.1.4.1.12356.101.14.4.4.1.17'),    # 45: FG AP Clients
+        walk('1.3.6.1.4.1.12356.101.14.4.4.1.7'),     # 46: FG AP State
+        
+        walk('1.3.6.1.4.1.12356.101.14.5.1.1'),       # 47: FG STA MAC
+        walk('1.3.6.1.4.1.12356.101.14.5.1.3'),       # 48: FG STA WTP
+        walk('1.3.6.1.4.1.12356.101.14.5.1.7'),       # 49: FG STA IP
+        walk('1.3.6.1.4.1.12356.101.14.5.1.12'),      # 50: FG STA RSSI
+        walk('1.3.6.1.4.1.12356.101.14.5.1.2'),       # 51: FG STA SSID
+        walk('1.3.6.1.4.1.12356.101.14.5.1.17'),      # 52: FG STA CH
+        walk('1.3.6.1.4.1.12356.101.14.5.1.15'),      # 53: FG STA Tx
+        walk('1.3.6.1.4.1.12356.101.14.5.1.16'),      # 54: FG STA Rx
+        
+        walk('1.3.6.1.4.1.12356.101.14.4.4.1.20'),    # 55: FG AP CPU
+        walk('1.3.6.1.4.1.12356.101.14.4.4.1.21'),    # 56: FG AP MEM
+        
+        walk('1.3.6.1.4.1.25461.2.1.2.3.3'),          # 57: PA Sessions
+        walk('1.3.6.1.4.1.25461.2.1.2.3.16.1.2'),     # 58: PA DP CPU
+        walk('1.3.6.1.2.1.25.3.3.1.2')                # 59: Standard Processor Load
     )
     
-    # 💡 由於陣列擴充到了 42 個元素(0~41)，SSH 備援資料現在會被塞到第 [42] 號索引
-    # 💡 核心修正：加入記憶快取保護防線！
+    res_list = list(res)
+    if len(res_list) >= 33 and not res_list[4]:
+        fake_ifnames = {}
+        known_indices = set()
+        if isinstance(res_list[6], dict): known_indices.update(res_list[6].keys())
+        if isinstance(res_list[7], dict): known_indices.update(res_list[7].keys())
+        if isinstance(res_list[32], dict): known_indices.update(res_list[32].keys())
+
+        for p_idx in known_indices:
+            if str(p_idx).isdigit():
+                fake_ifnames[str(p_idx)] = f"port{p_idx}"
+        res_list[4] = fake_ifnames
+
     if ("CX8100" in sys_descr or "AOS-CX" in sys_descr):
         if ssh_user and ssh_pass:
-            # A. 使用者有提供帳密（點擊獨立掃描），呼叫實體爬蟲抓取最新資料
             loop = asyncio.get_event_loop()
             ssh_data = await loop.run_in_executor(None, _sync_aruba_ssh, ip, ssh_user, ssh_pass)
-            
             if ssh_data:
-                # 抓取成功，立刻寫入全域記憶庫中
                 ARUBA_SSH_CACHE[ip] = ssh_data
-            res.append(ssh_data)
+            res_list.append(ssh_data)
         else:
-            # B. 背景輪詢（沒給帳密），自動從快取庫取出上一次成功抓到的資料送回前端，拒絕填空！
             cached_data = ARUBA_SSH_CACHE.get(ip, {})
-            if DEBUG_SSH_LOG and cached_data:
-                print(f"📦 [快取機制] 偵測到背景輪詢，已自動為 Aruba ({ip}) 指派歷史光纖快取資料。")
-            res.append(cached_data)
+            res_list.append(cached_data)
     else:
-        # 非 Aruba 設備，直接補空字典
-        res.append({})
+        res_list.append({})
 
-    # 💡 安全優化：將描述全部轉小寫比對，徹底消除大小寫不對稱的黑箱陷阱
-    # 💡 Palo Alto 專屬 SSH 攔截防線
     sys_descr_lower = sys_descr.lower() if sys_descr else ""
-    
     if "palo alto" in sys_descr_lower or "pan-os" in sys_descr_lower or "pa-" in sys_descr_lower or (ssh_pass and sys_descr_lower == "無回應"):
-        # 💡 已經改回走 SSH 路線，所以需要驗證帳號和密碼
         if ssh_user and ssh_pass:
             loop = asyncio.get_event_loop()
-            # 呼叫剛寫好的 SSH 引擎
             pa_data = await loop.run_in_executor(None, _sync_palo_alto_ssh, ip, ssh_user, ssh_pass)
             if pa_data:
                 PALO_ALTO_CACHE[ip] = pa_data
-            res.append(pa_data)
+            res_list.append(pa_data)
         else:
-            # 背景輪詢沒給帳密時，沿用快取記憶
-            res.append(PALO_ALTO_CACHE.get(ip, {}))
+            res_list.append(PALO_ALTO_CACHE.get(ip, {}))
+    else:
+        res_list.append({})
         
-    return res
+    return res_list
 
 # ==========================================
-# ⚡ 3. 核心背景引擎守護行程 (狀態異動感知進階版)
+# ⚡ 3. 核心背景引擎守護行程
 # ==========================================
 def traffic_polling_worker():
-    # 💡 確保匯入 write_audit_log 寫入引擎
     from database import get_db, DB_LOCKS, write_audit_log 
+    import datetime
     
-    log_info("📊 [多核心並行輪詢] 效能與流量多進程並行輪詢已啟動！")
+    log_info("📊 [輪詢守護引擎] 雙判斷避讓與自動接管機制已啟動！")
     time.sleep(3)
     
-    # 動態自動補齊資料庫的告警狀態欄位 (防止舊 config.db 報錯)
     try:
         with DB_LOCKS['config']:
             conn = get_db('config')
@@ -464,218 +523,263 @@ def traffic_polling_worker():
     except: pass
 
     last_poll_time = 0
-    
-    # 🌟 復原：讓 32 核心進程池「常駐」在記憶體，省下每次開機的 7 秒成本！
-    executor = ProcessPoolExecutor(max_workers=16, initializer=_init_child_process)
-    
-    # 🌟 換成多執行緒池！因為執行緒共享主記憶體，不需要再用 initializer 去攔截中斷訊號了
-    # executor = ThreadPoolExecutor(max_workers=16)
-    
     device_alert_debounce = {}  
     cpu_alert_debounce = {}     
 
     while True:
         try:
-            conn = get_db('config')
-            row = conn.execute("SELECT value FROM system_settings WHERE key='polling_interval'").fetchone()
-            conn.close()
+            with DB_LOCKS['config']:
+                conn = get_db('config')
+                hq_row = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+                row = conn.execute("SELECT value FROM system_settings WHERE key='polling_interval'").fetchone()
+                go_hb_row = conn.execute("SELECT value FROM system_settings WHERE key='go_poller_last_heartbeat'").fetchone()
+                conn.close()
+
+            if hq_row and hq_row['value'] == 'hq':
+                time.sleep(60)
+                continue
+
+            go_is_active = False
+            if go_hb_row and go_hb_row['value']:
+                try:
+                    hb_time = datetime.datetime.strptime(go_hb_row['value'], "%Y-%m-%d %H:%M:%S")
+                    diff_seconds = (datetime.datetime.now() - hb_time).total_seconds()
+                    if diff_seconds < 90:
+                        go_is_active = True
+                except Exception:
+                    pass
+
+            if go_is_active:
+                time.sleep(10)
+                continue
+
             interval_mins = safe_int(row['value'], 3) if row else 3
 
             if time.time() - last_poll_time >= interval_mins * 60:
                 last_poll_time = time.time()
                 cycle_start_time = time.time()
 
+                log_info("⚠️ [系統告示] 未偵測到 Go 引擎心跳，Python 自動無縫接管全網 SNMP 輪詢...")
+
                 all_devs = read_db_devices()
                 active_devs = [d for d in all_devs if d.get('visible', 1) == 1]
                 now_str = time.strftime('%Y-%m-%d %H:%M:%S')
 
-                futures = {}
-                
-                # 🌟 關鍵：每次輪詢都在這裡建立一個全新的 16 核心拋棄式進程池
-                #with ProcessPoolExecutor(max_workers=16, initializer=_init_child_process) as executor:
-                # 🌟 關鍵修改：直接換成 try: (下方的 for 迴圈與所有邏輯，縮排完全不用動！)
-                try:
-                    # ⬇️ ============ 以下所有程式碼都往右縮排了一格 (4 個空白) ============ ⬇️
-                    for d in active_devs:
-                        future = executor.submit(
-                            _process_snmp_single_device, 
-                            d['ip'], 
-                            d['community'], 
-                            d.get('brand', 'Unknown'), 
-                            safe_int(d.get('is_poe', 0)), 
-                            safe_int(d.get('has_sensor', 0)),
-                            GLOBAL_DEBUG_MODE
-                        )
-                        futures[future] = d
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
 
-                    traffic_records, dev_table_updates, metrics_history_records, status_updates = [], [], [], []
-                    success_count = 0
+                async def run_batch_polling():
+                    snmpEngine = AsyncSnmpEngine()
+                    sem = asyncio.Semaphore(25)
 
-                    for future in futures:
-                        res = future.result()
-                        dev = futures[future]
-                        ip = res["ip"]
-                        name = dev.get('name') or ip
-                        old_status = dev.get('status', 'up')
+                    async def poll_single(d):
+                        async with sem:
+                            return await _async_process_snmp_single_device(
+                                snmpEngine,
+                                d['ip'], 
+                                d['community'], 
+                                d.get('brand', 'Unknown'), 
+                                safe_int(d.get('is_poe', 0)), 
+                                safe_int(d.get('has_sensor', 0)),
+                                d.get('snmp_version', 'v2c'),
+                                GLOBAL_DEBUG_MODE
+                            )
+
+                    results = await asyncio.gather(*(poll_single(d) for d in active_devs), return_exceptions=True)
+                    snmpEngine.close_dispatcher()
+                    return results
+
+                poll_results = loop.run_until_complete(run_batch_polling())
+                loop.close()
+
+                traffic_records, dev_table_updates, metrics_history_records, status_updates = [], [], [], []
+                success_count = 0
+
+                for res in poll_results:
+                    if isinstance(res, Exception) or not isinstance(res, dict):
+                        continue
+                    
+                    ip = res["ip"]
+                    dev = next((d for d in active_devs if d['ip'] == ip), {})
+                    name = dev.get('name') or ip
+                    old_status = dev.get('status', 'up')
+                    curr_alert_count = safe_int(dev.get('alert_count'), 0)
+                    last_alert_time_raw = dev.get('last_alert_time') or ""
+
+                    if res.get("success"):
+                        success_count += 1
+                        device_alert_debounce[ip] = 0
                         
-                        curr_alert_count = safe_int(dev.get('alert_count'), 0)
-                        last_alert_time_raw = dev.get('last_alert_time') or ""
-
-                        if res["success"]:
-                            success_count += 1
-                            device_alert_debounce[ip] = 0
-                            
-                            raw_str = dev.get('snmp_raw') or "{}"
-                            try:
-                                import json
-                                raw_array = json.loads(raw_str)
-                                if isinstance(raw_array, list):
-                                    while len(raw_array) < 45:
-                                        raw_array.append({})
-                                    if res["admin_status"]: raw_array[32] = res["admin_status"]
-                                    if res["oper_status"]: raw_array[44] = res["oper_status"]
-                                    raw_str = json.dumps(raw_array, ensure_ascii=False)
-                            except: pass
-                            
-                            if old_status != 'up' or curr_alert_count > 0:
-                                send_ntfy_alert("設備恢復連線", f"✅ 網路設備 {name} ({ip}) 已經重新恢復連線與 SNMP 回應！", "default", "white_check_mark,green_circle")
-                                status_updates.append(('up', 0, '', ip))
-                                write_audit_log("SystemEngine", "設備狀態異動", f"{name} ({ip})", "SUCCESS", f"【設備恢復】設備已重新連線並恢復 SNMP 回應 (UP)。")
-
-                            if res["cpu"] > 90.0:
-                                cpu_alert_debounce[ip] = cpu_alert_debounce.get(ip, 0) + 1
-                                if cpu_alert_debounce[ip] == 2: 
-                                    send_ntfy_alert("設備高負載警告", f"⚠️ 網路設備 {name} ({ip}) 的 CPU 負載已達 {res['cpu']} %！", "high", "warning,chart_with_upwards_trend")
-                            else:
-                                cpu_alert_debounce[ip] = 0
-
-                            for p_idx, in_v in res["in"].items():
-                                traffic_records.append((ip, p_idx, safe_int(in_v, 0), safe_int(res["out"].get(p_idx, 0), 0), now_str))
-                            
-                            dev_table_updates.append((res["cpu"], res["mem"], raw_str, ip))
-                            metrics_history_records.append((ip, res["cpu"], res["mem"], res.get("poe_w", 0.0), res.get("temp_c", 0.0), now_str))
-
-                        else:
-                            new_status = 'warning' if res["ping_ok"] else 'down'
-                            device_alert_debounce[ip] = device_alert_debounce.get(ip, 0) + 1
-                            
-                            if device_alert_debounce[ip] >= 2:
-                                if old_status != new_status or curr_alert_count == 0:
-                                    curr_alert_count = 1
-                                    if new_status == 'down':
-                                        send_ntfy_alert(f"🚨 設備斷線警報 (第1次)", f"網路設備 {name} ({ip}) 失去回應，疑似斷線！", "high", "skull,red_circle")
-                                        write_audit_log("SystemEngine", "設備狀態異動", f"{name} ({ip})", "FAILED", f"【設備斷線】連續兩次失去 ICMP/SNMP 回應，判定為徹底斷線 (DOWN)。")
-                                    else:
-                                        send_ntfy_alert(f"⚠️ SNMP 服務異常 (第1次)", f"設備 {name} ({ip}) Ping 會通但 SNMP 拒絕回應！", "default", "warning,orange_circle")
-                                        write_audit_log("SystemEngine", "設備狀態異動", f"{name} ({ip})", "WARNING", f"【服務異常】Ping 測試正常，但連續兩次 SNMP 拒絕回應 (WARNING)。")
-                                        
-                                    status_updates.append((new_status, curr_alert_count, now_str, ip))
+                        raw_str = dev.get('snmp_raw') or "{}"
+                        try:
+                            import json
+                            raw_array = json.loads(raw_str)
+                            if isinstance(raw_array, list):
+                                while len(raw_array) < 70:
+                                    raw_array.append({})
+                                if res["admin_status"]: raw_array[32] = res["admin_status"]
+                                if res["oper_status"]: raw_array[62] = res["oper_status"]
                                 
+                                b_low = str(dev.get('brand', '')).lower()
+                                is_palo_alto_dev = 'palo' in b_low or 'pan' in b_low or 'pa-' in b_low
+                                
+                                if is_palo_alto_dev:
+                                    s_val = res.get("session_util", 0.0)
+                                    d_cpu = res.get("cpu", 0.0) 
+                                    m_cpu = round(max(0, d_cpu * 0.8), 1)
+                                    raw_array[57] = {"0": str(int(s_val))}
+                                    raw_array[58] = {"1": str(int(m_cpu)), "2": str(int(d_cpu))}
+                                    
+                                raw_str = json.dumps(raw_array, ensure_ascii=False)
+                        except: pass
+                        
+                        if old_status != 'up' or curr_alert_count > 0:
+                            send_ntfy_alert("設備恢復連線", f"✅ 網路設備 {name} ({ip}) 已經重新恢復連線與 SNMP 回應！", "default", "white_check_mark,green_circle")
+                            status_updates.append(('up', 0, '', ip))
+                            write_audit_log("SystemEngine", "設備狀態異動", f"{name} ({ip})", "SUCCESS", f"【設備恢復】設備已重新連線與恢復 SNMP 回應 (UP)。")
+
+                        if res["cpu"] > 90.0:
+                            cpu_alert_debounce[ip] = cpu_alert_debounce.get(ip, 0) + 1
+                            if cpu_alert_debounce[ip] == 2: 
+                                send_ntfy_alert("設備高負載警告", f"⚠️ 網路設備 {name} ({ip}) 的 CPU 負載已達 {res['cpu']} %！", "high", "warning,chart_with_upwards_trend")
+                        else:
+                            cpu_alert_debounce[ip] = 0
+
+                        for p_idx, in_v in res["in"].items():
+                            traffic_records.append((ip, p_idx, safe_int(in_v, 0), safe_int(res["out"].get(p_idx, 0), 0), now_str))
+                        
+                        dev_table_updates.append((res["cpu"], res["mem"], raw_str, res["latency_ms"], ip))
+                        metrics_history_records.append((ip, res["cpu"], res["mem"], res.get("poe_w", 0.0), res.get("temp_c", 0.0), res.get("session_util", 0.0), res["latency_ms"], now_str))
+
+                    else:
+                        new_status = 'warning' if res.get("ping_ok") else 'down'
+                        device_alert_debounce[ip] = device_alert_debounce.get(ip, 0) + 1
+                        
+                        if device_alert_debounce[ip] >= 2:
+                            if old_status != new_status or curr_alert_count == 0:
+                                curr_alert_count = 1
+                                if new_status == 'down':
+                                    send_ntfy_alert(f"🚨 設備斷線警報 (第1次)", f"網路設備 {name} ({ip}) 失去回應，疑似斷線！", "high", "skull,red_circle")
+                                    write_audit_log("SystemEngine", "設備狀態異動", f"{name} ({ip})", "FAILED", f"【設備斷線】連續兩次失去 ICMP/SNMP 回應，判定為徹底斷線 (DOWN)。")
                                 else:
-                                    time_passed = 999999
-                                    if last_alert_time_raw:
-                                        try:
-                                            t_parsed = time.strptime(last_alert_time_raw, '%Y-%m-%d %H:%M:%S')
-                                            time_passed = time.time() - time.mktime(t_parsed)
-                                        except: pass
+                                    send_ntfy_alert(f"⚠️ SNMP 服務異常 (第1次)", f"設備 {name} ({ip}) Ping 會通但 SNMP 拒絕回應！", "default", "warning,orange_circle")
+                                    write_audit_log("SystemEngine", "設備狀態異動", f"{name} ({ip})", "WARNING", f"【服務異常】Ping 測試正常，但連續兩次 SNMP 拒絕回應 (WARNING)。")
                                     
-                                    if time_passed >= 300 and curr_alert_count < 3:
-                                        curr_alert_count += 1
-                                        if new_status == 'down':
-                                            send_ntfy_alert(f"🚨 設備重復斷線警報 (第{curr_alert_count}次)", f"持續斷線中：網路設備 {name} ({ip}) 依然無回應！", "high", "skull,red_circle")
-                                        else:
-                                            send_ntfy_alert(f"⚠️ SNMP 重復異常 (第{curr_alert_count}次)", f"持續異常中：設備 {name} ({ip}) SNMP 依舊無回應！", "default", "warning,orange_circle")
-                                        status_updates.append((new_status, curr_alert_count, now_str, ip))
-                                        device_alert_debounce[ip] = 0
-                                    
-                                    elif curr_alert_count >= 3:
-                                        status_updates.append((new_status, curr_alert_count, last_alert_time_raw, ip))
-                    # ⬆️ ============ 到這行結束，準備退出 with 區塊 ============ ⬆️
-                
-                # 🌟 加上這段專屬的「急救包」
-                except BrokenProcessPool:
-                    log_info("⚠️ [多核心並行輪詢] 偵測到子進程意外崩潰！正在自動重建乾淨的進程池...")
-                    executor.shutdown(wait=False)
-                    executor = ProcessPoolExecutor(max_workers=16, initializer=_init_child_process)
-                    continue  # 跳過本次資料庫寫入，直接進入下一輪
-                
-                # 🌟 當程式執行到這裡時，進程池會被「自動強制摧毀並回收所有記憶體與殭屍進程」
-                # 這裡退回原本的縮排層級，開始將整理好的結果寫入資料庫
+                                status_updates.append((new_status, curr_alert_count, now_str, ip))
+                            else:
+                                time_passed = 999999
+                                if last_alert_time_raw:
+                                    try:
+                                        t_parsed = time.strptime(last_alert_time_raw, '%Y-%m-%d %H:%M:%S')
+                                        time_passed = time.time() - time.mktime(t_parsed)
+                                    except: pass
+                                
+                                if time_passed >= 300 and curr_alert_count < 3:
+                                    curr_alert_count += 1
+                                    if new_status == 'down':
+                                        send_ntfy_alert(f"🚨 設備重復斷線警報 (第{curr_alert_count}次)", f"持續斷線中：網路設備 {name} ({ip}) 依然無回應！", "high", "skull,red_circle")
+                                    else:
+                                        send_ntfy_alert(f"⚠️ SNMP 重復異常 (第{curr_alert_count}次)", f"持續異常中：設備 {name} ({ip}) SNMP 依舊無回應！", "default", "warning,orange_circle")
+                                    status_updates.append((new_status, curr_alert_count, now_str, ip))
+                                    device_alert_debounce[ip] = 0
+                                elif curr_alert_count >= 3:
+                                    status_updates.append((new_status, curr_alert_count, last_alert_time_raw, ip))
+
                 with DB_LOCKS['hot']:
                     conn_hot = get_db('hot')
                     if traffic_records: conn_hot.executemany("INSERT INTO traffic_history (ip, port_idx, in_bytes, out_bytes, timestamp) VALUES (?, ?, ?, ?, ?)", traffic_records)
-                    if metrics_history_records: conn_hot.executemany("INSERT INTO metrics_history (ip, cpu, memory, poe_w, temp_c, timestamp) VALUES (?, ?, ?, ?, ?, ?)", metrics_history_records)
+                    if metrics_history_records: conn_hot.executemany("INSERT INTO metrics_history (ip, cpu, memory, poe_w, temp_c, session_util, latency_ms, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", metrics_history_records)
                     conn_hot.commit(); conn_hot.close()
 
                 if dev_table_updates or status_updates:
                     with DB_LOCKS['config']:
-                        # 💡 修正：宣告加入 conn_conf，完美消滅 NameError 錯誤！
-                        conn = conf = conn_conf = get_db('config')
+                        conn_conf = get_db('config')
                         if dev_table_updates:
-                            conn_conf.executemany("UPDATE devices SET cpu_load=?, mem_load=?, snmp_raw=? WHERE ip=?", dev_table_updates)
+                            conn_conf.executemany("UPDATE devices SET cpu_load=?, mem_load=?, snmp_raw=?, latency_ms=? WHERE ip=?", dev_table_updates)
                         if status_updates:
                             conn_conf.executemany("UPDATE devices SET status=?, alert_count=?, last_alert_time=? WHERE ip=?", status_updates)
                         conn_conf.commit(); conn_conf.close()
                     try:
-                        from database import update_device_metrics_cache, reload_device_cache
+                        from database import update_device_metrics_cache
                         if dev_table_updates: 
-                            # 💡 智慧防護：從 4 欄位中精準抽取 (CPU, RAM, IP) 變成原本預期的 3 欄位格式丟給快取部隊
-                            cache_updates = [(x[0], x[1], x[3]) for x in dev_table_updates]
+                            cache_updates = [(x[0], x[1], x[3], x[4]) for x in dev_table_updates]
                             update_device_metrics_cache(cache_updates)
-                        if status_updates: reload_device_cache()
                     except ImportError: pass
-
-                log_info(f"📊 [多核心並行輪詢] 採集完畢 - 輪詢 {len(active_devs)} 台，成功 {success_count} 台，全網耗時 {round(time.time() - cycle_start_time, 2)} 秒。")
-        except Exception as e: log_info(f"⚠️ [多核心並行輪詢] 發生錯誤: {e}")
+                    
+                log_info(f"📊 [純非同步輪詢] 採集完畢 - 輪詢 {len(active_devs)} 台，成功 {success_count} 台，全網耗時 {round(time.time() - cycle_start_time, 2)} 秒。")
+        except Exception as e: log_info(f"⚠️ [純非同步輪詢] 發生錯誤: {e}")
         time.sleep(5)
-
 
 # ==========================================
 # 🧹 4. 資料生命週期與企業級降採樣引擎
 # ==========================================
 def data_retention_worker():
-    import sqlite3, time
-    from database import get_db, DB_LOCKS, DB_WARM, DB_COLD
+    import time
+    from database import get_db, DB_WARM, DB_COLD, DB_LOCKS
     from utils import log_info
+
+    time.sleep(300)
     
-    time.sleep(300) # 剛開機先延遲 5 分鐘
-    
+    def chunked_delete(conn, table, condition, chunk_size=2000):
+        while True:
+            cur = conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {condition} LIMIT {chunk_size})")
+            deleted = cur.rowcount
+            conn.commit()
+            if deleted < chunk_size:
+                break
+            time.sleep(0.2) 
+
     while True:
         try:
+            with DB_LOCKS['config']:
+                conn_cfg = get_db('config')
+                hq_row = conn_cfg.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+                conn_cfg.close()
+            
+            if hq_row and hq_row['value'] == 'hq':
+                time.sleep(3600)
+                continue
+
             if time.localtime().tm_hour == 2:
-                log_info("🧹 [資料清洗] 啟動降採樣引擎：熱庫(1分) ➡️ 溫庫(10分) ➡️ 冷庫(1小時)...")
+                log_info("🧹 [資料清洗] 啟動企業級無鎖降採樣引擎...")
                 
-                with DB_LOCKS['hot']:
-                    conn = get_db('hot')
-                    conn.execute(f"ATTACH DATABASE '{DB_WARM}' AS warm_db")
-                    conn.execute(f"ATTACH DATABASE '{DB_COLD}' AS cold_db")
+                with DB_LOCKS['warm']:
+                    conn_warm = get_db('warm')
+                    conn_warm.execute(f"ATTACH DATABASE '{DB_COLD}' AS cold_db")
                     
-                    # 🗑️ A：【冷庫銷毀】清除超過 3 年 (1095 天) 的極舊資料
-                    conn.execute("DELETE FROM cold_db.traffic_history WHERE timestamp < datetime('now', '-1095 days', 'localtime')")
-                    conn.execute("DELETE FROM cold_db.metrics_history WHERE timestamp < datetime('now', '-1095 days', 'localtime')")
+                    chunked_delete(conn_warm, "cold_db.traffic_history", "timestamp < datetime('now', '-1095 days', 'localtime')")
+                    chunked_delete(conn_warm, "cold_db.metrics_history", "timestamp < datetime('now', '-1095 days', 'localtime')")
                     
-                    # ❄️ B：【溫 ➡️ 冷】溫庫資料 (>180天) 降採樣為「1小時 1筆」寫入冷庫
-                    conn.execute("""
+                    conn_warm.execute("""
                         INSERT INTO cold_db.traffic_history (ip, port_idx, timestamp, avg_in_bps, max_in_bps, avg_out_bps, max_out_bps)
                         SELECT ip, port_idx, strftime('%Y-%m-%d %H:00:00', timestamp) AS hour_ts,
                                AVG(avg_in_bps), MAX(max_in_bps), AVG(avg_out_bps), MAX(max_out_bps)
-                        FROM warm_db.traffic_history
+                        FROM traffic_history
                         WHERE timestamp < datetime('now', '-180 days', 'localtime')
                         GROUP BY ip, port_idx, hour_ts
                     """)
-                    conn.execute("""
-                        INSERT INTO cold_db.metrics_history (ip, timestamp, cpu, memory, temp_c, poe_w)
+                    
+                    conn_warm.execute("""
+                        INSERT INTO cold_db.metrics_history (ip, timestamp, cpu, memory, temp_c, poe_w, session_util, latency_ms)
                         SELECT ip, strftime('%Y-%m-%d %H:00:00', timestamp) AS hour_ts,
-                               AVG(cpu), AVG(memory), AVG(temp_c), AVG(poe_w)
-                        FROM warm_db.metrics_history
+                               AVG(cpu), AVG(memory), AVG(temp_c), AVG(poe_w), AVG(session_util), AVG(latency_ms)
+                        FROM metrics_history
                         WHERE timestamp < datetime('now', '-180 days', 'localtime')
                         GROUP BY ip, hour_ts
                     """)
-                    conn.execute("DELETE FROM warm_db.traffic_history WHERE timestamp < datetime('now', '-180 days', 'localtime')")
-                    conn.execute("DELETE FROM warm_db.metrics_history WHERE timestamp < datetime('now', '-180 days', 'localtime')")
+                    conn_warm.commit()
                     
-                    # ⛅ C：【熱 ➡️ 溫】熱庫資料 (>30天) 計算 BPS 並降採樣為「10分鐘 1筆」
-                    conn.execute("""
+                    chunked_delete(conn_warm, "traffic_history", "timestamp < datetime('now', '-180 days', 'localtime')")
+                    chunked_delete(conn_warm, "metrics_history", "timestamp < datetime('now', '-180 days', 'localtime')")
+                    
+                    conn_warm.execute("DETACH DATABASE cold_db")
+                    conn_warm.close()
+
+                with DB_LOCKS['hot']:
+                    conn_hot = get_db('hot')
+                    conn_hot.execute(f"ATTACH DATABASE '{DB_WARM}' AS warm_db")
+                    
+                    conn_hot.execute("""
                         WITH diff_calc AS (
                             SELECT ip, port_idx, timestamp,
                                    in_bytes - LAG(in_bytes) OVER (PARTITION BY ip, port_idx ORDER BY timestamp) AS i_diff,
@@ -696,60 +800,57 @@ def data_retention_worker():
                         WHERE timestamp < datetime('now', '-30 days', 'localtime')
                         GROUP BY ip, port_idx, min10_ts
                     """)
-                    conn.execute("""
-                        INSERT INTO warm_db.metrics_history (ip, timestamp, cpu, memory, temp_c, poe_w)
+                    
+                    conn_hot.execute("""
+                        INSERT INTO warm_db.metrics_history (ip, timestamp, cpu, memory, temp_c, poe_w, session_util, latency_ms)
                         SELECT ip, datetime((strftime('%s', timestamp) / 600) * 600, 'unixepoch', 'localtime') AS min10_ts,
-                               AVG(cpu), AVG(memory), AVG(temp_c), AVG(poe_w)
+                               AVG(cpu), AVG(memory), AVG(temp_c), AVG(poe_w), AVG(session_util), AVG(latency_ms)
                         FROM metrics_history
                         WHERE timestamp < datetime('now', '-30 days', 'localtime')
                         GROUP BY ip, min10_ts
                     """)
-                    conn.execute("DELETE FROM traffic_history WHERE timestamp < datetime('now', '-30 days', 'localtime')")
-                    conn.execute("DELETE FROM metrics_history WHERE timestamp < datetime('now', '-30 days', 'localtime')")
+                    conn_hot.commit()
                     
-                    conn.commit()
-                    conn.execute("DETACH DATABASE warm_db")
-                    conn.execute("DETACH DATABASE cold_db")
+                    chunked_delete(conn_hot, "traffic_history", "timestamp < datetime('now', '-30 days', 'localtime')", chunk_size=1000)
+                    chunked_delete(conn_hot, "metrics_history", "timestamp < datetime('now', '-30 days', 'localtime')", chunk_size=1000)
                     
-                log_info("✅ [資料清洗] 企業級降採樣完工！空間已完美釋放。")
+                    conn_hot.execute("DETACH DATABASE warm_db")
+                    conn_hot.close()
+                    
+                log_info("✅ [資料清洗] 企業級無鎖降採樣完工！空間已完美釋放。")
                 time.sleep(3600) 
+                
         except Exception as e:
-            from utils import log_info
             log_info(f"⚠️ [資料清洗] 降採樣引擎發生異常: {e}")
             time.sleep(3600)
-        time.sleep(3600)
 
 # ==========================================
-# 🌐 5. 拓樸深度掃描
+# 🌐 5. 拓樸深度掃描 (完全還原最原始精準算路版)
 # ==========================================
 def topology_scan_worker():
-    """背景自動排程拓樸掃描守護行程"""
     from database import get_db, DB_LOCKS
     from utils import log_info
     import time
     
-    # 💡 更新日誌：明確告知系統不會立刻掃描
     log_info("🔄 [自動拓樸] 拓樸背景掃描已啟動，將依照系統設定之間隔時間等待首次掃描。")
-    
-    # 🌟 關鍵修改 1：以「伺服器啟動當下」作為計時起點
     last_scan_time = time.time()
     
     while True:
         try:
-            # 讀取排程間隔設定
             with DB_LOCKS['config']:
                 conn = get_db('config')
+                hq_row = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
                 row = conn.execute("SELECT value FROM system_settings WHERE key='topo_scan_interval'").fetchone()
                 conn.close()
             
-            # 預設 60 分鐘，如果是 0 就代表使用者手動關閉排程
+            if hq_row and hq_row['value'] == 'hq':
+                time.sleep(60)
+                continue
+            
             interval_mins = int(row['value']) if row and row['value'] else 60
             
-            # 🌟 關鍵修改 2：只有當「經過的時間」達到「系統設定的時間」，才允許發動掃描
             if interval_mins > 0 and (time.time() - last_scan_time >= interval_mins * 60):
-                # 執行前，重置計時器
                 last_scan_time = time.time()
-                
                 log_info("🔍 [自動拓樸] 時間排程已觸發，開始執行背景全網深度掃描...")
                 
                 from snmp_core import discover_topology, read_db_devices
@@ -758,8 +859,6 @@ def topology_scan_worker():
                 
                 log_info(f"✅ [自動拓樸] 全網深度掃描完成。下次掃描將在 {interval_mins} 分鐘後執行。")
             
-            # 🌟 關鍵修改 3：廢除掃描後進入「長睡」的機制，改為「每 60 秒醒來檢查一次」
-            # 這樣不但消滅了 time.sleep(0) 的 CPU 100% 陷阱，還能讓您在網頁端修改設定時，最慢 1 分鐘就生效！
             time.sleep(60)
                 
         except Exception as e:
@@ -782,7 +881,7 @@ def discover_topology(devices):
             sysname_to_ip_map[dev.get('name', '').split('.')[0].strip().lower()] = ip
 
     async def fetch_all_topo_data(devs):
-        sem = asyncio.Semaphore(20) 
+        sem = asyncio.Semaphore(15) 
         async def fetch(d):
             async with sem:
                 ip = d['ip']
@@ -790,62 +889,55 @@ def discover_topology(devices):
                 
                 if safe_int(d.get('level')) >= 5:
                     debug_print(f"⏭️ [拓樸掃描] 略過終端設備 IP: {ip}")
-                    return d, ("邊緣/終端設備 (系統依設定略過主動掃描)", d.get('name',''), ""), tuple({} for _ in range(44))
+                    return d, ("邊緣/終端設備 (系統依設定略過主動掃描)", d.get('name',''), ""), [{} for _ in range(44)]
                 
-                # 🌟 包裝成獨立協程，準備掛上超時核彈
-                async def do_fetch():
-                        engine = AsyncSnmpEngine()
-                        info = await async_get_device_info(engine, ip, d['community'])
-                        
-                        # 💡 智慧識別：如果資料庫裡記載它是 Palo Alto 家族，不論 SNMP 有無回應，都必須放行！
-                        brand_str = str(d.get('brand', '')).lower()
-                        model_str = str(d.get('model', '')).lower()
-                        is_palo_alto = "palo" in brand_str or "pan" in brand_str or "pa-" in model_str
-                        
-                        # 如果不是波羅阿圖，且 SNMP 沒回應，才執行原本的快速止損
-                        if info[0] == "無回應" and not is_palo_alto:
-                            engine.close_dispatcher()
-                            return d, info, tuple({} for _ in range(44))
-                        
-                        # 💡 防呆防線：萬一 SNMP 沒回應，我們幫它人工合成一個描述，確保能命中後方的採集引擎
-                        passed_sys_descr = info[0] if info[0] != "無回應" else "Palo Alto Networks Firewall (SNMP Backup Mode)"
-                        
-                        # 完美傳遞金鑰與描述
-                        full = await async_get_device_full_data(
-                            engine, ip, d['community'], passed_sys_descr,
-                            ssh_user=d.get('ssh_user', ''),
-                            ssh_pass=d.get('ssh_pass', '')
-                        )
-                        engine.close_dispatcher()
-                        
-                        passed_info = info if info[0] != "無回應" else (passed_sys_descr, d.get('name', 'SLPS'), "")
-                        return d, passed_info, full
-
+                engine = AsyncSnmpEngine()
                 try:
-                    result = await asyncio.wait_for(do_fetch(), timeout=120.0)
-                    debug_print(f"✅ [拓樸掃描] 成功完成 IP: {ip}")
-                    return result
-                except asyncio.TimeoutError:
-                    debug_print(f"❌ [拓樸掃描] 嚴重超時卡死！強制中斷 IP: {ip}")
-                    return d, ("無回應", "掃描超時", ""), tuple({} for _ in range(44))
+                    snmp_ver = d.get('snmp_version', 'v2c')
+                    info = await async_get_device_info(engine, ip, d['community'], snmp_ver)
+                    
+                    brand_str = str(d.get('brand', '')).lower()
+                    model_str = str(d.get('model', '')).lower()
+                    is_palo_alto = "palo" in brand_str or "pan" in brand_str or "pa-" in model_str
+                    
+                    if info[0] == "無回應" and not is_palo_alto:
+                        return d, info, [{} for _ in range(44)]
+                    
+                    passed_sys_descr = info[0] if info[0] != "無回應" else "Palo Alto Networks Firewall (SNMP Backup Mode)"
+                    
+                    full = await async_get_device_full_data(
+                        engine, ip, d['community'], passed_sys_descr,
+                        ssh_user=d.get('ssh_user', ''),
+                        ssh_pass=d.get('ssh_pass', ''),
+                        snmp_version=snmp_ver
+                    )
+                    
+                    passed_info = info if info[0] != "無回應" else (passed_sys_descr, d.get('name', 'SLPS'), "")
+                    return d, passed_info, full
                 except Exception as e:
                     debug_print(f"⚠️ [拓樸掃描] 發生異常 IP: {ip} - 錯誤: {e}")
-                    return d, ("無回應", "掃描異常", ""), tuple({} for _ in range(44))
+                    return d, ("無回應", "掃描異常", ""), [{} for _ in range(44)]
+                finally:
+                    engine.close_dispatcher()
 
         return await asyncio.gather(*(fetch(d) for d in devs))
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    fetch_results = loop.run_until_complete(fetch_all_topo_data(active_devices))
-    loop.close()
+    try:
+        fetch_results = loop.run_until_complete(fetch_all_topo_data(active_devices))
+    finally:
+        loop.close()
 
+    # 1. 建立 MAC 快取對照表 (完全還原 100% 原始正確寫法)
     for dev, (sys_descr, sys_name, sys_location), full_data in fetch_results:
         ip = dev['ip']; lvl = safe_int(dev.get('level'))
         if lvl >= 5:
             dev['sys_descr'] = sys_descr
             continue
+        
+        full_data = list(full_data)
             
-        # 💡 第二關解鎖：如果是波羅阿圖，就算 SNMP 判定無回應，我們也要強制放行，把剛剛 API 刮回來的光纖大禮包塞進快取！
         brand_lower = str(dev.get('brand', '')).lower()
         is_pa = "palo" in brand_lower or "pan" in brand_lower or "palo" in sys_descr.lower()
         
@@ -894,21 +986,40 @@ def discover_topology(devices):
                     if any(str(k).endswith('.10') or str(k) == '10' for k in full_data[30].keys()): has_sensor = 1
             dev['has_sensor'] = has_sensor
             
+            if full_data and len(full_data) >= 33:
+                if not full_data[4]: 
+                    fake_ifnames = {}
+                    known_indices = set()
+                    
+                    if isinstance(full_data[6], dict): known_indices.update(full_data[6].keys())
+                    if isinstance(full_data[7], dict): known_indices.update(full_data[7].keys())
+                    if isinstance(full_data[32], dict): known_indices.update(full_data[32].keys())
+
+                    for p_idx in known_indices:
+                        if str(p_idx).isdigit():
+                            fake_ifnames[str(p_idx)] = f"port{p_idx}"
+                            
+                    full_data[4] = fake_ifnames
+
+            # 🌟 完全還原最原始 100% 正確的 MAC 映射寫法
             if full_data and len(full_data) >= 8:
                 if_names = full_data[4]; if_macs = full_data[7]
-                for idx, mac_raw in if_macs.items():
-                    mac_clean = re.sub(r'[^a-fA-F0-9]', '', mac_raw).lower()
-                    if mac_clean and len(mac_clean) == 12: global_mac_to_port[mac_clean] = (ip, str(if_names.get(idx, f"Port {idx}")).strip('"'))
+                if isinstance(if_names, dict) and isinstance(if_macs, dict):
+                    for idx, mac_raw in if_macs.items():
+                        mac_clean = re.sub(r'[^a-fA-F0-9]', '', str(mac_raw)).lower()
+                        if mac_clean and len(mac_clean) == 12: 
+                            global_mac_to_port[mac_clean] = (ip, str(if_names.get(idx, f"Port {idx}")).strip('"'))
                 
     added_node_ips = set() 
     color_map = {1: '#ff9999', 2: '#99ccff', 3: '#99ff99', 4: '#ffcc99', 5: '#e6e6fa', 6: '#f8d7da'}
 
+    # 2. 進行鄰居比對 (還原原生 100% 正確邏輯，僅補回必要的變數)
     for dev in active_devices:
         ip = dev['ip']; name = dev.get('name', ''); lvl = safe_int(dev.get('level'))
         status = dev.get('status', 'up'); full_data = device_full_data_cache.get(ip)
         if not full_data or len(full_data) < 8: 
             if ip not in added_node_ips:
-                node_data = {'id': ip, 'ip': ip, 'sysName': name, 'brand': dev.get('brand', 'Unknown'), 'model': dev.get('model', '').strip(), 'location': dev.get('location', '').strip(), 'level': lvl, 'shape': 'box', 'color': color_map.get(lvl, '#e0e0e0'), 'sysDescr': dev.get('sys_descr', '無資訊'), 'status': status, 'snmp_raw': dev.get('snmp_raw', '{}'), 'poe_data': dev.get('poe_data', '{}'), 'has_sensor': dev.get('has_sensor', 0)}
+                node_data = {'id': ip, 'ip': ip, 'sysName': name, 'type': dev.get('type', '交換器'), 'brand': dev.get('brand', 'Unknown'), 'model': dev.get('model', '').strip(), 'location': dev.get('location', '').strip(), 'level': lvl, 'shape': 'box', 'color': color_map.get(lvl, '#e0e0e0'), 'sysDescr': dev.get('sys_descr', '無資訊'), 'status': status, 'snmp_raw': dev.get('snmp_raw', '{}'), 'poe_data': dev.get('poe_data', '{}'), 'has_sensor': dev.get('has_sensor', 0), 'port_specs': dev.get('port_specs', '')}
                 if dev.get('x') is not None and dev.get('y') is not None: node_data['x'] = dev['x']; node_data['y'] = dev['y']
                 nodes.append(node_data); added_node_ips.add(ip)
             continue
@@ -924,6 +1035,11 @@ def discover_topology(devices):
             parts = suffix.split('.')
             local_port_idx = parts[1] if len(parts) >= 3 else parts[-1]
             local_port_name = str(if_names.get(local_port_idx, f"Port {local_port_idx}")).strip('"')
+
+            remote_port_desc = str(lldp_portdescs.get(suffix, '')).strip('"')
+            remote_port_id = str(lldp_portids.get(suffix, '')).strip('"')
+
+            # 🌟 補回原生的 speed 速率計算
             speed = 0
             try: speed = int(if_high_speeds.get(local_port_idx, 0))
             except: pass
@@ -933,8 +1049,7 @@ def discover_topology(devices):
                     speed = 10000 if raw_bps >= 4294967295 else raw_bps // 1000000
                 except: pass
             if speed <= 0: speed = 1000 
-            remote_port_desc = str(lldp_portdescs.get(suffix, '')).strip('"')
-            remote_port_id = str(lldp_portids.get(suffix, '')).strip('"')
+
             desc_mac_clean = re.sub(r'[^a-fA-F0-9]', '', remote_port_desc).lower()
             id_mac_clean = re.sub(r'[^a-fA-F0-9]', '', remote_port_id).lower()
             is_mac_desc = len(desc_mac_clean) == 12 and bool(re.match(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', remote_port_desc, re.I))
@@ -992,7 +1107,7 @@ def discover_topology(devices):
             connections[link_key]['raw_records'].append({'port_A': port_A, 'port_B': port_B, 'speed': speed})
 
         if ip not in added_node_ips:
-            node_data = {'id': ip, 'ip': ip, 'sysName': name, 'brand': dev.get('brand', 'Unknown'), 'model': dev.get('model', '').strip(), 'location': dev.get('location', '').strip(), 'level': lvl, 'shape': 'box', 'color': color_map.get(lvl, '#e0e0e0'), 'sysDescr': dev.get('sys_descr', '無資訊'), 'status': status, 'snmp_raw': dev.get('snmp_raw', '{}'), 'poe_data': dev.get('poe_data', '{}'), 'has_sensor': safe_int(dev.get('has_sensor', 0), 0)}
+            node_data = {'id': ip, 'ip': ip, 'sysName': name, 'type': dev.get('type', '交換器'), 'brand': dev.get('brand', 'Unknown'), 'model': dev.get('model', '').strip(), 'location': dev.get('location', '').strip(), 'level': lvl, 'shape': 'box', 'color': color_map.get(lvl, '#e0e0e0'), 'sysDescr': dev.get('sys_descr', '無資訊'), 'status': status, 'snmp_raw': dev.get('snmp_raw', '{}'), 'poe_data': dev.get('poe_data', '{}'), 'has_sensor': safe_int(dev.get('has_sensor', 0), 0), 'port_specs': dev.get('port_specs', '')}
             if dev.get('x') is not None and dev.get('y') is not None: node_data['x'] = dev['x']; node_data['y'] = dev['y']
             nodes.append(node_data); added_node_ips.add(ip)
 
@@ -1060,19 +1175,17 @@ def discover_topology(devices):
     return {'nodes': nodes, 'edges': edges, 'stats': {'elapsed': round(time.time() - scan_start_time, 2), 'scanned': len(nodes), 'added': 0}}
 
 # ========================================================
-# 🚨 擴充：SNMP Trap 主動告警接收引擎 (具備網孔深度解析與獨立防震盪)
+# 🚨 4. SNMP Trap 主動告警接收引擎
 # ========================================================
 def snmp_trap_receiver_worker():
     import socket
     import time
     import re
     from utils import log_info, send_ntfy_alert
-    # 💡 引入 get_db 與 DB_LOCKS 以便讀取系統設定
     from database import write_audit_log, read_db_devices, get_db, DB_LOCKS 
 
-    global GLOBAL_TRAP_ENABLED # 💡 宣告使用全域變數，以便從資料庫覆寫它
+    global GLOBAL_TRAP_ENABLED
 
-    # 🌟 新增：開機啟動時，優先從 config.db 讀取管理員上次留下的開關設定
     try:
         with DB_LOCKS['config']:
             conn = get_db('config')
@@ -1099,8 +1212,13 @@ def snmp_trap_receiver_worker():
 
     while True:
         try:
-            if not GLOBAL_TRAP_ENABLED:
-                time.sleep(1)
+            with DB_LOCKS['config']:
+                conn = get_db('config')
+                hq_row = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+                conn.close()
+
+            if (hq_row and hq_row['value'] == 'hq') or not GLOBAL_TRAP_ENABLED:
+                time.sleep(5)
                 continue
 
             try:
@@ -1111,9 +1229,6 @@ def snmp_trap_receiver_worker():
             peer_ip = addr[0]
             hex_data = data.hex()
 
-            # ... (下方保持您原本的密碼驗證與解析邏輯完全不變) ...
-            
-            # 1. 智慧尋址與密碼比對
             device_name = peer_ip
             expected_community = 'public' 
             try:
@@ -1128,13 +1243,10 @@ def snmp_trap_receiver_worker():
             community_hex = expected_community.encode('utf-8').hex()
             if community_hex not in hex_data: continue
 
-            # 2. 解析斷線/連線特徵碼
             is_link_down = b'linkDown' in data or bytes.fromhex('2b0601060301010503') in data
             is_link_up = b'linkUp' in data or bytes.fromhex('2b0601060301010504') in data
 
             if is_link_down or is_link_up:
-                
-                # 3. 網孔深度解析
                 port_info = "未知網孔"
                 printable_strings = re.findall(b'[\x20-\x7E]{4,}', data)
                 for s in printable_strings:
@@ -1152,7 +1264,6 @@ def snmp_trap_receiver_worker():
                         if 0 < port_num < 200: 
                             port_info = f"Port {port_num}"
 
-                # 4. 發送告警與防洗版邏輯
                 cooldown_key = f"{peer_ip}_{port_info}"
                 current_time = time.time()
                 last_alert_time = trap_cooldowns.get(cooldown_key, 0)
@@ -1186,7 +1297,7 @@ def snmp_trap_receiver_worker():
             print(f"⚠️ [Trap 接收錯誤] {e}")
 
 # ==========================================
-# 💡 終極備援：Aruba CX SSH 實體光學抓取引擎 (安全授權版)
+# 💡 5. Aruba CX SSH 實體光學抓取引擎
 # ==========================================
 def _sync_aruba_ssh(ip, ssh_user, ssh_pass):
     if not ssh_user or not ssh_pass:
@@ -1196,7 +1307,6 @@ def _sync_aruba_ssh(ip, ssh_user, ssh_pass):
     import time
     import re
     try:
-        # 💡 納入除錯開關控制
         if DEBUG_SSH_LOG:
             print(f"🚀 [SSH 偵錯] 正在連線 Aruba CX ({ip}) ...")
             
@@ -1214,7 +1324,7 @@ def _sync_aruba_ssh(ip, ssh_user, ssh_pass):
             channel.recv(5000)
             
         if DEBUG_SSH_LOG:
-            print(f"📡 [SSH 偵錯] 已送出指令，正等待交換器實體 I2C 晶片回應 (限時 60 秒)...")
+            print(f"📡 [SSH 偵錯] 已送出指令，正等待交換器實體 I2C 晶片回應...")
             
         channel.send("show interface transceiver detail\n")
         
@@ -1254,12 +1364,11 @@ def _sync_aruba_ssh(ip, ssh_user, ssh_pass):
             print(f"🎉 [SSH 偵錯] {ip} 處理完畢，共解析出 {port_count} 個光纖數據！")
         return results
     except Exception as e:
-        # ⚠️ 即使關閉除錯，嚴重錯誤依然要提示，方便網管人員知悉
         print(f"⚠️ [SSH 引擎錯誤] Aruba ({ip}) 採集失敗: {e}")
         return {}
 
 # ==========================================
-# 🌐 跨界擴充：Palo Alto XML API 實體光學抓取引擎 (終極偵錯版)
+# 🌐 6. Palo Alto XML API 實體光學抓取引擎
 # ==========================================
 def _sync_palo_alto_api(ip, api_key):
     if not api_key:
@@ -1272,7 +1381,6 @@ def _sync_palo_alto_api(ip, api_key):
     import urllib3
     import traceback
     
-    # 關閉自簽憑證產生的 SSL 警告
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     try:
@@ -1280,28 +1388,20 @@ def _sync_palo_alto_api(ip, api_key):
         
         if DEBUG_PA_LOG:
             print(f"\n🌐 [PA 偵錯] ─────── 開始探測 Palo Alto 防火牆 ({ip}) ───────")
-            # 安全防護：僅顯示 Key 的前 8 碼，其餘遮罩
             masked_key = api_key[:8] + "..." if len(api_key) > 8 else "..."
             print(f"🔍 [PA 偵錯] 目標發送網址: https://{ip}/api/?type=op&cmd=...&key={masked_key}")
             
-        # 發送請求，放寬超時到 8 秒，確保高負載防火牆有時間回應
         response = requests.get(url, timeout=8, verify=False)
         
         if DEBUG_PA_LOG:
             print(f"📡 [PA 偵錯] 收到連線回應！HTTP 狀態碼: {response.status_code}")
-            print(f"📄 [PA 偵錯] 👇 防火牆回傳的 XML 原始內容前 600 字元如下 👇")
-            print("-" * 60)
-            print(response.text[:600])
-            print("-" * 60)
             
         if response.status_code != 200:
             print(f"❌ [PA 偵錯] 連線失敗，防火牆拒絕了 HTTP 請求。")
             return {}
             
-        # 開始解析 XML
         root = ET.fromstring(response.content)
         
-        # 💡 關鍵偵錯：檢查 Palo Alto 是否在 XML 裡面回傳了內部錯誤 (例如 status="error")
         if root.get('status') == 'error':
             msg_el = root.find(".//msg")
             err_msg = msg_el.text if msg_el is not None else "未知的 Palo Alto 內部錯誤訊息"
@@ -1324,72 +1424,13 @@ def _sync_palo_alto_api(ip, api_key):
                 rx_val = rx_el.text.strip() if rx_el.text else "0"
                 results[port_name] = { "tx": tx_val, "rx": rx_val }
                 entry_count += 1
-                if DEBUG_PA_LOG:
-                    print(f"   ✅ [PA 數據成功] 介面 {port_name} -> Tx: {tx_val} mW, Rx: {rx_val} mW")
-                    
-        if DEBUG_PA_LOG:
-            print(f"🎉 [PA 偵錯] 數據解析完畢，本次共成功塞入 {entry_count} 個光纖埠。")
-            print(f"🌐 [PA 偵錯] ─────── Palo Alto ({ip}) 探測結束 ───────\n")
-            
+                
         return results
         
     except Exception as e:
         print(f"⚠️ [PA 引擎崩潰] 在對接時發生未預期例外錯誤: {e}")
-        if DEBUG_PA_LOG:
-            traceback.print_exc()
         return {}
-        
-# ==========================================
-# 🌐 跨界擴充：Palo Alto XML API 實體光學抓取引擎
-# ==========================================
-def _sync_palo_alto_api(ip, api_key):
-    if not api_key:
-        return {}
-        
-    import requests
-    import xml.etree.ElementTree as ET
-    import urllib3
-    # 💡 防火牆通常使用自簽憑證，強制關閉 SSL 警告，避免終端機跳出滿滿的紅字警告
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    try:
-        # 💡 呼叫 Palo Alto 官方操作指令 API (等同於在 CLI 下達 show transceiver all)
-        url = f"https://{ip}/api/?type=op&cmd=<show><transceiver><all/></transceiver></show>&key={api_key}"
-        
-        # 發送高速 HTTPS 請求
-        response = requests.get(url, timeout=5, verify=False)
-        if response.status_code != 200:
-            return {}
-            
-        # 💡 精準解析 Palo Alto 回傳的 XML 結構樹
-        root = ET.fromstring(response.content)
-        results = {}
-        
-        # 尋找 XML 中所有的 <entry> 節點 (代表每一個實體光纖 Port)
-        for entry in root.findall(".//entry"):
-            port_name = entry.get('name') # 例如 "ethernet1/1"
-            if not port_name:
-                continue
-                
-            tx_el = entry.find("tx-power")
-            rx_el = entry.find("rx-power")
-            
-            if tx_el is not None and rx_el is not None:
-                # 💡 Palo Alto 回傳的是原始毫瓦 (mW)，如 "0.62"。
-                # 直接保留字串，我們前端寫好的「智慧單位換算引擎」會自動認得 mW 並轉成 dBm！
-                results[port_name] = {
-                    "tx": tx_el.text.strip(),
-                    "rx": rx_el.text.strip()
-                }
-                
-        return results
-    except Exception as e:
-        print(f"⚠️ [Palo Alto API 錯誤] ({ip}) 擷取失敗: {e}")
-        return {}
-        
-# ==========================================
-# 🌐 跨界擴充：Palo Alto SSH 實體光學抓取引擎
-# ==========================================
+
 def _sync_palo_alto_ssh(ip, ssh_user, ssh_pass):
     if not ssh_user or not ssh_pass:
         if DEBUG_PA_LOG:
@@ -1412,7 +1453,6 @@ def _sync_palo_alto_ssh(ip, ssh_user, ssh_pass):
         if channel.recv_ready():
             channel.recv(8000)
             
-        # 💡 關閉分頁功能並下達查詢指令
         channel.send("set cli pager off\n")
         time.sleep(0.5)
         channel.send("show transceiver all\n")
@@ -1423,7 +1463,6 @@ def _sync_palo_alto_ssh(ip, ssh_user, ssh_pass):
             while channel.recv_ready():
                 chunk = channel.recv(65535).decode('utf-8', errors='ignore')
                 output += chunk
-                # 防呆：遇到分頁提示自動按空白鍵
                 if "lines " in chunk or "More" in chunk or chunk.strip().endswith(":"):
                     channel.send(" ")
             
@@ -1435,7 +1474,6 @@ def _sync_palo_alto_ssh(ip, ssh_user, ssh_pass):
         results = {}
         for line in output.split('\n'):
             line_s = line.strip()
-            # 尋找類似: ethernet1/15  44.78 C  3.22 V  36.83 mA  0.59 mW  0.83 mW
             if line_s.startswith("ethernet"):
                 parts = line_s.split()
                 if len(parts) >= 11 and parts[8].lower() == 'mw' and parts[10].lower() == 'mw':
@@ -1443,14 +1481,231 @@ def _sync_palo_alto_ssh(ip, ssh_user, ssh_pass):
                     tx_val = parts[7]
                     rx_val = parts[9]
                     results[port_name] = { "tx": tx_val, "rx": rx_val }
-                    if DEBUG_PA_LOG:
-                        print(f"   ✅ [PA 數據成功] {port_name} -> Tx: {tx_val} mW | Rx: {rx_val} mW")
                         
-        if DEBUG_PA_LOG:
-            print(f"🎉 [PA 偵錯] 數據解析完畢，本次共成功擷取 {len(results)} 個光纖埠。")
-            
         return results
         
     except Exception as e:
         print(f"⚠️ [PA 引擎崩潰] SSH 連線或解析失敗: {e}")
         return {}
+
+# ========================================================
+# 🛡️ 7. NetFlow v9 流量資安威脅自動分析引擎
+# ========================================================
+def flow_security_worker():
+    from influxdb_client import InfluxDBClient
+    from database import get_db, DB_LOCKS, write_audit_log, INFLUXDB_URL, INFLUXDB_TOKEN, INFLUXDB_ORG, INFLUXDB_BUCKET
+    from utils import log_info, send_ntfy_alert
+    import time
+    import ipaddress
+    
+    log_info("🛡️ [資安預警] NetFlow v9 6大威脅分析引擎已完全啟動！")
+    time.sleep(15)
+    
+    while True:
+        try:
+            with DB_LOCKS['config']:
+                conn = get_db('config')
+                hq_row = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+                
+                t_scan = int(conn.execute("SELECT value FROM system_settings WHERE key='sec_scan_threshold'").fetchone()['value'] or 50)
+                t_ddos = int(conn.execute("SELECT value FROM system_settings WHERE key='sec_ddos_threshold_mb'").fetchone()['value'] or 500)
+                t_window = int(conn.execute("SELECT value FROM system_settings WHERE key='sec_scan_window_mins'").fetchone()['value'] or 5)
+                t_brute = int(conn.execute("SELECT value FROM system_settings WHERE key='sec_brute_threshold'").fetchone()['value'] or 80)
+                t_exfil = int(conn.execute("SELECT value FROM system_settings WHERE key='sec_exfil_threshold_mb'").fetchone()['value'] or 1000)
+                t_mining = int(conn.execute("SELECT value FROM system_settings WHERE key='sec_mining_threshold'").fetchone()['value'] or 20)
+                t_lateral = int(conn.execute("SELECT value FROM system_settings WHERE key='sec_lateral_threshold'").fetchone()['value'] or 15)
+                
+                r_int = conn.execute("SELECT value FROM system_settings WHERE key='flow_internal_nets'").fetchone()
+                r_exc = conn.execute("SELECT value FROM system_settings WHERE key='flow_exclude_nets'").fetchone()
+                conn.close()
+                
+            if hq_row and hq_row['value'] == 'hq':
+                time.sleep(120)
+                continue
+
+            raw_int = r_int['value'] if (r_int and r_int['value']) else '10.0.0.0/8, 172.16.0.0/12, 192.168.1.0/24'
+            raw_exc = r_exc['value'] if (r_exc and r_exc['value']) else ''
+            
+            int_nets = [ipaddress.ip_network(c.strip(), strict=False) for c in raw_int.split(',') if c.strip()]
+            exc_nets = [ipaddress.ip_network(c.strip(), strict=False) for c in raw_exc.split(',') if c.strip()]
+
+            def is_internal(ip_str):
+                if not ip_str or ip_str in ["Unknown", "None", "null", "-", "External"]: return False
+                try:
+                    ip_clean = ip_str.split('%')[0].strip().replace('::ffff:', '')
+                    ip_obj = ipaddress.ip_address(ip_clean)
+                    for exc in exc_nets:
+                        if ip_obj in exc: return False
+                    for inc in int_nets:
+                        if ip_obj in inc: return True
+                    if ip_clean.startswith("192.50."): return True
+                    return ip_obj.is_private
+                except: return False
+
+            client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=90000)
+            query_api = client.query_api()
+
+            flux_scan = f'''
+            from(bucket: "{INFLUXDB_BUCKET}")
+              |> range(start: -{t_window}m)
+              |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+              |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+              |> filter(fn: (r) => exists r["src_ip"] and exists r["dst_port"])
+              |> keep(columns: ["src_ip", "dst_port", "_value"])
+              |> group(columns: ["src_ip", "dst_port"])
+              |> limit(n: 1)
+              |> group(columns: ["src_ip"])
+              |> count()
+              |> filter(fn: (r) => r["_value"] >= {t_scan})
+            '''
+            for table in query_api.query(flux_scan):
+                for rec in table.records:
+                    s_ip = rec.values.get("src_ip")
+                    p_count = rec.get_value()
+                    attack_type = "內網中毒/橫向擴散掃描" if is_internal(s_ip) else "外網惡意 Port 掃描"
+                    dst_ip = "LAN (內部網段)" if is_internal(s_ip) else "WAN ➔ 內網邊界"
+                    msg = f"警報：來源 [{s_ip}] 於 {t_window} 分鐘內發起 {p_count} 個不同 Port 惡意探測！"
+                    _record_security_event(s_ip, dst_ip, attack_type, "HIGH", msg)
+                    send_ntfy_alert(f"🚨 {attack_type}", msg, priority="high", tags="warning,skull")
+
+            flux_ddos = f'''
+            from(bucket: "{INFLUXDB_BUCKET}")
+              |> range(start: -{t_window}m)
+              |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+              |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+              |> filter(fn: (r) => exists r["dst_ip"] and exists r["src_ip"])
+              |> group(columns: ["dst_ip", "src_ip"])
+              |> sum()
+              |> group(columns: ["dst_ip"])
+              |> reduce(
+                  identity: {{src_count: 0, total_bytes: 0.0}},
+                  fn: (r, accumulator) => ({{
+                      src_count: accumulator.src_count + 1,
+                      total_bytes: accumulator.total_bytes + float(v: r._value)
+                  }})
+              )
+              |> filter(fn: (r) => r.total_bytes >= {t_ddos * 1024 * 1024} and r.src_count >= 10)
+            '''
+            for table in query_api.query(flux_ddos):
+                for rec in table.records:
+                    d_ip = rec.values.get("dst_ip")
+                    mb_size = round((rec.values.get("total_bytes") or 0) / (1024 * 1024), 2)
+                    src_count = rec.values.get("src_count") or 0
+                    msg = f"警報：目標 [{d_ip}] 於 {t_window} 分鐘內遭 {src_count} 個不同來源發起 DDoS 攻擊，累積 {mb_size} MB 巨量流量！"
+                    _record_security_event("Botnet External WANs", d_ip, "DDoS / 殭屍網路洪泛", "CRITICAL", msg)
+                    send_ntfy_alert("💥 DDoS 洪泛攻擊預警", msg, priority="urgent", tags="fire,lightning")
+
+            flux_brute = f'''
+            from(bucket: "{INFLUXDB_BUCKET}")
+              |> range(start: -{t_window}m)
+              |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+              |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+              |> filter(fn: (r) => exists r["src_ip"] and exists r["dst_ip"] and exists r["dst_port"])
+              |> filter(fn: (r) => r["dst_port"] == "22" or r["dst_port"] == 22 or r["dst_port"] == "3389" or r["dst_port"] == 3389 or r["dst_port"] == "445" or r["dst_port"] == 445 or r["dst_port"] == "23" or r["dst_port"] == 23)
+              |> group(columns: ["src_ip", "dst_ip", "dst_port"])
+              |> count()
+              |> filter(fn: (r) => r["_value"] >= {t_brute})
+            '''
+            for table in query_api.query(flux_brute):
+                for rec in table.records:
+                    s_ip = rec.values.get("src_ip")
+                    d_ip = rec.values.get("dst_ip")
+                    dport = rec.values.get("dst_port")
+                    cnt = rec.get_value()
+                    msg = f"警報：來源 [{s_ip}] 於 {t_window} 分鐘內對 [{d_ip}] Port {dport} 嘗試高頻連線 {cnt} 次，疑似密碼暴力破解！"
+                    _record_security_event(s_ip, d_ip, "密碼暴力破解猜測", "HIGH", msg)
+                    send_ntfy_alert("🔑 密碼爆破攻擊預警", msg, priority="high", tags="key,lock")
+
+            flux_exfil = f'''
+            from(bucket: "{INFLUXDB_BUCKET}")
+              |> range(start: -{t_window}m)
+              |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+              |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+              |> filter(fn: (r) => exists r["src_ip"] and exists r["dst_ip"])
+              |> group(columns: ["src_ip", "dst_ip"])
+              |> sum()
+              |> filter(fn: (r) => r["_value"] >= {t_exfil * 1024 * 1024})
+            '''
+            for table in query_api.query(flux_exfil):
+                for rec in table.records:
+                    s_ip = rec.values.get("src_ip")
+                    d_ip = rec.values.get("dst_ip")
+                    mb_size = round((rec.get_value() or 0) / (1024 * 1024), 2)
+                    if is_internal(s_ip) and not is_internal(d_ip):
+                        msg = f"警報：內網主機 [{s_ip}] 於 {t_window} 分鐘內向外部未知 IP [{d_ip}] 傳送 {mb_size} MB 巨量資料，疑似資料外洩！"
+                        _record_security_event(s_ip, d_ip, "異常巨量資料外洩", "HIGH", msg)
+                        send_ntfy_alert("📤 機密資料外洩預警", msg, priority="high", tags="warning,file_folder")
+
+            flux_mining = f'''
+            from(bucket: "{INFLUXDB_BUCKET}")
+              |> range(start: -{t_window}m)
+              |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+              |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+              |> filter(fn: (r) => exists r["src_ip"] and exists r["dst_port"])
+              |> filter(fn: (r) => r["dst_port"] == "3333" or r["dst_port"] == 3333 or r["dst_port"] == "14444" or r["dst_port"] == 14444 or r["dst_port"] == "8333" or r["dst_port"] == 8333 or r["dst_port"] == "4444" or r["dst_port"] == 4444 or r["dst_port"] == "5555" or r["dst_port"] == 5555)
+              |> group(columns: ["src_ip", "dst_port"])
+              |> count()
+              |> filter(fn: (r) => r["_value"] >= {t_mining})
+            '''
+            for table in query_api.query(flux_mining):
+                for rec in table.records:
+                    s_ip = rec.values.get("src_ip")
+                    dport = rec.values.get("dst_port")
+                    cnt = rec.get_value()
+                    if is_internal(s_ip):
+                        msg = f"警報：內網受害主機 [{s_ip}] 於 {t_window} 分鐘內對外網礦池 Port {dport} 連線 {cnt} 次，疑似中木馬程式進行背景採礦！"
+                        _record_security_event(s_ip, f"Mining Pool (Port {dport})", "C2 / 背景加密採礦", "HIGH", msg)
+                        send_ntfy_alert("⛏️ 挖礦木馬連線預警", msg, priority="high", tags="pick,computer")
+
+            flux_lateral = f'''
+            from(bucket: "{INFLUXDB_BUCKET}")
+              |> range(start: -{t_window}m)
+              |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+              |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+              |> filter(fn: (r) => exists r["src_ip"] and exists r["dst_ip"] and exists r["dst_port"])
+              |> filter(fn: (r) => r["dst_port"] == "445" or r["dst_port"] == 445 or r["dst_port"] == "135" or r["dst_port"] == 135 or r["dst_port"] == "3389" or r["dst_port"] == 3389 or r["dst_port"] == "5985" or r["dst_port"] == 5985)
+              |> keep(columns: ["src_ip", "dst_ip", "_value"])
+              |> group(columns: ["src_ip", "dst_ip"])
+              |> limit(n: 1)
+              |> group(columns: ["src_ip"])
+              |> count()
+              |> filter(fn: (r) => r["_value"] >= {t_lateral})
+            '''
+            for table in query_api.query(flux_lateral):
+                for rec in table.records:
+                    s_ip = rec.values.get("src_ip")
+                    target_cnt = rec.get_value()
+                    if is_internal(s_ip):
+                        msg = f"警報：內部受害主機 [{s_ip}] 於 {t_window} 分鐘內對 {target_cnt} 台內部主機發起 SMB/RPC 高危連接埠探測，疑似進行內網橫向入侵！"
+                        _record_security_event(s_ip, "LAN (多台內部主機)", "內網橫向擴散移動", "HIGH", msg)
+                        send_ntfy_alert("🔀 內網橫向移動預警", msg, priority="high", tags="biohazard,bug")
+
+            client.close()
+        except Exception as e:
+            log_info(f"⚠️ [資安預警] 分析引擎發生異常: {e}")
+            
+        time.sleep(120)
+
+def _record_security_event(src_ip, dst_ip, attack_type, severity, details):
+    from database import get_db, DB_LOCKS, write_audit_log
+    try:
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            t_win_row = conn.execute("SELECT value FROM system_settings WHERE key='sec_scan_window_mins'").fetchone()
+            t_win = int(t_win_row['value']) if (t_win_row and t_win_row['value']) else 30
+
+            chk = conn.execute(f"""
+                SELECT COUNT(*) FROM flow_security_events 
+                WHERE src_ip=? AND attack_type=? AND timestamp >= datetime('now', '-{t_win} minutes')
+            """, (src_ip, attack_type)).fetchone()[0]
+            
+            if chk == 0:
+                conn.execute("""
+                    INSERT INTO flow_security_events (src_ip, dst_ip, attack_type, severity, details)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (src_ip, dst_ip, attack_type, severity, details))
+                conn.commit()
+                write_audit_log("SecurityEngine", "流量資安預警", f"{attack_type} ({src_ip})", "WARNING", details)
+            conn.close()
+    except Exception as e:
+        pass

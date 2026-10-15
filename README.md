@@ -1,21 +1,17 @@
-# 🌐 SNMP 網路拓樸自動發現與 NetFlow/sFlow 流量數據分析
+# 🌐 SNMP 網路拓樸自動發現與 NetFlow 資安流量大數據分析平台
 
 本專案是一套整合網路遙測（Telemetry）、自動拓樸發現、組態管理（NCM）與網路通訊軌跡深層檢索的企業級網路管理平台。生產環境採用 **Waitress** 作為 WSGI 伺服器，配置多執行緒並行架構。系統底層透過非同步 SNMP 探測技術、LLDP 鄰居發現演算法與 NetFlow/sFlow 異步收集鏈路，實現實體網路拓樸自動解構、硬碟空間永續循環與秒級資安事件追溯稽核。
 
-![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
-![Flask](https://img.shields.io/badge/Framework-Flask-black.svg)
-![InfluxDB](https://img.shields.io/badge/Database-InfluxDB%20V2-purple.svg)
-![Telegraf](https://img.shields.io/badge/Agent-Telegraf-orange.svg)
-![Bootstrap](https://img.shields.io/badge/UI-Bootstrap%205-563D7C.svg)
-
 ---
 
-## 🏗️ 系統運作環境與架構概述
+## 🏗️ 系統運作環境與雙引擎架構概述
 
 平台拋棄傳統 Web 框架內建之單執行緒開發用伺服器，於生產環境全面掛載 **Waitress** 伺服器引擎，配置 12 個獨立並行執行緒（`threads=12`）常駐監聽 `Port 5000`。
 
-本系統採行收集、儲存、分析、呈現完全分離之鬆耦合架構：
-* **網路遙測模組**：底層採用 Python `pysnmp` 原生非同步非阻塞（`asyncio`）架構發送設備探測；組態管理（NCM）部分則透過 `paramiko` 建立 Socket 管道，以常態化線程池（固定 8 台設備並發限制）執行 CLI 組態自動化提取。
+本系統採行**「Go + Python 雙引擎非同步架構」**，將資料收集與圖形呈現完美分離：
+* **核心採集引擎 (Go Poller)**：網路遙測與輪詢作業已從 Python 完全剝離，改由原生的 Golang 程式 (`go_poller`) 接手。Go 引擎利用其強大的 Goroutines 特性發起無鎖高併發 SNMP 探測，將上百台設備的輪詢時間從 90 秒劇烈壓縮至 **10 秒內**完工。採集完成後，Go 引擎會直接將資料寫入 SQLite，並透過內部 Webhook (`/api/internal/reload_cache`) 打擊 Python 伺服器，強制 Python 秒級刷新記憶體快取 (RAM)，實現無縫接軌。
+* **網頁與管理中樞 (Python Server)**：負責介面呈現、拓樸解算 (`snmp_core.py`)、NCM 備份，以及承接 Go 引擎的戰報與資料。
+* **雙判斷避讓與自動接管 (Failover Mechanism)**：Python 內部仍保留一套純異步的 `traffic_polling_worker` 作為備援守護行程。一旦偵測到 Go 引擎連續 90 秒沒有送出心跳 (Heartbeat)，Python 將會自動挺身而出無縫接管全網 SNMP 輪詢，直到 Go 引擎復活為止。
 * **流量採集引擎**：背景常駐 `Telegraf` 代理程式監聽 `UDP 2055` 連接埠，進行 NetFlow v9 / sFlow 標準化採集，並設定高吞吐量快取池（Batch Size 10,000）大批量倒進 InfluxDB 時序資料庫。
 
 ---
@@ -29,7 +25,7 @@
 * **`bkpswcfg.db` (NCM 組態庫)**：包含 `config_history` 表格，限制每個 IP 在歷史紀錄中僅滾動式保留最新 3 次的備份快照（版本索引序號為 0、1、2），文字與二進位組態均採安全 Base64 格式編碼儲存以防文字變形。
 
 ### 2. 遙測效能歷史資料庫 (時序分層)
-* **`telemetry_hot.db` (熱庫 - 30 日內)**：儲存每輪常態輪詢寫入之原始介面流量計數、CPU 負載、記憶體佔用與硬體溫度指標。
+* **`telemetry_hot.db` (熱庫 - 30 日內)**：儲存由 Go 引擎高速輪詢寫入之原始介面流量計數、CPU 負載、記憶體佔用與硬體溫度指標。
 * **`telemetry_warm.db` (溫庫 - 1 至 6 個月)**：定期將超過 30 天的熱數據，經由資料生命週期引擎執行降採樣（Data Downsampling）均值聚合演算法後，移往此庫搬移封存。
 * **`telemetry_cold.db` (冷庫 - 7 個月至 3 年)**：封存經二次壓縮之極低密度長期維運與 SLA 分析數據。
 
@@ -46,9 +42,9 @@
 
 | 守護行程名稱 | 輪詢週期 | 核心運作邏輯與防禦機制 |
 | --- | --- | --- |
-| `traffic_polling_worker` | 自訂間隔 | 遍歷設備清單，非同步拉取介面流量與效能指標。同步抓取國際標準之 `ifOperStatus` 與 `ifAdminStatus` 揉入記憶體快取，確保前端無須執行完整掃描即可獲得實體孔位連線狀態。 |
-| `topology_scan_worker` | 排程觸發 | 常態性對全網設備執行深度 SNMP Walk，讀取標準 `LLDP-MIB` 與交換器核心 `dot1dTpFdbTable`（MAC 轉發學習表），自動更新與繪製全網骨幹與接入層之實體連線幾何關係。 |
-| `data_retention_worker` | 24 小時 | 自動啟動資料生命週期管理。將熱庫中超過 30 天的資料經由Flux Task 降維壓縮後往溫庫搬移，搬移完畢自動對檔案執行 `VACUUM` 實體釋放硬碟空間。 |
+| `traffic_polling_worker` | 自訂間隔 | 作為備援引擎常駐。當 `go_poller` 心跳正常時自動休眠避讓；一旦 Go 引擎失效，將自動啟動 Python `asyncio` 引擎接管全網 SNMP 效能與狀態輪詢，保障監控不中斷。 |
+| `topology_scan_worker` | 排程觸發 | 常態性對全網設備執行深度 SNMP Walk，讀取標準 `LLDP-MIB` 並針對特定廠牌（如 Ruckus ICX、Aruba CX）實施 Chassis 共用 MAC 蓋軌避讓防禦，自動更新與繪製全網骨幹與接入層之精準實體連線幾何關係。 |
+| `data_retention_worker` | 24 小時 | 自動啟動資料生命週期管理。將熱庫中超過 30 天的資料經由 Flux Task 降維壓縮後往溫庫搬移，搬移完畢自動對檔案執行 `VACUUM` 實體釋放硬碟空間。 |
 | `ntp_sync_worker` | 定期執行 | 依據設定之 NTP 伺服器位址，定期對外部時間源進行自動校時，保障系統所有時間戳記與稽核日誌具備時序法律效力。 |
 | `snmp_trap_receiver_worker` | 即時監聽 | 背景綁定 `UDP 162` 埠。套用 1.0 秒超時機制以動態檢查 Web 前台傳遞之持久化持久化控制開關。**內建網孔震盪保護演算法**：當特定網孔發生 `LinkDown` 時實施 60 秒冷卻靜音，`LinkUp` 則無視冷卻即時推播，重置計時。 |
 | `auto_backup_worker` | 每日排程 | NCM 排程自動備份守護行程。一旦抵達設定點，即派發 **`max_workers=8`（固定 8 台設備並發限制線程池）**，同時登入 8 台設備提取組態，在極短時間內完成全網備份。 |
@@ -78,17 +74,28 @@
 
 本系統已將全數 HTTP API 及全域請求勾子（Request Hooks）從 `app.py` 移出，集中配置於 `routes.py` 的 `main_bp` 藍圖中。
 
-### 1. 自訂 InfluxDB V2 大數據路徑與配置
-1. 將下載的 InfluxDB V2 解壓縮至 `D:\ops_tools\influxdb\`。在 D 槽建立高速存取目錄：`D:\InfluxDB_Data\`。
-2. 在 `influxd.exe` 同級目錄下建立 **`config.toml`**，強制將Bolt與Engine指定至 D 槽，撐大快取快照並限制並發保護 CPU：
-   ```toml
-   bolt-path = "D:\\InfluxDB_Data\\influxd.bolt"
-   engine-path = "D:\\InfluxDB_Data\\engine"
-   storage-wal-fsync-delay = "50ms"
-   storage-cache-snapshot-memory-size = "100m"
-   query-concurrency = 20
+### 1. 啟動 Go 極速採集引擎
+系統依賴 Go 語言撰寫的 `go_poller` 以獲得最快的 SNMP 輪詢速度。請開啟命令提示字元並在專案目錄下執行：
+```bash
+go run poller.go
 
 ```
+
+> *註：您也可以將其編譯為 `.exe` 並註冊為 Windows 服務常駐運行。*
+
+### 2. 自訂 InfluxDB V2 大數據路徑與配置
+
+1. 將下載的 InfluxDB V2 解壓縮至 `D:\ops_tools\influxdb\`。在 D 槽建立高速存取目錄：`D:\InfluxDB_Data\`。
+2. 在 `influxd.exe` 同級目錄下建立 **`config.toml`**，強制將Bolt與Engine指定至 D 槽，撐大快取快照並限制並發保護 CPU：
+```toml
+bolt-path = "D:\\InfluxDB_Data\\influxd.bolt"
+engine-path = "D:\\InfluxDB_Data\\engine"
+storage-wal-fsync-delay = "50ms"
+storage-cache-snapshot-memory-size = "100m"
+query-concurrency = 20
+
+```
+
 
 3. 以管理員權限打開 PowerShell，綁定環境變數並註冊背景服務：
 ```powershell
@@ -100,7 +107,7 @@ net start InfluxDB
 
 
 
-### 2. 佈署 Telegraf 流量採集器
+### 3. 佈署 Telegraf 流量採集器
 
 1. 解壓縮 Telegraf 至 `D:\ops_tools\telegraf\`，修改 `telegraf.conf` 以調大緩衝池防止海量封包丟包，放寬寫入硬碟頻率：
 ```toml
@@ -133,7 +140,7 @@ net start telegraf
 
 
 
-### 3. 掛載 Waitress 生產級伺服器
+### 4. 掛載 Waitress 生產級伺服器
 
 1. 安裝 Python 3.9+ 生產相依套件清單：
 ```bash

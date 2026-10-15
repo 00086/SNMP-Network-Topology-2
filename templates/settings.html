@@ -76,6 +76,13 @@
         overflow: hidden; 
         box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     }
+    
+    /* 🌟 新增：嚴格限制 card-body，防止被內部元件撐破 */
+    .card-settings .card-body {
+        display: flex;
+        flex-direction: column;
+        min-height: 0; 
+    }
 
     /* 💡 2x2 網格佈局 (四宮格) */
     .settings-grid {
@@ -83,7 +90,8 @@
         grid-template-columns: repeat(2, 1fr); 
         grid-template-rows: repeat(2, 1fr);    
         gap: 8px;
-        height: 100%;
+        flex: 1;         /* 🌟 讓 grid 自動填滿 card-body */
+        min-height: 0;   /* 🌟 關鍵防護：強制約束網格高度 */
         overflow: hidden;
     }
 
@@ -94,6 +102,7 @@
         border-radius: 6px;
         background-color: rgba(0,0,0,0.15);
         overflow: hidden; 
+        min-height: 0;   /* 🌟 關鍵防護：允許方塊縮小，強制超出的內容出現內捲軸 */
     }
     body.light-mode .setting-block { background-color: rgba(0,0,0,0.02); }
     
@@ -155,6 +164,133 @@
             grid-template-rows: auto;
         }
     }
+	
+	/* ======================================================== */
+    /* 🌐 運維字典維護面板 - 變數自適應、0縫隙貼齊、圖樣放大一級 */
+    /* ======================================================== */
+    #translationModal .modal-dialog {
+        max-width: 76% !important;      /* 整體外框寬度精準縮減 20% */
+        margin: 85px auto 20px auto !important; /* 精準下移 85px，完美避開全域設定中心 Banner 文字 */
+    }
+    
+    #translationModal .modal-content {
+        font-size: 1.05rem !important;  /* 全域字體全面放大一級 */
+        background-color: var(--bg-card) !important; 
+        color: var(--text-main) !important;
+        border: 1px solid var(--border-color) !important;
+        box-shadow: 0 16px 40px rgba(0,0,0,0.6) !important;
+    }
+
+    #translationModal .modal-header {
+        background-color: rgba(0, 0, 0, 0.25) !important;
+        border-bottom: 1px solid var(--border-color) !important;
+    }
+    body.light-mode #translationModal .modal-header {
+        background-color: #e2e8f0 !important;
+        border-bottom-color: #cbd5e1 !important;
+    }
+    
+    #translationModal .modal-title { color: var(--accent-color) !important; }
+    body.light-mode #translationModal .modal-title { color: #0d6efd !important; }
+
+    #translationModal .dict-add-zone { 
+        background-color: rgba(0, 0, 0, 0.15) !important; 
+        border-bottom: 1px solid var(--border-color) !important; 
+    }
+    body.light-mode #translationModal .dict-add-zone { 
+        background-color: #f8fafc !important; 
+        border-bottom-color: #cbd5e1 !important;
+    }
+
+    #translationModal .dict-filter-banner { 
+        background-color: rgba(0, 0, 0, 0.3) !important; 
+        border-bottom: 1px solid var(--border-color) !important; 
+    }
+    body.light-mode #translationModal .dict-filter-banner { 
+        background-color: #f1f5f9 !important; 
+        border-bottom-color: #cbd5e1 !important;
+    }
+
+    /* 📌 核心機制：0 縫隙貼齊與表頭凍結軌道 */
+    #translationModal .table-responsive-container {
+        max-height: 450px; 
+        overflow-y: auto;
+        position: relative;
+        padding-top: 0 !important;     /* 🌟 核心防漏：軌道頂部邊距歸零 */
+        margin-top: 0 !important;
+    }
+    
+    #translationModal .table {
+        margin-top: 0 !important;
+        margin-bottom: 0 !important;
+        border-collapse: collapse !important;
+    }
+    
+    #translationModal .table th {
+        position: sticky !important;
+        top: 0 !important;             /* 牢牢釘在滾動軌道最頂端 */
+        z-index: 30 !important;
+        background-color: #2d3748 !important; /* 🌟 深色模式表頭實體防漏色面 */
+        color: var(--accent-color) !important;
+        border-bottom: 2px solid var(--accent-color) !important;
+        font-weight: bold !important;
+        padding: 12px 8px !important;
+    }
+    body.light-mode #translationModal .table th {
+        background-color: #e2e8f0 !important; /* 🌟 淺色模式表頭實體防漏色面 */
+        color: #0d6efd !important;
+        border-bottom: 2px solid #0d6efd !important;
+    }
+    
+    /* 🌟 核心修正：把 Bootstrap 原生的表格變數拿回來用，徹底解決白底黑塊問題！ */
+    #translationModal .table-dark {
+        --bs-table-bg: transparent; /* 深色模式下維持透明，透出底層的深色背景 */
+        --bs-table-color: var(--text-main);
+        --bs-table-border-color: var(--border-color);
+        --bs-table-striped-bg: rgba(0, 0, 0, 0.15);
+        --bs-table-hover-bg: rgba(255, 255, 255, 0.05);
+    }
+    
+    body.light-mode #translationModal .table-dark {
+        --bs-table-bg: #ffffff; /* 淺色模式下，強制將 table-dark 變數洗成白色系 */
+        --bs-table-color: #334155;
+        --bs-table-border-color: #cbd5e1;
+        --bs-table-striped-bg: #f8fafc;
+        --bs-table-hover-bg: #f1f5f9;
+    }
+
+    /* 輸入控制項智慧型變色外殼 */
+    #translationModal .form-control-custom,
+    #translationModal .form-select-custom {
+        background-color: var(--bg-input) !important;
+        color: var(--text-main) !important;
+        border: 1px solid var(--border-color) !important;
+        font-size: 0.98rem !important;
+    }
+    body.light-mode #translationModal .form-control-custom,
+    body.light-mode #translationModal .form-select-custom {
+        background-color: #ffffff !important;
+        color: #1e293b !important;
+        border: 1px solid #ced4da !important;
+    }
+    body.light-mode #translationModal .btn-close-white { filter: invert(1) !important; }
+    
+    /* 🌟 新增：分頁導覽小圓點與分頁容器切換樣式 */
+    .page-dots { display: flex; gap: 8px; align-items: center; margin-right: 15px; }
+    .page-dot { width: 12px; height: 12px; border-radius: 50%; background-color: var(--border-color); cursor: pointer; transition: all 0.3s ease; }
+    .page-dot.active { background-color: var(--accent-color); transform: scale(1.3); }
+    
+    /* 🌟 核心防破圖修正：加上 flex: 1 與 min-height: 0，強迫容器對齊外框並約束內部捲軸 */
+    .page-container { 
+        transition: opacity 0.3s ease; 
+        flex: 1; 
+        min-height: 0; 
+        display: flex; 
+        flex-direction: column; 
+    }
+    
+    .d-none-custom { display: none !important; }
+    
 </style>
 {% endblock %}
 
@@ -164,270 +300,406 @@
         
         <div class="top-banner">
             <h5 class="m-0 fw-bold" style="color: var(--accent-color);"><i class="bi bi-gear-fill me-2" style="color: var(--text-muted);"></i>全域系統設定中心</h5>
-            <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm" onclick="toggleTheme()"><i class="bi bi-moon-stars-fill"></i> 深淺切換</button>
+            <div class="d-flex align-items-center">
+                <div class="page-dots" id="settingsPagination">
+                    <span class="page-dot active" onclick="switchSettingsPage(1)" title="第一頁：核心設定"></span>
+                    <span class="page-dot" onclick="switchSettingsPage(2)" title="第二頁：機構與推播"></span>
+                </div>
+                <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm" onclick="toggleTheme()"><i class="bi bi-moon-stars-fill"></i> 深淺切換</button>
+            </div>
         </div>
 
-		<div class="row custom-gap row-full-height pb-2">            
-            
-            <div class="col-lg-6 h-100">
-                <div class="card card-settings">
-                    <div class="card-header-custom-1 flex-shrink-0"><i class="bi bi-cpu-fill me-2"></i>核心排程與網路通訊</div>
-                    <div class="card-body p-2" style="overflow: hidden;">
-                        
-                        <div class="settings-grid">
-                            
-							<div class="setting-block border-info">
-                                <div class="block-title text-info"><i class="bi bi-shield-lock me-2"></i>系統防護與流量網段定義</div>
-                                <div class="block-content">
-                                    <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">系統授權登入白名單</label>
-                                    <input type="text" id="allowed-ips" class="form-control form-control-custom form-control-sm mb-2" placeholder="例如: 192.168.1.0/24">
-                                    
-                                    <label class="form-label text-info fw-bold mb-1 mt-2" style="font-size:0.85rem;">內網流量統計網段 (包含)</label>
-									<textarea id="flow-internal-nets" class="form-control form-control-custom form-control-sm mb-2 custom-scroll" rows="2" placeholder="例如: 10.0.0.0/8, 192.168.0.0/16, 2001:db8::/32"></textarea>
+        <div id="settings-page-1" class="page-container w-100">
+            <div class="row custom-gap row-full-height pb-2">
 
-									<label class="form-label text-warning fw-bold mb-1 mt-1" style="font-size:0.85rem;">特殊防禦隔離網段 (排除)</label>
-									<input type="text" id="flow-exclude-nets" class="form-control form-control-custom form-control-sm mb-3" placeholder="例如: 192.168.10.0/24, fe80::/10">
+				<div class="col-lg-6 h-100">
+					<div class="card card-settings">
+						<div class="card-header-custom-1 flex-shrink-0"><i class="bi bi-cpu-fill me-2"></i>核心排程與網路通訊</div>
+						<div class="card-body p-2" style="overflow: hidden;">
+							
+							<div class="settings-grid">
+								
+								<div class="setting-block border-info">
+									<div class="block-title text-info"><i class="bi bi-shield-lock me-2"></i>系統防護與流量網段定義</div>
+									<div class="block-content">
+										<label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">系統授權登入白名單</label>
+										<input type="text" id="allowed-ips" class="form-control form-control-custom form-control-sm mb-2" placeholder="例如: 192.168.1.0/24">
+										
+										<label class="form-label text-info fw-bold mb-1 mt-2" style="font-size:0.85rem;">內網流量統計網段 (包含)</label>
+										<textarea id="flow-internal-nets" class="form-control form-control-custom form-control-sm mb-2 custom-scroll" rows="2" placeholder="例如: 10.0.0.0/8, 192.168.0.0/16, 2001:db8::/32"></textarea>
 
-                                    <span class="setting-desc mb-3">設定可存取系統之來源，以及大數據判定為「內網」的範圍與黑名單 (支援 CIDR，多組請以逗號分隔)。</span>
-                                    <button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm" onclick="saveNetworkSettings()"><i class="bi bi-save me-1"></i>儲存網段定義</button>
-                                </div>
-                            </div>
+										<label class="form-label text-warning fw-bold mb-1 mt-1" style="font-size:0.85rem;">特殊防禦隔離網段 (排除)</label>
+										<input type="text" id="flow-exclude-nets" class="form-control form-control-custom form-control-sm mb-3" placeholder="例如: 192.168.10.0/24, fe80::/10">
 
-                            <div class="setting-block border-success">
-                                <div class="block-title text-success"><i class="bi bi-clock-history me-2"></i>系統時間同步 (NTP)</div>
-                                <div class="block-content">
-                                    <input type="text" id="ntp-servers" class="form-control form-control-custom form-control-sm mb-2" placeholder="多筆以逗號分隔">
-                                    <div class="input-group input-group-sm mb-2">
-                                        <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">校時週期</span>
-                                        <input type="number" id="ntp-interval" class="form-control form-control-custom text-center fw-bold" value="60" min="1">
-                                        <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">分鐘</span>
-                                    </div>
-                                    <span class="setting-desc mb-3">確保系統與日誌時間之一致性 (資安基本要求)。自動過濾非法網域與 IP。</span>
-                                    <div class="d-flex gap-2">
-                                        <button class="btn btn-outline-success btn-sm flex-grow-1 fw-bold shadow-sm" onclick="saveNtpSettings()">儲存校時設定</button>
-                                        <button class="btn btn-outline-warning btn-sm fw-bold shadow-sm px-3" onclick="forceNtpSync()"><i class="bi bi-clock-history"></i> 手動校時</button>
-                                    </div>
-                                </div>
-                            </div>
+										<span class="setting-desc mb-3">設定可存取系統之來源，以及大數據判定為「內網」的範圍與黑名單 (支援 CIDR，多組請以逗號分隔)。</span>
+										<button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm" onclick="saveNetworkSettings()"><i class="bi bi-save me-1"></i>儲存網段定義</button>
+									</div>
+								</div>
 
-                            <div class="setting-block border-warning">
-                                <div class="block-title text-warning"><i class="bi bi-speedometer2 me-2"></i>背景排程引擎設定</div>
-                                <div class="block-content">
-                                    <div class="mb-3">
-                                        <label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">效能與流量輪詢間隔 (Polling)</label>
-                                        <select id="polling-interval" class="form-select form-select-custom form-select-sm mb-1">
-                                            <option value="1">1 分鐘 (高負載/極高精準)</option>
-                                            <option value="2">2 分鐘</option>
-                                            <option value="3">3 分鐘 (建議值)</option>
-                                            <option value="4">4 分鐘</option>
-                                            <option value="5">5 分鐘 (低負載)</option>
-                                        </select>
-                                        <span class="setting-desc mb-2">設定背景 SNMP 引擎向全網設備撈取流量計數器的頻率。</span>
-                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('polling')">儲存輪詢設定</button>
-                                    </div>
-                                    <hr class="border-secondary my-3">
-                                    <div class="mb-2">
-                                        <label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">自動拓樸掃描間隔 (Topo-Scan)</label>
-                                        <select id="toposcan-interval" class="form-select form-select-custom form-select-sm mb-1">
-                                            <option value="0">完全關閉 (僅允許手動掃描)</option>
-                                            <option value="15">每 15 分鐘</option>
-                                            <option value="30">每 30 分鐘</option>
-                                            <option value="60">每 1 小時</option>
-                                            <option value="120">每 2 小時 (建議值)</option>
-                                            <option value="240">每 4 小時</option>
-                                        </select>
-                                        <span class="setting-desc mb-2">設定背景守護行程自動追蹤 LLDP/FDB 鄰居異動的頻率。開啟過密可能影響設備 CPU 負載。</span>
-                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('toposcan')">儲存拓樸排程</button>
-                                    </div>
-									<hr class="border-secondary my-3">
-                                    <div class="mb-2">
-                                        <label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">全天候異常偵測頻率 (Anomaly-Scan)</label>
-                                        <select id="anomaly-interval" class="form-select form-select-custom form-select-sm mb-1">
-                                            <option value="1">每 1 分鐘 (高頻率)</option>
-                                            <option value="2">每 2 分鐘</option>
-                                            <option value="3">每 3 分鐘</option>
-                                            <option value="4">每 4 分鐘</option>
-                                            <option value="5">每 5 分鐘 (建議值)</option>
-                                        </select>
-                                        <span class="setting-desc mb-2">設定戰情室更新異常事件 (如 MAC 迴圈、私接 HUB) 的刷新週期。</span>
-                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('anomaly')">儲存偵測排程</button>
-                                    </div>
-									<hr class="border-secondary my-3">
-                                    <div class="mb-2">
-                                        <div class="d-flex align-items-center mb-2">
-                                            <div class="form-check form-switch m-0">
-                                                <input class="form-check-input" type="checkbox" id="autobackup_enabled">
-                                                <label class="form-check-label text-warning fw-bold ms-2" for="autobackup_enabled">啟用每日自動備份</label>
-                                            </div>
+								<div class="setting-block border-success">
+									<div class="block-title text-success"><i class="bi bi-clock-history me-2"></i>系統時間同步 (NTP)</div>
+									<div class="block-content">
+										<input type="text" id="ntp-servers" class="form-control form-control-custom form-control-sm mb-2" placeholder="多筆以逗號分隔">
+										<div class="input-group input-group-sm mb-2">
+											<span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">校時週期</span>
+											<input type="number" id="ntp-interval" class="form-control form-control-custom text-center fw-bold" value="60" min="1">
+											<span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">分鐘</span>
+										</div>
+										<span class="setting-desc mb-3">確保系統與日誌時間之一致性 (資安基本要求)。自動過濾非法網域與 IP。</span>
+										<div class="d-flex gap-2">
+											<button class="btn btn-outline-success btn-sm flex-grow-1 fw-bold shadow-sm" onclick="saveNtpSettings()">儲存校時設定</button>
+											<button class="btn btn-outline-warning btn-sm fw-bold shadow-sm px-3" onclick="forceNtpSync()"><i class="bi bi-clock-history"></i> 手動校時</button>
+										</div>
+									</div>
+								</div>
+
+								<div class="setting-block border-warning">
+									<div class="block-title text-warning"><i class="bi bi-speedometer2 me-2"></i>背景排程引擎設定</div>
+									<div class="block-content">
+										<div class="mb-3">
+											<label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">效能與流量輪詢間隔 (Polling)</label>
+											<select id="polling-interval" class="form-select form-select-custom form-select-sm mb-1">
+												<option value="1">1 分鐘 (高負載/極高精準)</option>
+												<option value="2">2 分鐘</option>
+												<option value="3">3 分鐘 (建議值)</option>
+												<option value="4">4 分鐘</option>
+												<option value="5">5 分鐘 (低負載)</option>
+											</select>
+											<span class="setting-desc mb-2">設定背景 SNMP 引擎向全網設備撈取流量計數器的頻率。</span>
+											<button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('polling')">儲存輪詢設定</button>
+										</div>
+										<hr class="border-secondary my-3">
+										<div class="mb-2">
+											<label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">自動拓樸掃描間隔 (Topo-Scan)</label>
+											<select id="toposcan-interval" class="form-select form-select-custom form-select-sm mb-1">
+												<option value="0">完全關閉 (僅允許手動掃描)</option>
+												<option value="15">每 15 分鐘</option>
+												<option value="30">每 30 分鐘</option>
+												<option value="60">每 1 小時</option>
+												<option value="120">每 2 小時 (建議值)</option>
+												<option value="240">每 4 小時</option>
+											</select>
+											<span class="setting-desc mb-2">設定背景守護行程自動追蹤 LLDP/FDB 鄰居異動的頻率。開啟過密可能影響設備 CPU 負載。</span>
+											<button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('toposcan')">儲存拓樸排程</button>
+										</div>
+										<hr class="border-secondary my-3">
+										<div class="mb-2">
+											<label class="form-label fw-bold text-white-50 mb-1" style="font-size:0.85rem;">全天候異常偵測頻率 (Anomaly-Scan)</label>
+											<select id="anomaly-interval" class="form-select form-select-custom form-select-sm mb-1">
+												<option value="1">每 1 分鐘 (高頻率)</option>
+												<option value="2">每 2 分鐘</option>
+												<option value="3">每 3 分鐘</option>
+												<option value="4">每 4 分鐘</option>
+												<option value="5">每 5 分鐘 (建議值)</option>
+											</select>
+											<span class="setting-desc mb-2">設定戰情室更新異常事件 (如 MAC 迴圈、私接 HUB) 的刷新週期。</span>
+											<button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveEngineSettings('anomaly')">儲存偵測排程</button>
+										</div>
+										<hr class="border-secondary my-3">
+										<div class="mb-2">
+											<div class="d-flex align-items-center mb-2">
+												<div class="form-check form-switch m-0">
+													<input class="form-check-input" type="checkbox" id="autobackup_enabled">
+													<label class="form-check-label text-warning fw-bold ms-2" for="autobackup_enabled">啟用每日自動備份</label>
+												</div>
+											</div>
+											<div class="input-group input-group-sm mb-2">
+												<span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">執行時間</span>
+												<input type="time" id="autobackup_time" class="form-control form-control-custom text-center fw-bold" value="02:00">
+											</div>
+											<div class="input-group input-group-sm mb-2">
+												<span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">備份範圍</span>
+												<select id="autobackup_scope" class="form-select form-select-custom">
+													<option value="all">L1~L4 全網設備</option>
+													<option value="visible">僅顯示中的設備</option>
+												</select>
+											</div>
+											<span class="setting-desc mb-2">設定系統於每日指定時間，於背景自動啟動多核心並發備份。</span>
+											<button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveAutoBackupSettings()"><i class="bi bi-cloud-arrow-down"></i> 儲存自動備份排程</button>
+										</div>
+									</div>
+								</div>
+
+								<div class="setting-block border-danger">
+									<div class="block-title text-danger"><i class="bi bi-bell-fill me-2"></i>Ntfy 主動告警推播</div>
+									<div class="block-content">
+										<div class="d-flex align-items-center mb-3">
+											<div class="form-check form-switch m-0">
+												<input class="form-check-input" type="checkbox" id="ntfy_enabled">
+												<label class="form-check-label text-danger ms-2" for="ntfy_enabled">開啟 Ntfy 主動斷線告警</label>
+											</div>
+										</div>
+										
+										<div class="mb-3">
+											<label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">伺服器網址</label>
+											<input type="text" class="form-control form-control-custom form-control-sm mb-1" id="ntfy_url" placeholder="例如: http://localhost:8080/your_topic">
+											<span class="setting-desc">請填寫完整的自建 ntfy 伺服器網址與訂閱 Topic 名稱。</span>
+										</div>
+
+										<div class="mb-3">
+											<label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">重覆推播間隔</label>
+											<select id="ntfy_interval" class="form-select form-select-custom form-select-sm mb-1" title="重覆推播間隔">
+												<option value="1">間隔 1 分鐘</option>
+												<option value="2">間隔 2 分鐘</option>
+												<option value="3">間隔 3 分鐘</option>
+												<option value="4">間隔 4 分鐘</option>
+												<option value="5" selected>間隔 5 分鐘 (建議值)</option>
+											</select>
+											<span class="setting-desc">設定設備持續斷線時，每次發送推播的等待時間。</span>
+										</div>									
+
+										<div class="mb-4">
+											<label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">最大推播次數</label>
+											<select id="ntfy_count" class="form-select form-select-custom form-select-sm mb-1" title="最大推播次數">
+												<option value="1">最多 1 次</option>
+												<option value="2">最多 2 次</option>
+												<option value="3" selected>最多 3 次 (建議值)</option>
+											</select>
+											<span class="setting-desc">限制同一異常事件的最大通知次數，避免手機遭無效洗版。</span>
+										</div>
+
+										<div class="d-flex gap-2">
+											<button class="btn btn-outline-danger btn-sm flex-grow-1 fw-bold shadow-sm" onclick="saveNtfySettings()">儲存推播設定</button>
+											<button type="button" class="btn btn-danger btn-sm fw-bold shadow-sm px-3" onclick="testPushAlert()"><i class="bi bi-bell-fill"></i> 測試</button>
+										</div>
+									</div>
+								</div>
+
+							</div>
+						</div>
+					</div>
+				</div>
+
+				<div class="col-lg-6 h-100">
+					<div class="card card-settings">
+						<div class="card-header-custom-2 flex-shrink-0"><i class="bi bi-shield-check me-2"></i>系統安全、防禦與維運政策</div>
+						<div class="card-body p-2" style="overflow: hidden;">
+							
+							<div class="settings-grid">
+								
+								<div class="setting-block border-primary">
+									<div class="block-title text-primary"><i class="bi bi-person-lock me-2"></i>基於角色之權限控制 (RBAC)</div>
+									<div class="block-content">
+										<div class="d-flex align-items-center mb-3">
+											<div class="form-check form-switch m-0">
+												<input class="form-check-input" type="checkbox" id="rbacToggleSwitch">
+												<label class="form-check-label text-primary ms-2" for="rbacToggleSwitch">啟動管理員角色隔離驗證</label>
+											</div>
+										</div>
+										<span class="setting-desc mb-3">
+											開啟後，系統全面激活權限矩陣。測試或本機部署時可暫時關閉此開關以避免頻繁輸入帳密。<br><br>
+											<span class="text-danger fw-bold"><i class="bi bi-exclamation-triangle-fill"></i> 警告：正式內網環境必須維持開啟！</span>
+											<button class="btn btn-outline-primary btn-sm w-100 fw-bold shadow-sm mt-3 py-2" onclick="openTranslationModal()">
+												<i class="bi bi-translate me-1"></i>⚙️ 運維翻譯字典維護面板
+											</button>
+										</span>
+									</div>
+								</div>
+
+								<div class="setting-block border-success">
+									<div class="block-title text-success"><i class="bi bi-card-checklist me-2"></i>系統稽核政策開關</div>
+									<div class="block-content">
+										<div class="alert alert-custom p-2 mb-3" style="font-size: 0.8rem;">
+											<i class="bi bi-info-circle-fill me-1" style="color: var(--accent-color);"></i> <b>Level 1 高風險操作</b> (如配置異動) 屬強制合規，預設 100% 紀錄無法關閉。
+										</div>
+
+										<div class="form-check form-switch mb-1">
+											<input class="form-check-input" type="checkbox" id="audit_engine_bg">
+											<label class="form-check-label ms-1" style="font-size:0.85rem;" for="audit_engine_bg">【Level 2】背景引擎例行運作紀錄</label>
+										</div>
+										<span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄「多核心並行輪詢完成」等純背景資訊。關閉可減少無效日誌量。</span>
+
+										<div class="form-check form-switch mb-1">
+											<input class="form-check-input" type="checkbox" id="audit_net_scan">
+											<label class="form-check-label ms-1" style="font-size:0.85rem;" for="audit_net_scan">【Level 2】主動網路探測紀錄</label>
+										</div>
+										<span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄「LLDP/全網拓樸掃描」等探測行為。建議開啟防惡意掃描。</span>
+
+										<div class="form-check form-switch mb-1">
+											<input class="form-check-input" type="checkbox" id="audit_ui_action">
+											<label class="form-check-label text-warn-custom ms-1" style="font-size:0.85rem;" for="audit_ui_action">【Level 3】前端介面行為軌跡</label>
+										</div>
+										<span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄重要動作(如變更版面/匯出)。<b class="text-warn-custom">高資安環境建議開啟。</b></span>
+
+										<div class="form-check form-switch mb-1">
+											<input class="form-check-input" type="checkbox" id="audit_ui_view">
+											<label class="form-check-label text-secondary-custom ms-1" style="font-size:0.85rem;" for="audit_ui_view">【Level 3】前端瀏覽軌跡</label>
+										</div>
+										<span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">無差別紀錄純讀取行為。<b>資料量極大，平時建議關閉。</b></span>
+
+										<button class="btn btn-outline-success btn-sm w-100 fw-bold shadow-sm mt-1" onclick="saveAuditSettings()">套用稽核政策</button>
+									</div>
+								</div>
+
+								<div class="setting-block border-warning">
+									<div class="block-title text-warning" style="background: linear-gradient(135deg, rgba(74,63,18,0.3), rgba(45,38,10,0.3)); border-bottom-color: rgba(255,193,7,0.5);"><i class="bi bi-bug-fill me-2"></i>系統進階除錯雷達</div>
+									<div class="block-content">
+										<div class="d-flex align-items-center mb-3">
+											<div class="form-check form-switch m-0">
+												<input class="form-check-input" type="checkbox" id="debugModeSwitch">
+												<label class="form-check-label text-warning ms-2" for="debugModeSwitch">啟動終端機即時除錯日誌</label>
+											</div>
+										</div>
+										<span class="setting-desc mb-3">
+											開啟後，系統進行「流量輪詢」、「拓樸掃描」以及「<b class="text-info">內網高耗能大數據分析</b>」時，會在背景終端機即時印出底層解析進度與原始過濾清單，有助於工程追蹤。<br><br>                                        <span class="text-danger fw-bold"><i class="bi bi-exclamation-triangle-fill"></i> 注意：平時建議維持關閉狀態，以免大量紀錄影響系統效能。</span>
+										</span>
+										
+										<hr class="border-secondary my-3">
+										<div class="d-flex align-items-center mb-3">
+											<div class="form-check form-switch m-0">
+												<input class="form-check-input" type="checkbox" id="trapServiceSwitch">
+												<label class="form-check-label text-warning ms-2" for="trapServiceSwitch">啟動 UDP 162 SNMP Trap 監聽服務</label>
+											</div>
+										</div>
+										<span class="setting-desc mb-2">
+											開啟後，主動告警引擎將全天候補捉實體核心交換器的網孔震盪（Port Flapping）與斷線事件；若您正在調整機房線路、面臨 Trap 洗版風暴，可將此開關暫時關閉以凍結通知。
+										</span>
+									</div>
+								</div>
+
+								<div class="setting-block border-info d-flex flex-column h-100">
+									<div class="block-title text-info flex-shrink-0"><i class="bi bi-people-fill me-2"></i>系統帳號與權限管理</div>
+									<div class="block-content d-flex flex-column justify-content-center align-items-center text-center flex-grow-1 p-3">
+										<i class="bi bi-person-lines-fill mb-2 text-info" style="font-size: 2.8rem; opacity: 0.7;"></i>
+										<span class="setting-desc px-2 mb-3 fw-bold">管理登入帳號、重設密碼與指派 RBAC 權限角色 (Admin, Operator, Auditor)。</span>
+										<button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm py-2" onclick="openUserMgmtModal()"><i class="bi bi-sliders2 me-1"></i>開啟帳號管理面板</button>
+									</div>
+								</div>
+
+							</div>
+
+						</div>
+					</div>
+				</div>
+
+            </div>
+        </div>
+		
+		<div id="settings-page-2" class="page-container w-100 d-none-custom">
+            <div class="row custom-gap row-full-height pb-2"> 
+                
+                <div class="col-lg-6 h-100">
+                    <div class="card card-settings">
+                        <div class="card-header-custom-1 flex-shrink-0" style="background-color: #2c1a4d; color: #b794f6; border-bottom-color: #4a3a6b;">
+                            <i class="bi bi-building me-2"></i>多站點集中管理 (Centralized Sync)
+                        </div>
+                        <div class="card-body p-2" style="overflow: hidden;">
+                            <div class="settings-grid">
+                                <div class="setting-block" style="border-left: 4px solid #b794f6;">
+                                    <div class="block-title" style="color: #b794f6;"><i class="bi bi-info-square-fill me-2"></i>機構基本資料 (Identity)</div>
+                                    <div class="block-content">
+                                        <div class="mb-2">
+                                            <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">行政區 / 營運處</label>
+                                            <input type="text" id="site_district" class="form-control form-control-custom form-control-sm" placeholder="例：臺北市大安區 / 北區分公司">
                                         </div>
-                                        <div class="input-group input-group-sm mb-2">
-                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">執行時間</span>
-                                            <input type="time" id="autobackup_time" class="form-control form-control-custom text-center fw-bold" value="02:00">
+                                        <div class="mb-2">
+                                            <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">統計代碼 / 企業統編 (6~8碼)</label>
+                                            <input type="text" id="site_code" class="form-control form-control-custom form-control-sm font-monospace text-info fw-bold" placeholder="例：330301">
                                         </div>
-                                        <div class="input-group input-group-sm mb-2">
-                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">備份範圍</span>
-                                            <select id="autobackup_scope" class="form-select form-select-custom">
-                                                <option value="all">L1~L4 全網設備</option>
-                                                <option value="visible">僅顯示中的設備</option>
+                                        <div class="mb-3">
+                                            <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">機構名稱 / 學校名稱</label>
+                                            <input type="text" id="site_name" class="form-control form-control-custom form-control-sm" placeholder="例：大安高工">
+                                        </div>
+                                        <span class="setting-desc mb-3">此資料將作為拓樸藍圖推播至總部時的「站點辨識金鑰 (Site ID)」，請確保各區代碼唯一。</span>
+                                        <button class="btn btn-sm w-100 fw-bold shadow-sm" style="color: #1a202c; background-color: #b794f6; border-color: #b794f6;" onclick="saveSchoolInfo()"><i class="bi bi-cloud-check-fill me-1"></i>儲存機構基本資料</button>
+                                    </div>
+                                </div>
+                                
+                                <div class="setting-block border-primary">
+                                    <div class="block-title text-primary"><i class="bi bi-globe-asia-australia me-2"></i>總部全局視角 (HQ View)</div>
+                                    <div class="block-content">
+                                        <div class="mb-2">
+                                            <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">系統運作視角模式</label>
+                                            <select id="hq_view_mode" class="form-select form-select-custom form-select-sm fw-bold">
+                                                <option value="local" selected>📍 單一分區模式 (獨立運作)</option>
+                                                <option value="hq">🌍 總部全局模式 (集中管理)</option>
                                             </select>
                                         </div>
-                                        <span class="setting-desc mb-2">設定系統於每日指定時間，於背景自動啟動多核心並發備份。</span>
-                                        <button class="btn btn-outline-warning btn-sm w-100 fw-bold shadow-sm" onclick="saveAutoBackupSettings()"><i class="bi bi-cloud-arrow-down"></i> 儲存自動備份排程</button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="setting-block border-danger">
-                                <div class="block-title text-danger"><i class="bi bi-bell-fill me-2"></i>Ntfy 主動告警推播</div>
-                                <div class="block-content">
-                                    <div class="d-flex align-items-center mb-3">
-                                        <div class="form-check form-switch m-0">
-                                            <input class="form-check-input" type="checkbox" id="ntfy_enabled">
-                                            <label class="form-check-label text-danger ms-2" for="ntfy_enabled">開啟 Ntfy 主動斷線告警</label>
+                                        <div class="mb-2">
+                                            <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">總部伺服器位址 (HQ Server URL)</label>
+                                            <input type="text" id="hq_server_url" class="form-control form-control-custom form-control-sm font-monospace text-primary fw-bold" placeholder="例：http://192.168.1.100:5000">
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label text-white-50 fw-bold mb-1" style="font-size:0.85rem;">全域連線認證碼 (Sync Secret)</label>
+                                            <input type="text" id="hq_sync_secret" class="form-control form-control-custom form-control-sm font-monospace text-warning fw-bold" placeholder="例：Tpe@2026_NOC">
+                                        </div>
+                                        <span class="setting-desc mb-3">設定總部模式與推播目標。若本機為總部伺服器請選擇「全局模式」。</span>
+                                        <div class="d-flex gap-2">
+                                            <button class="btn btn-outline-primary btn-sm flex-grow-1 fw-bold shadow-sm" onclick="saveHqModeSettings()"><i class="bi bi-hdd-network me-1"></i>儲存設定</button>
+                                            <button class="btn btn-primary btn-sm fw-bold shadow-sm px-3 text-white" onclick="testHqConnection()"><i class="bi bi-wifi"></i> 測試連線</button>
                                         </div>
                                     </div>
-                                    
-                                    <div class="mb-3">
-                                        <label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">伺服器網址</label>
-                                        <input type="text" class="form-control form-control-custom form-control-sm mb-1" id="ntfy_url" placeholder="例如: http://localhost:8080/your_topic">
-                                        <span class="setting-desc">請填寫完整的自建 ntfy 伺服器網址與訂閱 Topic 名稱。</span>
+                                </div>
+								
+                                <div class="setting-block border-info">
+                                    <div class="block-title text-info"><i class="bi bi-diagram-3-fill me-2"></i>拓樸藍圖推送 (Topology)</div>
+                                    <div class="block-content">
+                                        <div class="input-group input-group-sm mb-2">
+                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">每天首發時間</span>
+                                            <input type="time" id="sync_topo_start" class="form-control form-control-custom text-center fw-bold" value="01:00">
+                                        </div>
+                                        <div class="input-group input-group-sm mb-2">
+                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">後續發送間隔</span>
+                                            <select id="sync_topo_interval" class="form-select form-select-custom fw-bold">
+                                                <option value="6">每 6 小時</option>
+                                                <option value="12">每 12 小時</option>
+                                                <option value="24" selected>每 24 小時 (建議值)</option>
+                                                <option value="0">僅限手動推送</option>
+                                            </select>
+                                        </div>
+                                        <span class="setting-desc mb-3">包含防火牆、交換器與 AP 控制器的完整組態與網孔連線設定。資料量較大，屬低頻率更新。</span>
+                                        
+                                        <div class="d-flex gap-2">
+                                            <button class="btn btn-outline-info btn-sm fw-bold shadow-sm text-truncate" style="width: 44%;" onclick="saveSyncSettings()"><i class="bi bi-calendar-check me-1"></i>確認排程</button>
+                                            <button class="btn btn-info btn-sm fw-bold shadow-sm text-dark text-truncate" style="width: 28%;" onclick="testExportSync('topology')" title="測試匯出JSON"><i class="bi bi-download"></i> 測試匯出</button>
+                                            <button class="btn btn-primary btn-sm fw-bold shadow-sm text-white text-truncate" style="width: 28%;" onclick="manualPushSync('topology')"><i class="bi bi-cloud-arrow-up-fill"></i> 立即推送</button>
+                                        </div>
                                     </div>
+                                </div>
 
-                                    <div class="mb-3">
-                                        <label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">重覆推播間隔</label>
-                                        <select id="ntfy_interval" class="form-select form-select-custom form-select-sm mb-1" title="重覆推播間隔">
-                                            <option value="1">間隔 1 分鐘</option>
-                                            <option value="2">間隔 2 分鐘</option>
-                                            <option value="3">間隔 3 分鐘</option>
-                                            <option value="4">間隔 4 分鐘</option>
-                                            <option value="5" selected>間隔 5 分鐘 (建議值)</option>
-                                        </select>
-                                        <span class="setting-desc">設定設備持續斷線時，每次發送推播的等待時間。</span>
-                                    </div>									
-
-                                    <div class="mb-4">
-                                        <label class="form-label text-danger fw-bold mb-1" style="font-size:0.85rem;">最大推播次數</label>
-                                        <select id="ntfy_count" class="form-select form-select-custom form-select-sm mb-1" title="最大推播次數">
-                                            <option value="1">最多 1 次</option>
-                                            <option value="2">最多 2 次</option>
-                                            <option value="3" selected>最多 3 次 (建議值)</option>
-                                        </select>
-                                        <span class="setting-desc">限制同一異常事件的最大通知次數，避免手機遭無效洗版。</span>
-                                    </div>
-
-                                    <div class="d-flex gap-2">
-                                        <button class="btn btn-outline-danger btn-sm flex-grow-1 fw-bold shadow-sm" onclick="saveNtfySettings()">儲存推播設定</button>
-                                        <button type="button" class="btn btn-danger btn-sm fw-bold shadow-sm px-3" onclick="testPushAlert()"><i class="bi bi-bell-fill"></i> 測試</button>
+                                <div class="setting-block border-success">
+                                    <div class="block-title text-success"><i class="bi bi-activity me-2"></i>戰情狀態推送 (Status)</div>
+                                    <div class="block-content">
+                                        <div class="input-group input-group-sm mb-2">
+                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">每日重置起點</span>
+                                            <input type="time" id="sync_status_start" class="form-control form-control-custom text-center fw-bold" value="00:00">
+                                        </div>
+                                        <div class="input-group input-group-sm mb-2">
+                                            <span class="input-group-text bg-dark border-secondary text-white-50 fw-bold">高頻發送間隔</span>
+                                            <select id="sync_status_interval" class="form-select form-select-custom fw-bold">
+                                                <option value="1">每 1 分鐘</option>
+                                                <option value="3">每 3 分鐘</option>
+                                                <option value="5" selected>每 5 分鐘 (建議值)</option>
+                                                <option value="10">每 10 分鐘</option>
+                                                <option value="0">僅限手動推送</option>
+                                            </select>
+                                        </div>
+                                        <span class="setting-desc mb-3">包含核心設備即時斷線狀態 (Up/Down) 與 CPU/RAM 負載。資料量極小，維持戰情板即時跳動。</span>
+                                        
+                                        <div class="d-flex gap-2">
+                                            <button class="btn btn-outline-success btn-sm fw-bold shadow-sm text-truncate" style="width: 44%;" onclick="saveSyncSettings()"><i class="bi bi-calendar-check me-1"></i>確認排程</button>
+                                            <button class="btn btn-success btn-sm fw-bold shadow-sm text-white text-truncate" style="width: 28%;" onclick="testExportSync('status')" title="測試匯出JSON"><i class="bi bi-download"></i> 測試匯出</button>
+                                            <button class="btn btn-primary btn-sm fw-bold shadow-sm text-white text-truncate" style="width: 28%;" onclick="manualPushSync('status')"><i class="bi bi-cloud-arrow-up-fill"></i> 立即推送</button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <div class="col-lg-6 h-100">
-                <div class="card card-settings">
-                    <div class="card-header-custom-2 flex-shrink-0"><i class="bi bi-shield-check me-2"></i>系統安全、防禦與維運政策</div>
-                    <div class="card-body p-2" style="overflow: hidden;">
-                        
-                        <div class="settings-grid">
-                            
-                            <div class="setting-block border-primary">
-                                <div class="block-title text-primary"><i class="bi bi-person-lock me-2"></i>基於角色之權限控制 (RBAC)</div>
-                                <div class="block-content">
-                                    <div class="d-flex align-items-center mb-3">
-                                        <div class="form-check form-switch m-0">
-                                            <input class="form-check-input" type="checkbox" id="rbacToggleSwitch">
-                                            <label class="form-check-label text-primary ms-2" for="rbacToggleSwitch">啟動管理員角色隔離驗證</label>
-                                        </div>
-                                    </div>
-                                    <span class="setting-desc mb-3">
-                                        開啟後，系統全面激活權限矩陣。測試或本機部署時可暫時關閉此開關以避免頻繁輸入帳密。<br><br>
-                                        <span class="text-danger fw-bold"><i class="bi bi-exclamation-triangle-fill"></i> 警告：正式內網環境必須維持開啟！</span>
-                                    </span>
-                                </div>
-                            </div>
-
-                            <div class="setting-block border-success">
-                                <div class="block-title text-success"><i class="bi bi-card-checklist me-2"></i>系統稽核政策開關</div>
-                                <div class="block-content">
-                                    <div class="alert alert-custom p-2 mb-3" style="font-size: 0.8rem;">
-                                        <i class="bi bi-info-circle-fill me-1" style="color: var(--accent-color);"></i> <b>Level 1 高風險操作</b> (如配置異動) 屬強制合規，預設 100% 紀錄無法關閉。
-                                    </div>
-
-                                    <div class="form-check form-switch mb-1">
-                                        <input class="form-check-input" type="checkbox" id="audit_engine_bg">
-                                        <label class="form-check-label ms-1" style="font-size:0.85rem;" for="audit_engine_bg">【Level 2】背景引擎例行運作紀錄</label>
-                                    </div>
-                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄「多核心並行輪詢完成」等純背景資訊。關閉可減少無效日誌量。</span>
-
-                                    <div class="form-check form-switch mb-1">
-                                        <input class="form-check-input" type="checkbox" id="audit_net_scan">
-                                        <label class="form-check-label ms-1" style="font-size:0.85rem;" for="audit_net_scan">【Level 2】主動網路探測紀錄</label>
-                                    </div>
-                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄「LLDP/全網拓樸掃描」等探測行為。建議開啟防惡意掃描。</span>
-
-                                    <div class="form-check form-switch mb-1">
-                                        <input class="form-check-input" type="checkbox" id="audit_ui_action">
-                                        <label class="form-check-label text-warn-custom ms-1" style="font-size:0.85rem;" for="audit_ui_action">【Level 3】前端介面行為軌跡</label>
-                                    </div>
-                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">紀錄重要動作(如變更版面/匯出)。<b class="text-warn-custom">高資安環境建議開啟。</b></span>
-
-                                    <div class="form-check form-switch mb-1">
-                                        <input class="form-check-input" type="checkbox" id="audit_ui_view">
-                                        <label class="form-check-label text-secondary-custom ms-1" style="font-size:0.85rem;" for="audit_ui_view">【Level 3】前端瀏覽軌跡</label>
-                                    </div>
-                                    <span class="setting-desc ms-4 mb-3" style="font-size:0.75rem;">無差別紀錄純讀取行為。<b>資料量極大，平時建議關閉。</b></span>
-
-                                    <button class="btn btn-outline-success btn-sm w-100 fw-bold shadow-sm mt-1" onclick="saveAuditSettings()">套用稽核政策</button>
-                                </div>
-                            </div>
-
-                            <div class="setting-block border-warning">
-                                <div class="block-title text-warning" style="background: linear-gradient(135deg, rgba(74,63,18,0.3), rgba(45,38,10,0.3)); border-bottom-color: rgba(255,193,7,0.5);"><i class="bi bi-bug-fill me-2"></i>系統進階除錯雷達</div>
-                                <div class="block-content">
-                                    <div class="d-flex align-items-center mb-3">
-                                        <div class="form-check form-switch m-0">
-                                            <input class="form-check-input" type="checkbox" id="debugModeSwitch">
-                                            <label class="form-check-label text-warning ms-2" for="debugModeSwitch">啟動終端機即時除錯日誌</label>
-                                        </div>
-                                    </div>
-									<span class="setting-desc mb-3">
-                                        開啟後，系統進行「流量輪詢」與「拓樸搜尋」時，會在背景終端機即時印出每台設備的處理進度，有助於工程追蹤。<br><br>
-                                        <span class="text-danger fw-bold"><i class="bi bi-exclamation-triangle-fill"></i> 注意：平時建議維持關閉狀態，以免大量紀錄影響系統效能。</span>
-                                    </span>
-                                    
-                                    <hr class="border-secondary my-3">
-                                    <div class="d-flex align-items-center mb-3">
-                                        <div class="form-check form-switch m-0">
-                                            <input class="form-check-input" type="checkbox" id="trapServiceSwitch">
-                                            <label class="form-check-label text-warning ms-2" for="trapServiceSwitch">啟動 UDP 162 SNMP Trap 監聽服務</label>
-                                        </div>
-                                    </div>
-                                    <span class="setting-desc mb-2">
-                                        開啟後，主動告警引擎將全天候補捉實體核心交換器的網孔震盪（Port Flapping）與斷線事件；若您正在調整機房線路、面臨 Trap 洗版風暴，可將此開關暫時關閉以凍結通知。
-                                    </span>
-                                </div>
-                            </div>
-
-                            <div class="setting-block border-info d-flex flex-column h-100">
-                                <div class="block-title text-info flex-shrink-0"><i class="bi bi-people-fill me-2"></i>系統帳號與權限管理</div>
-                                <div class="block-content d-flex flex-column justify-content-center align-items-center text-center flex-grow-1 p-3">
-                                    <i class="bi bi-person-lines-fill mb-2 text-info" style="font-size: 2.8rem; opacity: 0.7;"></i>
-                                    <span class="setting-desc px-2 mb-3 fw-bold">管理登入帳號、重設密碼與指派 RBAC 權限角色 (Admin, Operator, Auditor)。</span>
-                                    <button class="btn btn-outline-info btn-sm w-100 fw-bold shadow-sm py-2" onclick="openUserMgmtModal()"><i class="bi bi-sliders2 me-1"></i>開啟帳號管理面板</button>
-                                </div>
-                            </div>
-
+                
+                <div class="col-lg-6 h-100">
+                    <div class="card card-settings opacity-50">
+                        <div class="card-header-custom-2 flex-shrink-0"><i class="bi bi-puzzle-fill me-2"></i>系統外掛模組 (預留區)</div>
+                        <div class="card-body p-2 d-flex align-items-center justify-content-center" style="overflow: hidden;">
+                             <h4 class="text-secondary fw-bold">未來外掛模組擴充保留區</h4>
                         </div>
-
                     </div>
                 </div>
+
             </div>
-            
         </div>
+		
     </div>
 </div>
 
@@ -487,6 +759,7 @@
     </div>
   </div>
 </div>
+
 <div class="modal fade" id="changePasswordModal" tabindex="-1" aria-hidden="true" style="z-index: 1060;">
   <div class="modal-dialog modal-sm modal-dialog-centered">
     <div class="modal-content bg-dark text-white border-warning shadow-lg">
@@ -513,7 +786,83 @@
       </div>
     </div>
   </div>
+</div> 
+
+<div class="modal fade" id="translationModal" tabindex="-1" aria-hidden="true" style="z-index: 1055;">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h5 class="modal-title fw-bold"><i class="bi bi-dictionary-fill me-2"></i>地理來源與機構自訂字典維護</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body p-0">
+        <div class="dict-add-zone p-3">
+            <h6 class="fw-bold text-success mb-2"><i class="bi bi-patch-plus-fill me-1"></i>快捷植入新對照詞條</h6>
+            <div class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label text-secondary small mb-1 fw-bold">英文原文 (MaxMind/ip-api 字串)</label>
+                    <input type="text" id="addEngText" class="form-control form-control-custom form-control-sm font-monospace" placeholder="例如: Hsinchu City">
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label text-secondary small mb-1 fw-bold">繁體中文對照名稱</label>
+                    <input type="text" id="addZhText" class="form-control form-control-custom form-control-sm" placeholder="例如: 新竹市 (NOC核心機房)">
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label text-secondary small mb-1 fw-bold">字典分類標籤</label>
+                    <select id="addCategory" class="form-select form-select-custom form-select-sm text-info fw-bold">
+                        <option value="行政區">🏙️ 行政區 (六都與精華區)</option>
+                        <option value="縣市級">🗺️ 縣市級 (基本行政地名)</option>
+                        <option value="科技園區">🔬 科技園區 (科技/軟體重鎮)</option>
+                        <option value="電信固網">🏢 電信固網 (本土核心網管)</option>
+                        <option value="雲端巨頭/CDN">☁️ 雲端巨頭/CDN (基礎建設)</option>
+                        <option value="國際網域/國家">🌍 國際網域/國家 (基礎名詞)</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-success btn-sm w-100 fw-bold shadow-sm py-1.5" onclick="createTranslation()"><i class="bi bi-save-fill"></i> 植入字典</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="dict-filter-banner px-3 py-2 d-flex align-items-center justify-content-between gap-3">
+            <div class="d-flex gap-2 flex-grow-1" style="max-width: 75%;">
+                <div class="input-group input-group-sm flex-grow-1">
+                    <span class="input-group-text bg-dark border-secondary text-white-50"><i class="bi bi-search"></i></span>
+                    <input type="text" id="searchDictKeyword" class="form-control form-control-custom" placeholder="輸入原文或中文關鍵字即時進行篩選..." oninput="filterDictTable()">
+                </div>
+                <select id="filterCategory" class="form-select form-select-custom form-select-sm fw-bold text-info border-secondary w-auto" style="min-width: 210px;" onchange="filterDictTable()">
+                    <option value="all" selected>📂 顯示所有大類對照</option>
+                    <option value="行政區">🏙️ 僅看行政區 (直轄市)</option>
+                    <option value="縣市級">🗺️ 僅看縣市級 (行政地名)</option>
+                    <option value="科技園區">🔬 僅看科技園區 (產業重鎮)</option>
+                    <option value="電信固網">🏢 僅看電信固網 (核心網管)</option>
+                    <option value="雲端巨頭/CDN">☁️ 僅看雲端巨頭 (雲端/CDN)</option>
+                    <option value="國際網域/國家">🌍 僅看國際網域 (基礎名詞)</option>
+                </select>
+            </div>
+            <div class="text-white-50 small fw-bold flex-shrink-0" id="dictCountLabel">共計: 0 組詞條</div>
+        </div>
+
+        <div class="table-responsive-container custom-scroll px-3 pb-3 pt-0">
+            <table class="table table-dark table-striped table-hover mb-0 text-center align-middle" style="table-layout: fixed;">
+                <thead>
+                    <tr>
+                        <th width="18%">分類標籤</th>
+                        <th width="30%">英文原文字串 (不容重複)</th>
+                        <th width="32%">繁體中文對照名稱 (就地編輯)</th>
+                        <th width="20%">維護操作</th>
+                    </tr>
+                </thead>
+                <tbody id="translationTableBody">
+                    <tr><td colspan="4" class="text-center text-muted">正在加載全域維運字典資料庫...</td></tr>
+                </tbody>
+            </table>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -640,6 +989,34 @@
                 if(scopeSel) scopeSel.value = data.scope;
             }
         });
+
+        // 🌟 讀取機構基本資料 (第二分頁)
+        fetch('/api/settings/school_info').then(res => res.json()).then(data => {
+            if(data.success) {
+                document.getElementById('site_district').value = data.district || '';
+                document.getElementById('site_code').value = data.code || '';
+                document.getElementById('site_name').value = data.name || '';
+            }
+        }).catch(e => console.log('school info load pass'));
+
+        // 🌟 讀取總部推播排程設定 (第二分頁)
+        fetch('/api/settings/sync_schedule').then(res => res.json()).then(data => {
+            if(data.success) {
+                document.getElementById('sync_topo_start').value = data.sync_topo_start;
+                document.getElementById('sync_topo_interval').value = data.sync_topo_interval;
+                document.getElementById('sync_status_start').value = data.sync_status_start;
+                document.getElementById('sync_status_interval').value = data.sync_status_interval;
+            }
+        }).catch(e => console.log('sync schedule load pass'));
+		
+		// 🌟 讀取總部視角設定 (第二分頁)
+        fetch('/api/settings/hq_mode').then(res => res.json()).then(data => {
+            if(data.success) {
+                if (data.hq_view_mode) document.getElementById('hq_view_mode').value = data.hq_view_mode;
+                if (data.hq_server_url) document.getElementById('hq_server_url').value = data.hq_server_url;
+                if (data.hq_sync_secret) document.getElementById('hq_sync_secret').value = data.hq_sync_secret; // 🌟 新增這行
+            }
+        }).catch(e => console.log('hq mode load pass'));
 
         // 讀取 RBAC 狀態
         fetch('/api/settings/get').then(res => res.json()).then(data => {
@@ -1007,6 +1384,178 @@
         loadUsersTable();
     }
 
+	function switchSettingsPage(page) {
+        // 切換圓點狀態
+        document.querySelectorAll('.page-dot').forEach((dot, index) => {
+            if(index + 1 === page) dot.classList.add('active');
+            else dot.classList.remove('active');
+        });
+        
+        // 切換容器顯示
+        if(page === 1) {
+            document.getElementById('settings-page-1').classList.remove('d-none-custom');
+            document.getElementById('settings-page-2').classList.add('d-none-custom');
+        } else {
+            document.getElementById('settings-page-1').classList.add('d-none-custom');
+            document.getElementById('settings-page-2').classList.remove('d-none-custom');
+        }
+    }
+
+	function saveSchoolInfo() {
+        const payload = {
+            district: document.getElementById('site_district').value,
+            code: document.getElementById('site_code').value,
+            name: document.getElementById('site_name').value
+        };
+
+        fetch('/api/settings/school_info', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(data => {
+            if(data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ 機構基本資料已成功儲存！`, "success");
+                
+                // 🌟 新增：改了校名，也要求 Navbar 立即刷新標籤！
+                if(typeof window.refreshHQBadge === 'function') window.refreshHQBadge();
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 儲存失敗: ${data.message}`, "danger");
+            }
+        })
+        .catch(err => {
+            if(typeof window.showToast === 'function') window.showToast(`❌ 連線失敗: ${err.message}`, "danger");
+        });
+    }
+
+	function saveSyncSettings() {
+        const payload = {
+            sync_topo_start: document.getElementById('sync_topo_start').value,
+            sync_topo_interval: document.getElementById('sync_topo_interval').value,
+            sync_status_start: document.getElementById('sync_status_start').value,
+            sync_status_interval: document.getElementById('sync_status_interval').value
+        };
+
+        fetch('/api/settings/sync_schedule', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json())
+        .then(data => {
+            if(data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ 推播排程參數已成功儲存！`, "success");
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 儲存失敗: ${data.message}`, "danger");
+            }
+        });
+    }
+
+	function saveHqModeSettings() {
+        const mode = document.getElementById('hq_view_mode').value;
+        const url = document.getElementById('hq_server_url').value; 
+        const secret = document.getElementById('hq_sync_secret').value;
+        
+        fetch('/api/settings/hq_mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hq_view_mode: mode, hq_server_url: url, hq_sync_secret: secret })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if(data.success) {
+                // 🌟 儲存成功後，先跳出提示
+                if(typeof window.showToast === 'function') {
+                    window.showToast(`✅ 總部運作視角與通訊設定已成功儲存！頁面即將重新載入...`, "success");
+                }
+                
+                // 🌟 核心防護：因為切換總部/單一分區會大幅改變導覽列選單，
+                // 必須強制重新載入頁面，讓後端 Jinja2 重新渲染完整的按鈕！
+                setTimeout(() => {
+                    window.location.reload();
+                }, 1200); // 留 1.2 秒讓使用者看清楚成功訊息
+
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 儲存失敗: ${data.message}`, "danger");
+            }
+        });
+    }
+
+	function testHqConnection() {
+        const url = document.getElementById('hq_server_url').value.trim();
+        if(!url) {
+            if(typeof window.showToast === 'function') window.showToast(`⚠️ 請先填寫總部伺服器位址！`, "warning");
+            return;
+        }
+        
+        if(typeof window.showToast === 'function') window.showToast(`⏳ 正在嘗試連線至總部伺服器...`, "info");
+        
+        fetch('/api/hq/test_connection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if(data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ ${data.message}`, "success");
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ ${data.message}`, "danger");
+            }
+        })
+        .catch(err => {
+            if(typeof window.showToast === 'function') window.showToast(`❌ 網路請求失敗，請確認位址是否正確或防火牆設定。`, "danger");
+        });
+    }
+
+    function testExportSync(type) {
+        // 驗證身分金鑰是否填寫
+        const code = document.getElementById('site_code').value.trim();
+        if(!code) {
+            if(typeof window.showToast === 'function') window.showToast(`⚠️ 請先填寫上方的「統計代碼」作為身分識別，才能產生完整的 JSON 封包！`, "warning");
+            return;
+        }
+        
+        if(typeof window.showToast === 'function') window.showToast(`📥 正在打包封裝 ${type === 'topology' ? '拓樸藍圖' : '戰情狀態'} 資料...`, "info");
+        // 直接觸發瀏覽器下載
+        window.location.href = `/api/hq/test_export/${type}`;
+    }
+
+	function manualPushSync(type) {
+        // 驗證是否具備站點金鑰
+        const code = document.getElementById('site_code').value.trim();
+        if(!code) {
+            if(typeof window.showToast === 'function') window.showToast(`⚠️ 必須先填寫「統計代碼」作為身分識別，才能推播資料！`, "warning");
+            return;
+        }
+        
+        const typeName = type === 'topology' ? '拓樸藍圖' : '戰情狀態';
+        if(typeof window.showToast === 'function') window.showToast(`🚀 正在打包並向總部發送【${typeName}】...`, "info");
+        
+        fetch(`/api/hq/manual_push/${type}`, { method: 'POST' })
+        .then(res => {
+            // 🌟 核心防線：如果 HTTP 狀態碼不是 200，且是 401/403，就手動拋出清晰的錯誤
+            if(res.status === 401 || res.status === 403) {
+                throw new Error("您的登入時效已過期，或權限不足以執行此操作。請重新登入管理員帳號！");
+            }
+            // 嘗試解析 JSON，如果伺服器噴了 500 HTML 錯誤頁，這裡也會被 catch 捕捉
+            return res.json();
+        })
+        .then(data => {
+            // 這個區塊是保證有解開 JSON 的時候才會進來
+            if(data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ 推播成功：${data.message}`, "success");
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 推播失敗：${data.message || '未知錯誤'}`, "danger");
+            }
+        })
+        .catch(err => {
+            // 🌟 完美攔截 JSON 解析失敗或網路斷線
+            if(typeof window.showToast === 'function') window.showToast(`❌ 通訊異常：${err.message}`, "danger");
+        });
+    }
+
     function loadUsersTable() {
         fetch('/api/users')
             .then(res => res.json())
@@ -1142,6 +1691,169 @@
                         loadUsersTable();
                     } else {
                         if(typeof window.showToast === 'function') window.showToast(`❌ 刪除失敗：${data.message}`, 'danger');
+                    }
+                });
+        }
+    }
+	
+	// =======================================================
+    // 🌐 運維翻譯字典前端維護大腦 (AJAX 完全整合版)
+    // =======================================================
+    let transModalInstance = null;
+    let localDictRawData = []; // 快取原始清單供前端無刷新即時快搜
+
+    function openTranslationModal() {
+        if (!transModalInstance) {
+            transModalInstance = new bootstrap.Modal(document.getElementById('translationModal'));
+        }
+        transModalInstance.show();
+        loadTranslationTable();
+    }
+
+    function loadTranslationTable() {
+        fetch('/api/settings/translation')
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    localDictRawData = data.data;
+                    renderDictTable(localDictRawData);
+                }
+            })
+            .catch(err => console.error("載入字典失敗:", err));
+    }
+
+    // =======================================================
+    // 🎨 渲染引擎重構：自適應色彩控制項 + 核心操作圖樣放大一級
+    // =======================================================
+    function renderDictTable(arrayData) {
+        const tbody = document.getElementById('translationTableBody');
+        document.getElementById('dictCountLabel').innerText = `共計: ${arrayData.length} 組對照詞條`;
+        
+        if (arrayData.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" class="text-muted py-4 fw-bold"><i class="bi bi-info-circle me-1"></i> 查無匹配的對照紀錄。</td></tr>`;
+            return;
+        }
+
+        let html = '';
+        arrayData.forEach(item => {
+            html += `
+                <tr id="dict-row-${item.id}">
+                    <td>
+                        <select class="form-select form-select-sm form-select-custom fw-bold text-info" style="font-size:0.85rem;" id="edit-cat-${item.id}">
+                            <option value="行政區" ${item.category==='行政區'?'selected':''}>🏙️ 行政區</option>
+                            <option value="縣市級" ${item.category==='縣市級'?'selected':''}>🗺️ 縣市級</option>
+                            <option value="科技園區" ${item.category==='科技園區'?'selected':''}>🔬 科技園區</option>
+                            <option value="電信固網" ${item.category==='電信固網'?'selected':''}>🏢 電信固網</option>
+                            <option value="雲端巨頭/CDN" ${item.category==='雲端巨頭/CDN'?'selected':''}>☁️ 雲端巨頭</option>
+                            <option value="國際網域/國家" ${item.category==='國際網域/國家'?'selected':''}>🌍 國際網域</option>
+                        </select>
+                    </td>
+                    <td class="text-start font-monospace px-3 text-truncate fw-bold text-secondary-custom" style="max-width: 280px;" title="${item.eng_text}">${item.eng_text}</td>
+                    <td>
+                        <input type="text" class="form-control form-control-sm form-control-custom fw-bold" style="font-size:0.9rem;" value="${item.zh_text}" id="edit-zh-${item.id}">
+                    </td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-success px-2 py-0.5" onclick="updateTranslation(${item.id})" title="儲存變更">
+                            <i class="bi bi-check-lg fs-5"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger px-2 py-0.5 ms-1" onclick="deleteTranslation(${item.id}, '${item.eng_text}')" title="永久刪除">
+                            <i class="bi bi-trash3-fill fs-5"></i>
+                        </button>
+                    </td>
+                </tr>
+            `;
+        });
+        tbody.innerHTML = html;
+    }
+    
+    // =======================================================
+    // 💡 智慧聯動式即時過濾器大腦 (支援關鍵字 + 分類下拉選單)
+    // =======================================================
+    function filterDictTable() {
+        // 1. 取得目前輸入的關鍵字與選擇的分類標籤
+        const kw = document.getElementById('searchDictKeyword').value.trim().toLowerCase();
+        const selectedCat = document.getElementById('filterCategory').value;
+        
+        // 2. 進行多條件交集過濾
+        const filtered = localDictRawData.filter(item => {
+            // A. 分類選單條件判定
+            const matchCategory = (selectedCat === 'all' || item.category === selectedCat);
+            
+            // B. 關鍵字比對條件判定
+            const matchKeyword = !kw || (
+                String(item.eng_text).toLowerCase().includes(kw) || 
+                String(item.zh_text).toLowerCase().includes(kw) ||
+                String(item.category).toLowerCase().includes(kw)
+            );
+            
+            // 同時符合才予以顯示
+            return matchCategory && matchKeyword;
+        });
+        
+        // 3. 呼叫渲染引擎重繪表格
+        renderDictTable(filtered);
+    }
+
+    function createTranslation() {
+        const engInput = document.getElementById('addEngText');
+        const zhInput = document.getElementById('addZhText');
+        const catInput = document.getElementById('addCategory');
+        
+        const eng_text = engInput.value.trim();
+        const zh_text = zhInput.value.trim();
+        const category = catInput.value;
+
+        if (!eng_text || !zh_text) {
+            if(typeof window.showToast === 'function') window.showToast("❌ 英文原文與中文翻譯為必填欄位！", "warning");
+            return;
+        }
+
+        fetch('/api/settings/translation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ eng_text, zh_text, category })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ ${data.message}`, 'success');
+                engInput.value = '';
+                zhInput.value = '';
+                loadTranslationTable(); // 重新整理
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 建立失敗: ${data.message}`, 'danger');
+            }
+        });
+    }
+
+    function updateTranslation(itemId) {
+        const zh_text = document.getElementById(`edit-zh-${itemId}`).value.trim();
+        const category = document.getElementById(`edit-cat-${itemId}`).value;
+
+        fetch(`/api/settings/translation/${itemId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zh_text, category })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                if(typeof window.showToast === 'function') window.showToast(`✅ ${data.message}`, 'success');
+                loadTranslationTable();
+            } else {
+                if(typeof window.showToast === 'function') window.showToast(`❌ 修改失敗: ${data.message}`, 'danger');
+            }
+        });
+    }
+
+    function deleteTranslation(itemId, engText) {
+        if (confirm(`⚠️ 確定要從資料庫中永久抹除詞條 [ ${engText} ] 嗎？此操作將使系統退回自動翻譯。`)) {
+            fetch(`/api/settings/translation/${itemId}`, { method: 'DELETE' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        if(typeof window.showToast === 'function') window.showToast(`🗑️ 詞條已安全移除: ${engText}`, 'success');
+                        loadTranslationTable();
                     }
                 });
         }

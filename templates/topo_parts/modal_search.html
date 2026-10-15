@@ -146,7 +146,8 @@
 	
     function cleanStr(val) { return (!val) ? "" : String(val).replace('"', '').replace('\n', ' ').replace('\r', ' ').trim(); }
 
-    function executeGlobalSearch() {
+	// 💡 已升級為 async 非同步函數，支援優先攔截人工快取
+    async function executeGlobalSearch() {
         if (!cachedTopologyData || !cachedTopologyData.nodes) return;
         let rawQuery = document.getElementById('globalSearchInput').value.trim();
         let resultsDiv = document.getElementById('searchResults');
@@ -165,6 +166,71 @@
             return;
         }
 
+        resultsDiv.innerHTML = '<div class="text-center p-5"><div class="spinner-border text-warning" style="width: 3rem; height: 3rem;"></div><div class="mt-3 text-white-50 fw-bold">正在進行全網特徵深度比對...</div></div>';
+
+        // ==========================================
+        // 💡 [新增] 1. 優先查閱「人工網孔記憶庫」
+        // ==========================================
+        let cacheHtml = '';
+        try {
+            let cacheRes = await fetch('/api/device/ports/cache');
+            let cacheData = await cacheRes.json();
+            
+            // 尋找包含該 IP/MAC 關鍵字的快取孔位，或是被標註為 uplink 且符合設備條件的網孔
+            let matchedCache = cacheData.filter(p => 
+                (p.memorized_ips || '').toLowerCase().includes(rawQuery.toLowerCase()) ||
+                (p.is_manual_uplink && (p.ip.includes(rawQuery) || p.port_name.toLowerCase().includes(rawQuery.toLowerCase())))
+            );
+            
+            if (matchedCache.length > 0) {
+                cacheHtml = `
+                    <div class="mb-3 p-3 rounded border border-success shadow-lg" style="background-color: rgba(25, 135, 84, 0.15);">
+                        <div class="text-success fw-bold mb-2" style="font-size: 1.1rem;"><i class="bi bi-bookmark-star-fill me-2"></i>人工標註網孔快取 (極速精準命中)</div>
+                        <table class="table table-sm table-dark table-hover mb-0 text-start align-middle" style="table-layout: fixed;">
+                            <thead>
+                                <tr style="border-bottom: 2px solid #198754; font-size: 1rem;">
+                                    <th width="35%">接入交換器 名稱/IP</th>
+                                    <th width="20%">實體網孔</th>
+                                    <th width="45%">記憶的終端特徵 (IP / MAC)</th>
+                                </tr>
+                            </thead>
+                            <tbody>`;
+                matchedCache.forEach(m => {
+                    let badges = '';
+                    if (m.memorized_ips) {
+                        badges = m.memorized_ips.split(',').map(pair => {
+                            let [ip, mac] = pair.split('|');
+                            // 🌟 修正：移除 small，統一使用 fs-6，並改用 div 排版使其整齊向左切齊
+                            return `<div class="mb-1"><span class="badge bg-success me-2" style="font-size: 1rem; padding: 6px 10px;">${ip}</span><span class="text-white-50 font-monospace" style="font-size: 1.2rem;">${mac || ''}</span></div>`;
+                        }).join('');
+                    }
+                    if (m.is_manual_uplink) {
+                        badges += `<div class="mt-1"><span class="badge bg-warning text-dark fs-6"><i class="bi bi-link-45deg me-1"></i>人工標註：中繼網孔 (Uplink)</span></div>`;
+                    }
+                    
+                    // 🌟 智慧名稱轉換引擎：從全域快取中把這台設備的名字抓出來
+                    let nodeName = m.ip;
+                    if (typeof cachedTopologyData !== 'undefined' && cachedTopologyData.nodes) {
+                        let node = cachedTopologyData.nodes.find(n => n.ip === m.ip);
+                        if (node && (node.sysName || node.name)) {
+                            nodeName = `${node.sysName || node.name} / ${m.ip}`;
+                        }
+                    }
+                    
+                    cacheHtml += `
+                        <tr>
+                            <td class="text-info fw-bold fs-6">${nodeName}</td>
+                            <td class="text-warning fw-bold fs-6">${m.port_name}</td>
+                            <td class="text-start fs-6">${badges}</td>
+                        </tr>`;
+                });
+                cacheHtml += `</tbody></table></div>`;
+            }
+        } catch(e) { console.error("無法讀取網孔快取資料", e); }
+
+        // ==========================================
+        // 💡 2. 繼續執行系統正規的底層路由表與 ARP 搜尋
+        // ==========================================
         let escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         let patternStr = escapeRegExp(rawQuery).replace(/\\\*/g, '.*').replace(/\\\?/g, '.');
         let searchRegex;
@@ -359,6 +425,7 @@
         let uniqueHtmls = new Set(); let finalObjects = [];
         matchObjects.forEach(o => { if (!uniqueHtmls.has(o.html)) { uniqueHtmls.add(o.html); finalObjects.push(o); } });
 
+        // 💡 關鍵疊加：將 cacheHtml 放進去，無論正規搜尋有沒有結果，人工快取都會霸氣置頂！
         if (finalObjects.length > 0) {
             finalObjects.sort((a, b) => b.score - a.score);
             let finalHtmlList = finalObjects.map(o => o.html);
@@ -375,14 +442,15 @@
                 ? `<br><span style="font-size: 0.85rem; font-weight: normal; color: #adb5bd;">💡 系統已隱藏重複的 ARP 紀錄並將 Uplink 降級，優先顯示標有 <span class="badge bg-primary text-warning"><i class="bi bi-star-fill me-1"></i>終端接入點</span> 的最精確連接埠！</span>`
                 : `<br><span style="font-size: 0.85rem; font-weight: normal; color: #ffc107;">⚠️ <b>注意：</b>目前僅查獲「L3 閘道快取」與「中繼傳遞」紀錄，無實體接入點。此設備可能<b>已關機、休眠或斷線超過 5 分鐘</b>。</span>`;
             
-            resultsDiv.innerHTML = `<div class="text-success fw-bold mb-2"><i class="bi bi-check-circle-fill me-1"></i>尋找完畢，共找到 <b>${finalObjects.length}</b> 筆精準資料。${hintMsg}</div>` + tableHtml;
+            resultsDiv.innerHTML = cacheHtml + `<div class="text-success fw-bold mb-2"><i class="bi bi-check-circle-fill me-1"></i>尋找完畢，共找到 <b>${finalObjects.length}</b> 筆精準資料。${hintMsg}</div>` + tableHtml;
         } else {
-            resultsDiv.innerHTML = `
+            resultsDiv.innerHTML = cacheHtml + `
                 <div class="alert alert-danger text-white fw-bold py-3 mt-3 shadow" style="background-color: #dc3545; border: none;">
                     <i class="bi bi-exclamation-triangle-fill me-2 fs-5"></i>
-                    全網找不到與「<span class="text-warning fs-5 mx-1">${rawQuery}</span>」相符的資料。<br>
-                    <span style="font-size: 0.85rem; font-weight: normal; display: block; margin-top: 5px;">👉 提示：若搜尋 IP 失敗，請確認該設備目前是否有連線，系統需透過 ARP 解析轉換。</span>
+                    全網找不到與「<span class="text-warning fs-5 mx-1">${rawQuery}</span>」相符的即時活動資料。<br>
+                    <span style="font-size: 0.85rem; font-weight: normal; display: block; margin-top: 5px;">👉 提示：若上方有顯示「人工快取」，代表該設備曾在該位置活動過，但目前可能已關機或休眠。</span>
                 </div>`;
         }
     }
+	
 </script>

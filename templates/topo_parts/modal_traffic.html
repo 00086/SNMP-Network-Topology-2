@@ -176,7 +176,11 @@ function toggleNodeTraffic() {
         }
 
         let modal = getTrafficModalInstance();
-        document.getElementById('trafficModalTitle').innerHTML = `<i class="bi bi-bar-chart-fill me-2"></i>設備各埠總覽 (${rangeText}平均) - ${node.sysName || node.ip}`;
+        
+        // 🌟 組合標題：將設備名稱放在最前面
+        let nodeNameDisplay = node.sysName || node.ip;
+        document.getElementById('trafficModalTitle').innerHTML = `<i class="bi bi-bar-chart-fill me-2"></i>${nodeNameDisplay} - 設備各埠總覽 (${rangeText}平均)`;
+        
         document.getElementById('trafficChartContainer').innerHTML = '<div class="text-center mt-5"><div class="spinner-border text-info"></div><p class="mt-2 text-white-50">正在從資料庫讀取最新流量資料...</p></div>';
         
         if (!document.getElementById('trafficChartModal').classList.contains('show')) { modal.show(); }
@@ -247,7 +251,11 @@ function toggleNodeTraffic() {
         }
 
         let modal = getTrafficModalInstance();
-        document.getElementById('trafficModalTitle').innerHTML = `<i class="bi bi-graph-up me-2"></i>線路流量趨勢 (${rangeText}) - ${targetPortName} (往 ${toName})`;
+        
+        // 🌟 組合標題：將出發點設備名稱 (fromNode.sysName 或 fromNode.ip) 放在最前面
+        let fromNameDisplay = fromNode.sysName || fromNode.ip;
+        document.getElementById('trafficModalTitle').innerHTML = `<i class="bi bi-graph-up me-2"></i>線路流量趨勢 (${rangeText}) - ${fromNameDisplay} ${targetPortName} (往 ${toName})`;
+        
         document.getElementById('trafficChartContainer').innerHTML = '<div class="text-center mt-5"><div class="spinner-border text-info"></div><p class="mt-2 text-white-50">正在從資料庫讀取歷史流量走勢...</p></div>';
         
         if (!document.getElementById('trafficChartModal').classList.contains('show')) { modal.show(); }
@@ -346,6 +354,8 @@ function toggleNodeTraffic() {
         }
 
         let modal = getTrafficModalInstance();
+		// 🌟 將設備名稱放在最前面
+        let nodeNameDisplay = node.sysName || node.ip;
         document.getElementById('trafficModalTitle').innerHTML = `${modalTitle} (${rangeText}) - ${node.sysName || node.ip}`;
         document.getElementById('trafficChartContainer').innerHTML = `<div class="text-center mt-5"><div class="spinner-border ${loadIcon}"></div><p class="mt-2 text-white-50">正在從內網資料庫調閱歷史軌跡...</p></div>`;
         if (!document.getElementById('trafficChartModal').classList.contains('show')) modal.show(); 
@@ -357,23 +367,45 @@ function toggleNodeTraffic() {
                 if (trafficChartInstance) trafficChartInstance.destroy();
                 
                 let datasets = []; let yAxisOptions = {};
+                let hasSessionData = false; // 🌟 預設沒有 Session 資料
                 
                 if (mode === 'cpu') {
-                    datasets = [
-                        { label: '⚙️ CPU 使用率', data: res.cpu, borderColor: '#ffc107', backgroundColor: 'rgba(255, 193, 7, 0.08)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 },
-                        { label: '🧠 記憶體使用率', data: res.memory, borderColor: '#a78bfa', backgroundColor: 'rgba(167, 139, 250, 0.08)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 }
-                    ];
+                    if (res.is_pa) {
+                        hasSessionData = true; // 啟動右側第二 Y 軸
+                        datasets = [
+                            { label: '⚙️ Management CPU (管理層)', data: res.mp_cpu, borderColor: '#fd7e14', backgroundColor: 'rgba(253, 126, 20, 0.05)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 },
+                            { label: '🚀 Data Plane CPU (資料層)', data: res.dp_cpu, borderColor: '#ffc107', backgroundColor: 'rgba(255, 193, 7, 0.05)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 },
+                            { label: '🧠 記憶體使用率', data: res.memory, borderColor: '#a78bfa', backgroundColor: 'transparent', fill: false, tension: 0.25, pointRadius: 1, borderWidth: 2, borderDash: [4, 4] },
+                            { 
+                                label: '🌐 活躍連線數 (Session Count)', 
+                                data: res.session_util, 
+                                borderColor: '#00FFFF', 
+                                backgroundColor: 'rgba(0, 255, 255, 0.1)', 
+                                fill: true, tension: 0.2, pointRadius: 2, borderWidth: 3,
+                                yAxisID: 'ySession' 
+                            }
+                        ];
+                    } else {
+                        // 標準交換器維持原樣
+                        datasets = [
+                            { label: '⚙️ CPU 使用率', data: res.cpu, borderColor: '#ffc107', backgroundColor: 'rgba(255, 193, 7, 0.08)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 },
+                            { label: '🧠 記憶體使用率', data: res.memory, borderColor: '#a78bfa', backgroundColor: 'rgba(167, 139, 250, 0.08)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 }
+                        ];
+                    }
+                    
                     yAxisOptions = { min: 0, max: 100, ticks: { color: '#adb5bd', callback: function(v) { return v + '%'; } }, grid: { color: '#444' } };
                 } else if (mode === 'poe') {
+                    // 🌟 補回：PoE 總耗電瓦數折線圖設定
                     datasets = [
-                        { label: '⚡ PoE 總供電負載', data: res.poe, borderColor: '#20c997', backgroundColor: 'rgba(32, 201, 151, 0.08)', fill: true, tension: 0.3, pointRadius: 1, pointHoverRadius: 6, borderWidth: 2 }
+                        { label: '⚡ PoE 總消耗瓦數 (W)', data: res.poe, borderColor: '#20c997', backgroundColor: 'rgba(32, 201, 151, 0.1)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 }
                     ];
-                    yAxisOptions = { min: 0, suggestedMax: 100, ticks: { color: '#adb5bd', callback: function(v) { return v + ' W'; } }, grid: { color: '#444' } };
+                    yAxisOptions = { min: 0, ticks: { color: '#adb5bd', callback: function(v) { return v + ' W'; } }, grid: { color: '#444' } };
                 } else if (mode === 'temp') {
+                    // 🌟 補回：系統核心溫度折線圖設定
                     datasets = [
-                        { label: '🌡️ 系統核心溫度', data: res.temp, borderColor: '#dc3545', backgroundColor: 'rgba(220, 53, 69, 0.08)', fill: true, tension: 0.3, pointRadius: 1, pointHoverRadius: 6, borderWidth: 2 }
+                        { label: '🌡️ 系統核心溫度 (°C)', data: res.temp, borderColor: '#dc3545', backgroundColor: 'rgba(220, 53, 69, 0.1)', fill: true, tension: 0.25, pointRadius: 1, borderWidth: 2 }
                     ];
-                    yAxisOptions = { min: 20, suggestedMax: 80, ticks: { color: '#adb5bd', callback: function(v) { return v + ' °C'; } }, grid: { color: '#444' } };
+                    yAxisOptions = { min: 0, ticks: { color: '#adb5bd', callback: function(v) { return v + ' °C'; } }, grid: { color: '#444' } };
                 }
 
                 // 💡 [微創修正] 讓 Chart.js 重新與上面組合好的效能型 datasets 與 yAxisOptions 完美咬合
@@ -388,20 +420,35 @@ function toggleNodeTraffic() {
                         responsive: true, maintainAspectRatio: false,
                         interaction: { mode: 'index', intersect: false }, 
                         plugins: { 
-                            legend: { position: 'bottom', labels: {color: '#fff'} },
+                            legend: { position: 'bottom', labels: { color: '#f8f9fa', font: { size: 14, weight: 'bold' } } },
                             tooltip: {
+                                titleFont: { size: 15, weight: 'bold' },
+                                bodyFont: { size: 15, weight: 'bold' },
+                                padding: 12,
                                 callbacks: {
                                     label: function(c) {
-                                        // 依據不同模式動態給予提示框後綴單位
-                                        let unit = mode === 'cpu' ? '%' : (mode === 'poe' ? ' W' : ' °C');
-                                        return c.dataset.label + ': ' + c.raw + unit;
+                                        let unit = '%';
+                                        if (mode === 'poe') unit = ' W';
+                                        else if (mode === 'temp') unit = ' °C';
+                                        else if (c.dataset.yAxisID === 'ySession') unit = ' 個連線'; 
+                                        
+                                        return c.dataset.label + ': ' + c.raw.toLocaleString() + unit;
                                     }
                                 }
                             }
                         },
                         scales: { 
-                            x: { ticks: { color: '#adb5bd', font: { size: 11 }, maxTicksLimit: 12 }, grid: { display: false } }, 
-                            y: yAxisOptions 
+                            x: { ticks: { color: '#adb5bd', font: { size: 13, weight: 'bold' }, maxTicksLimit: 12 }, grid: { display: false } }, 
+                            y: { ...yAxisOptions, ticks: { ...yAxisOptions.ticks, font: { size: 13, weight: 'bold' } } },
+                            ySession: { 
+                                position: 'right',
+                                display: hasSessionData,
+                                min: 0,                   
+                                suggestedMax: 100,        
+                                grid: { display: false }, 
+                                ticks: { color: '#00FFFF', font: { size: 14, weight: 'bold' }, callback: function(v) { return v.toLocaleString() + ' 條'; } }, 
+                                title: { display: true, text: '活躍連線數 (Sessions)', color: '#00FFFF', font: { size: 15, weight: 'bold' } }
+                            }
                         }
                     },
                     plugins: [crosshairPlugin] 

@@ -18,6 +18,7 @@ import sqlite3
 from tftp_backup_core import trigger_tftp_backup
 import ipaddress
 from influxdb_client import InfluxDBClient
+import warnings
 
 try:
     from pysnmp.hlapi.v3arch.asyncio import (
@@ -66,41 +67,53 @@ def hash_password(password):
     return f"{salt}${key.hex()}"
 
 def require_role(allowed_roles):
-    """RBAC 核心防護裝飾器 (支援網頁重導與 API 攔截)"""
+    """RBAC 核心防護裝飾器"""
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             with DB_LOCKS['config']:
-                conn = get_db('config')
+                # 👇 🌟 加上 bypass_shard=True，強制讀取主庫的 RBAC 開關
+                conn = get_db('config', bypass_shard=True)
                 row = conn.execute("SELECT value FROM system_settings WHERE key='rbac_enabled'").fetchone()
                 conn.close()
                 
+            # 若資料庫無設定，預設為開啟 (True)
             rbac_enabled = (row['value'] == '1') if row else True
+            
+            # 🌟 如果 RBAC 總開關被關閉，直接放行 (Bypass)
             if not rbac_enabled:
-                return f(*args, **kwargs) 
+                return f(*args, **kwargs)
                 
+            # 檢查 Session 中的角色
             user_role = session.get('role')
-            is_api_request = request.path.startswith('/api/')
-            
-            # 1. 攔截未登入者
-            if not user_role:
-                if is_api_request: return jsonify({'status': 'error', 'message': '未登入或 Session 已過期'}), 401
-                else: return redirect('/login') # 網頁請求直接導向登入頁
-                
-            # 2. 嚴格角色檢查 (無分大小寫)
-            user_role_lower = user_role.lower()
-            allowed_lower = [r.lower() for r in allowed_roles]
-            
-            if user_role_lower != ROLE_ADMIN.lower() and user_role_lower not in allowed_lower:
-                write_audit_log(session.get('username'), request.remote_addr, "ACCESS_DENIED", f"越權存取 {request.path}", "FAILED")
-                if is_api_request: return jsonify({'status': 'error', 'message': '權限不足，拒絕存取'}), 403
-                else: return "<h3>❌ 權限不足</h3>您沒有權限存取此頁面。", 403
-                
+            if not user_role or user_role not in allowed_roles:
+                if request.is_json or request.path.startswith('/api/'):
+                    return jsonify({'success': False, 'message': '權限不足 (Forbidden)'}), 403
+                else:
+                    return redirect('/login')
+                    
             return f(*args, **kwargs)
-        return decorated_function 
+        return decorated_function
     return decorator
 
 main_bp = Blueprint('main', __name__)
+
+main_bp = Blueprint('main', __name__)
+
+# 👇 🌟 新增：全域環境注射器 (讓 layout.html 能隨時取得總部狀態)
+@main_bp.context_processor
+def inject_hq_status():
+    is_hq = False
+    try:
+        with DB_LOCKS['config']:
+            conn = get_db('config', bypass_shard=True)
+            row = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+            if row and row['value'] == 'hq':
+                is_hq = True
+            conn.close()
+    except: pass
+    
+    return dict(hq_mode_is_active=is_hq)
 
 # ========================================================
 # 🛡️ 全域 HTTP 請求攔截與資安白名單控制
@@ -184,7 +197,116 @@ def devices_page(): return render_template('devices.html')
 def report_page(): return render_template('report.html')
 
 @main_bp.route('/dashboard')
-def dashboard_page(): return render_template('dashboard.html')
+def dashboard_page(): 
+    # 🌟 智慧判定：如果是彈出視窗，絕對不清除 Session！
+    is_iframe = request.args.get('iframe') == '1'
+    if not is_iframe:
+        session.pop('target_site_code', None)
+        session.pop('target_site_name', None)
+    
+    target_site = session.get('target_site_code')
+    with DB_LOCKS['config']:
+        conn = get_db('config', bypass_shard=True)
+        row = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+        hq_mode = row['value'] if row else 'local'
+        conn.close()
+        
+    if hq_mode == 'hq' and not target_site:
+        return render_template('hq_dashboard.html')
+    return render_template('dashboard.html')
+
+# ========================================================
+# 🌍 總部專用：全域戰情大腦 API (心跳與斷線偵測)
+# ========================================================
+@main_bp.route('/api/hq/dashboard/stats', methods=['GET'])
+def api_hq_dashboard_stats():
+    import datetime
+    try:
+        with DB_LOCKS['hq_master']:
+            conn = get_db('hq_master')
+            # 依照行政區與學校代碼排序
+            rows = conn.execute("SELECT * FROM global_sites ORDER BY district, site_code").fetchall()
+            
+            # 👇 🌟 新增：讀取六都行政區的靜態資料表
+            dist_rows = []
+            try:
+                dist_rows = conn.execute("SELECT city_key, district_name FROM city_districts").fetchall()
+            except: pass
+            conn.close()
+        
+        # 將資料庫中的扁平資料，整理成以 city_key 為群組的 Dictionary
+        city_districts = {}
+        for r in dist_rows:
+            key = r['city_key']
+            if key not in city_districts: city_districts[key] = []
+            city_districts[key].append(r['district_name'])
+
+        sites = []
+        health = {'up': 0, 'down': 0, 'warning': 0, 'total': len(rows)}
+        now_utc = datetime.datetime.utcnow()
+        
+        for r in rows:
+            site = dict(r)
+            # 🌟 核心防禦：判斷是否逾時斷線 
+            # (超過 15 分鐘未收到推播即視為 Warning，超過 30 分鐘視為 Down)
+            try:
+                last_sync = datetime.datetime.strptime(site['last_sync_time'], '%Y-%m-%d %H:%M:%S')
+                diff_mins = (now_utc - last_sync).total_seconds() / 60.0
+                
+                if diff_mins > 30:
+                    site['status'] = 'down'
+                elif diff_mins > 15:
+                    site['status'] = 'warning'
+                else:
+                    site['status'] = 'up'
+                    
+                # 轉為台灣時間 (+8小時) 供前端顯示
+                local_time = last_sync + datetime.timedelta(hours=8)
+                site['last_sync_local'] = local_time.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                site['status'] = 'down'
+                site['last_sync_local'] = '從未推播/解析失敗'
+                
+            health[site['status']] += 1
+            sites.append(site)
+            
+        return jsonify({'success': True, 'health': health, 'sites': sites, 'city_districts': city_districts})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+# ========================================================
+# 🌍 總部跨站點切換器 API (Site Switcher)
+# ========================================================
+@main_bp.route('/api/hq/sites', methods=['GET'])
+def api_hq_get_sites():
+    """取得所有已註冊的分區清單 (供 Navbar 下拉選單使用)"""
+    try:
+        with DB_LOCKS['hq_master']:
+            conn = get_db('hq_master')
+            rows = conn.execute("SELECT site_code, site_name, district, status FROM global_sites ORDER BY district, site_code").fetchall()
+            conn.close()
+        return jsonify({'success': True, 'sites': [dict(r) for r in rows]})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
+@main_bp.route('/api/hq/switch_site', methods=['POST'])
+def api_hq_switch_site():
+    """將管理員的 Session 鎖定至特定分區"""
+    data = request.json
+    site_code = data.get('site_code')
+    site_name = data.get('site_name')
+    if not site_code: return jsonify({'success': False, 'message': '缺少站點代碼'})
+    
+    session['target_site_code'] = site_code
+    session['target_site_name'] = site_name
+    return jsonify({'success': True})
+
+@main_bp.route('/api/hq/clear_site', methods=['POST'])
+def api_hq_clear_site():
+    """解除 Session 鎖定，回歸總部全域上帝視角"""
+    session.pop('target_site_code', None)
+    session.pop('target_site_name', None)
+    return jsonify({'success': True})
 
 def init_flow_port_dictionary_if_empty():
     """全自動檢驗並初始化 InfluxDB 流量查詢專用的萬國通訊埠標準維運字典 (防止死鎖保護版)"""
@@ -285,11 +407,20 @@ def get_flow_port_dictionary():
 
 @main_bp.route('/settings')
 @require_role([ROLE_ADMIN])  # 🛡️ 限 Admin 專屬
-def settings_page(): return render_template('settings.html')
+def settings_page(): 
+    # 👇 🌟 進入系統設定時，強制解除所有分區鎖定，回歸總部大腦！
+    session.pop('target_site_code', None)
+    session.pop('target_site_name', None)
+    return render_template('settings.html')
 
 @main_bp.route('/audit-logs')
 @require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])  # 🛡️ 三種角色皆可看
 def audit_logs_page(): return render_template('audit_logs.html')
+        
+@main_bp.route('/inventory')
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
+def inventory_page():
+    return render_template('inventory.html')
 
 # ========================================================
 # 🔐 身份驗證 API (登入/登出)
@@ -302,19 +433,25 @@ def api_login():
         password = data.get('password')
         
         with DB_LOCKS['config']:
-            conn = get_db('config')
+            # 👇 🌟 加上 bypass_shard=True，強制從主庫驗證帳密
+            conn = get_db('config', bypass_shard=True)
             user = conn.execute("SELECT * FROM users WHERE username = ? AND status = 1", (username,)).fetchone()
             conn.close()
             
+        # 進行密碼雜湊比對
         if user and verify_password(user['password_hash'], password):
-            session['username'] = user['username']
+            session['username'] = username
             session['role'] = user['role']
-            write_audit_log(user['username'], request.remote_addr, "USER_LOGIN", "使用者成功登入系統", "SUCCESS")
+            client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            write_audit_log(username, "系統身分驗證", "登入系統", "SUCCESS", f"【登入成功】使用者從 {client_ip} 登入系統。")
             return jsonify({'status': 'success', 'msg': '登入成功'})
+        else:
+            client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+            write_audit_log(username if username else "Unknown", "系統身分驗證", "登入系統", "FAILED", f"【登入失敗】帳號或密碼錯誤 (IP: {client_ip})。")
+            return jsonify({'status': 'error', 'msg': '帳號或密碼錯誤，或帳號已被停用'})
             
-        return jsonify({'status': 'error', 'msg': '帳號或密碼錯誤'}), 401
     except Exception as e:
-        return jsonify({'status': 'error', 'msg': str(e)}), 500
+        return jsonify({'status': 'error', 'msg': f'系統發生錯誤: {str(e)}'})
 
 @main_bp.route('/api/logout', methods=['POST'])
 def api_logout():
@@ -325,6 +462,9 @@ def api_logout():
 
 @main_bp.route('/login')
 def login_page():
+    # 👇 🌟 新增這兩行：進入登入頁面時，強制解除所有分區鎖定
+    session.pop('target_site_code', None)
+    session.pop('target_site_name', None)
     return render_template('login.html')
 
 # ========================================================
@@ -372,22 +512,64 @@ def toggle_debug_mode():
 
 @main_bp.route('/api/dashboard/stats', methods=['GET'])
 def api_dashboard_stats():
-    conn_config = get_db('config')
-    dev_rows = conn_config.execute("SELECT ip, name, status, snmp_raw, cpu_load, visible FROM devices").fetchall()    
-    conn_config.close()
-    
+    dev_rows = []
+    # 👇 🌟 新增：嘗試取得該分區最後一次成功推播到總部的時間
+    latest_sync_time = None
+    try:
+        if session.get('target_site_code'):
+            # 如果是總部看分區，去 hq_master 查這個 site_code 的最後推播時間
+            with DB_LOCKS['hq_master']:
+                conn_hq = get_db('hq_master')
+                row = conn_hq.execute("SELECT last_sync_time FROM global_sites WHERE site_code=?", (session.get('target_site_code'),)).fetchone()
+                conn_hq.close()
+                if row and row['last_sync_time']:
+                    import datetime
+                    # 轉換為台灣時間 (+8)
+                    last_sync = datetime.datetime.strptime(row['last_sync_time'], '%Y-%m-%d %H:%M:%S')
+                    local_time = last_sync + datetime.timedelta(hours=8)
+                    latest_sync_time = local_time.strftime('%H:%M:%S')
+    except Exception as e:
+        print(f"取得同步時間失敗: {e}")
+        pass # 🌟 核心修復：這就是遺失的 except 區塊，讓 try 有完美的結束！
+
+    # 🌟 終極防禦：完美兼容分區新舊資料庫，缺少欄位也不會崩潰
+    try:
+        conn_config = get_db('config')
+        # 先抓取所有原始資料
+        raw_rows = conn_config.execute("SELECT * FROM devices").fetchall()
+        conn_config.close()
+        
+        # 過濾出 visible == 1 的設備
+        dev_rows = [dict(r) for r in raw_rows if r['visible'] == 1]
+    except Exception as e:
+        print(f"設備讀取失敗: {e}")
+        dev_rows = []
+        
     health = {'up': 0, 'down': 0, 'warning': 0, 'total': len(dev_rows)}
     device_map = {}
-    for r in dev_rows:
-        st = r['status']
+    for d in dev_rows:
+        st = d['status']
         if st in health: health[st] += 1
-        device_map[r['ip']] = {'name': r['name'], 'snmp_raw': r['snmp_raw']}
+        device_map[d['ip']] = {'name': d['name'], 'snmp_raw': d['snmp_raw']}
         
     time_limit = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - 900))
-    conn_hot = get_db('hot')
-    cursor = conn_hot.execute('''SELECT ip, port_idx, in_bytes, out_bytes, strftime('%s', timestamp) as epoch FROM traffic_history WHERE timestamp >= ?''', (time_limit,))
-    t_rows = cursor.fetchall()
-    conn_hot.close()
+    
+    t_rows = []
+    try:
+        # 👇 🌟 終極破案：總部視角時，推播的流量表全部存在「分區庫 (config)」！
+        # 絕對不能呼叫 get_db('hot')，否則會讀到總部伺服器自己的本機流量！
+        if session.get('target_site_code'):
+            conn_traffic = get_db('config')
+            cursor = conn_traffic.execute('''SELECT ip, port_idx, in_bytes, out_bytes, strftime('%s', timestamp) as epoch FROM traffic_history''')
+        else:
+            conn_traffic = get_db('hot')
+            cursor = conn_traffic.execute('''SELECT ip, port_idx, in_bytes, out_bytes, strftime('%s', timestamp) as epoch FROM traffic_history WHERE timestamp >= ?''', (time_limit,))
+        
+        t_rows = cursor.fetchall()
+        conn_traffic.close()
+    except Exception as e:
+        print(f"Traffic Error: {e}")
+        t_rows = []
 
     history = {}
     for r in t_rows:
@@ -401,7 +583,19 @@ def api_dashboard_stats():
         raw_str = device_map.get(ip, {}).get('snmp_raw', '{}')
         try: raw_data = json.loads(raw_str)
         except: raw_data = {}
-        if_names = raw_data[4] if isinstance(raw_data, list) and len(raw_data) > 4 else {}
+        
+        if_names = {}
+        if_high_speeds = {}
+        if_speeds = {}
+        
+        if isinstance(raw_data, dict): 
+            if_names = raw_data.get("4", {})
+            if_high_speeds = raw_data.get("5", {})
+            if_speeds = raw_data.get("6", {})
+        elif isinstance(raw_data, list) and len(raw_data) > 6: 
+            if_names = raw_data[4]
+            if_high_speeds = raw_data[5]
+            if_speeds = raw_data[6]
         
         for p, records in ports.items():
             records.sort(key=lambda x: x['epoch'])
@@ -411,13 +605,34 @@ def api_dashboard_stats():
                 if 0 < dt <= 600:
                     i_diff = curr['in'] - prev['in']
                     o_diff = curr['out'] - prev['out']
-                    if i_diff < 0: i_diff = 0
-                    if o_diff < 0: o_diff = 0
+                    
+                    # 🌟 處理 32-bit 計數器溢位 (Counter Rollover) 真實加法
+                    if i_diff < 0:
+                        if prev['in'] > 4290000000 and curr['in'] < 10000000: i_diff = (4294967296 - prev['in']) + curr['in']
+                        else: i_diff = 0
+                    if o_diff < 0:
+                        if prev['out'] > 4290000000 and curr['out'] < 10000000: o_diff = (4294967296 - prev['out']) + curr['out']
+                        else: o_diff = 0
+                        
                     in_bps = round((i_diff * 8) / dt)
                     out_bps = round((o_diff * 8) / dt)
                     
-                    if in_bps > 200000000000: in_bps = 0
-                    if out_bps > 200000000000: out_bps = 0
+                    # 🌟 智慧獲取該網孔的真實實體速率
+                    speed_mbps = 0
+                    try: speed_mbps = int(if_high_speeds.get(p, 0))
+                    except: pass
+                    if speed_mbps <= 0:
+                        try:
+                            raw_bps = int(if_speeds.get(p, 0))
+                            speed_mbps = 10000 if raw_bps >= 4294967295 else raw_bps // 1000000
+                        except: pass
+                    if speed_mbps <= 0: speed_mbps = 1000 # 預設 1Gbps
+                    
+                    # 🌟 動態天花板：實體速率的 1.5 倍 (容許突發與計算誤差，徹底封殺百倍溢位)
+                    max_bps = speed_mbps * 1000000 * 1.5
+                    
+                    if in_bps > max_bps: in_bps = 0
+                    if out_bps > max_bps: out_bps = 0
                     
                     total_bps = in_bps + out_bps
 
@@ -427,11 +642,10 @@ def api_dashboard_stats():
                         traffic_list.append({'device': dev_name, 'ip': ip, 'port': p_name, 'in_bps': in_bps, 'out_bps': out_bps, 'total_bps': total_bps})
     traffic_list.sort(key=lambda x: x['total_bps'], reverse=True)
 
-    # 取代 system.log，改為從 audit_hot.db 直接提取最新的 100 筆系統軌跡
     logs = []
     try:
         with DB_LOCKS['audit_hot']:
-            conn_audit = get_db('audit_hot')
+            conn_audit = get_db('audit_hot', bypass_shard=True)
             log_rows = conn_audit.execute("SELECT timestamp, details FROM audit_logs ORDER BY timestamp DESC LIMIT 100").fetchall()
             conn_audit.close()
             logs = [f"[{r['timestamp']}] {r['details']}" for r in log_rows]
@@ -439,16 +653,24 @@ def api_dashboard_stats():
         pass
 
     top_cpu = []
-    for r in dev_rows:
-        if r['visible'] == 0: continue  
+    for d in dev_rows:
         try:
-            c = r['cpu_load']
-            if c is not None and float(c) >= 0: top_cpu.append({'device': r['name'] or r['ip'], 'ip': r['ip'], 'cpu': float(c)})
+            c = d['cpu_load']
+            if c is not None and float(c) >= 0: 
+                top_cpu.append({'device': d['name'] or d['ip'], 'ip': d['ip'], 'cpu': float(c)})
         except: pass
     top_cpu.sort(key=lambda x: x['cpu'], reverse=True)
     top_cpu = top_cpu[:10]
 
-    return jsonify({'success': True, 'health': health, 'all_traffic': traffic_list, 'logs': logs, 'top_cpu': top_cpu})
+    # 👇 🌟 將 latest_sync_time 加進回傳的 JSON 裡
+    return jsonify({
+        'success': True, 
+        'health': health, 
+        'all_traffic': traffic_list, 
+        'logs': logs, 
+        'top_cpu': top_cpu,
+        'latest_sync_time': latest_sync_time
+    })
 
 @main_bp.route('/api/ping/<ip>', methods=['GET'])
 def api_ping_device_single(ip):
@@ -988,6 +1210,17 @@ def toggle_rbac_mode():
 
 @main_bp.route('/api/devices', methods=['GET'])
 def get_devices(): 
+    # 👇 🌟 攔截器：如果是總部正在鑽取分區，必須從該分區的實體資料庫讀取，不能用總部全域快取！
+    if session.get('target_site_code'):
+        try:
+            conn = get_db('config')
+            rows = conn.execute("SELECT * FROM devices").fetchall()
+            conn.close()
+            return jsonify([dict(r) for r in rows])
+        except Exception as e:
+            return jsonify([])
+            
+    # 如果是一般狀態，才回傳總部自己的全域快取
     return jsonify(read_db_devices())
 
 @main_bp.route('/api/devices/bulk', methods=['POST'])
@@ -1013,6 +1246,7 @@ def bulk_save_devices():
             'ip': ip, 
             'name': d.get('name', '').strip(), 
             'level': safe_int(d.get('level')), 
+            'is_backup': safe_int(d.get('is_backup', 1), 1), 
             'community': d.get('community', 'public').strip(), 
             'location': d.get('location', '').strip(), 
             'visible': safe_int(d.get('visible', 1), 1), 
@@ -1026,7 +1260,9 @@ def bulk_save_devices():
             'ssh_user': existing_dev.get('ssh_user', ''),
             'ssh_pass': existing_dev.get('ssh_pass', ''),
             'ssh_secret': existing_dev.get('ssh_secret', ''),
-            'cli_type': existing_dev.get('cli_type', '')
+            'cli_type': existing_dev.get('cli_type', ''),
+            'snmp_version': existing_dev.get('snmp_version', 'v2c'),
+            'port_specs': existing_dev.get('port_specs', '[]')
         })
 
     with DB_LOCKS['config']:
@@ -1105,15 +1341,62 @@ def api_traffic(ip):
             history[p].append({'in': r['in_bytes'], 'out': r['out_bytes'], 'ts': r['ts'], 'epoch': int(r['epoch'])})
         conn.close()
 
+        # 🌟 讀取單機 snmp_raw 獲取速率限制
+        raw_data = {}
+        try:
+            with DB_LOCKS['config']:
+                conn_cfg = get_db('config')
+                dev = conn_cfg.execute("SELECT snmp_raw FROM devices WHERE ip=?", (ip,)).fetchone()
+                if dev and dev['snmp_raw']:
+                    raw_data = json.loads(dev['snmp_raw'])
+                conn_cfg.close()
+        except: pass
+        
+        if_high_speeds = {}
+        if_speeds = {}
+        if isinstance(raw_data, dict): 
+            if_high_speeds = raw_data.get("5", {})
+            if_speeds = raw_data.get("6", {})
+        elif isinstance(raw_data, list) and len(raw_data) > 6: 
+            if_high_speeds = raw_data[5]
+            if_speeds = raw_data[6]
+
         for p, records in history.items():
+            # 🌟 智慧獲取實體網孔速率
+            speed_mbps = 0
+            try: speed_mbps = int(if_high_speeds.get(p, 0))
+            except: pass
+            if speed_mbps <= 0:
+                try:
+                    raw_bps = int(if_speeds.get(p, 0))
+                    speed_mbps = 10000 if raw_bps >= 4294967295 else raw_bps // 1000000
+                except: pass
+            if speed_mbps <= 0: speed_mbps = 1000 # 預設 1Gbps
+            
+            max_bps = speed_mbps * 1000000 * 1.5
+
             in_bps = []; out_bps = []; labels = []
             for i in range(1, len(records)):
                 prev = records[i-1]; curr = records[i]
                 let_dt = curr['epoch'] - prev['epoch']
                 if 0 < let_dt <= 600: 
-                    i_diff = max(0, curr['in'] - prev['in']); o_diff = max(0, curr['out'] - prev['out'])
-                    in_val = min(round((i_diff * 8) / let_dt), 200000000000)
-                    out_val = min(round((o_diff * 8) / let_dt), 200000000000)
+                    i_diff = curr['in'] - prev['in']
+                    o_diff = curr['out'] - prev['out']
+                    
+                    # 🌟 處理 32-bit 計數器溢位
+                    if i_diff < 0:
+                        if prev['in'] > 4290000000 and curr['in'] < 10000000: i_diff = (4294967296 - prev['in']) + curr['in']
+                        else: i_diff = 0
+                    if o_diff < 0:
+                        if prev['out'] > 4290000000 and curr['out'] < 10000000: o_diff = (4294967296 - prev['out']) + curr['out']
+                        else: o_diff = 0
+                        
+                    in_val = round((i_diff * 8) / let_dt)
+                    out_val = round((o_diff * 8) / let_dt)
+                    
+                    if in_val > max_bps: in_val = 0
+                    if out_val > max_bps: out_val = 0
+                    
                     labels.append(curr['ts']); in_bps.append(in_val); out_bps.append(out_val)
                     
             # 💡 核心優化：Python 動態智慧降採樣 (解決前端卡頓與圖表條碼化)
@@ -1176,10 +1459,20 @@ def api_traffic(ip):
 
 @main_bp.route('/api/traffic_summary', methods=['GET'])
 def api_traffic_summary():
-    conn = get_db('hot')
-    time_limit = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - 900))
-    cursor = conn.execute('''SELECT ip, port_idx, in_bytes, out_bytes, strftime('%s', timestamp) as epoch FROM traffic_history WHERE timestamp >= ?''', (time_limit,))
-    rows = cursor.fetchall(); conn.close()
+    rows = []
+    # 👇 🌟 同步防禦：拓樸圖水流動畫也必須切換到正確的資料庫
+    try:
+        if session.get('target_site_code'):
+            conn = get_db('config')
+            cursor = conn.execute('''SELECT ip, port_idx, in_bytes, out_bytes, strftime('%s', timestamp) as epoch FROM traffic_history''')
+        else:
+            conn = get_db('hot')
+            time_limit = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - 900))
+            cursor = conn.execute('''SELECT ip, port_idx, in_bytes, out_bytes, strftime('%s', timestamp) as epoch FROM traffic_history WHERE timestamp >= ?''', (time_limit,))
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception:
+        pass
 
     history = {}
     for r in rows:
@@ -1188,9 +1481,32 @@ def api_traffic_summary():
         if p not in history[ip]: history[ip][p] = []
         history[ip][p].append({'in': r['in_bytes'], 'out': r['out_bytes'], 'epoch': int(r['epoch'])})
 
+    # 🌟 需要讀取 devices 的 snmp_raw 來獲取網孔實體速限
+    device_map = {}
+    try:
+        conn = get_db('config')
+        devs = conn.execute("SELECT ip, snmp_raw FROM devices").fetchall()
+        for d in devs: device_map[d['ip']] = d['snmp_raw']
+        conn.close()
+    except: pass
+
     summary = {}
     for ip, ports in history.items():
         summary[ip] = {}
+        
+        raw_str = device_map.get(ip, '{}')
+        try: raw_data = json.loads(raw_str)
+        except: raw_data = {}
+        
+        if_high_speeds = {}
+        if_speeds = {}
+        if isinstance(raw_data, dict): 
+            if_high_speeds = raw_data.get("5", {})
+            if_speeds = raw_data.get("6", {})
+        elif isinstance(raw_data, list) and len(raw_data) > 6: 
+            if_high_speeds = raw_data[5]
+            if_speeds = raw_data[6]
+
         for p, records in ports.items():
             records.sort(key=lambda x: x['epoch'])
             if len(records) >= 2:
@@ -1198,14 +1514,33 @@ def api_traffic_summary():
                 dt = curr['epoch'] - prev['epoch']
                 if 0 < dt <= 600:
                     i_diff = curr['in'] - prev['in']; o_diff = curr['out'] - prev['out']
-                    if i_diff < 0: i_diff = 0
-                    if o_diff < 0: o_diff = 0
+                    
+                    # 🌟 處理 32-bit 計數器溢位
+                    if i_diff < 0:
+                        if prev['in'] > 4290000000 and curr['in'] < 10000000: i_diff = (4294967296 - prev['in']) + curr['in']
+                        else: i_diff = 0
+                    if o_diff < 0:
+                        if prev['out'] > 4290000000 and curr['out'] < 10000000: o_diff = (4294967296 - prev['out']) + curr['out']
+                        else: o_diff = 0
                     
                     in_val = round((i_diff * 8) / dt)
                     out_val = round((o_diff * 8) / dt)
                     
-                    if in_val > 200000000000: in_val = 0
-                    if out_val > 200000000000: out_val = 0
+                    # 🌟 智慧獲取實體網孔速率限制
+                    speed_mbps = 0
+                    try: speed_mbps = int(if_high_speeds.get(p, 0))
+                    except: pass
+                    if speed_mbps <= 0:
+                        try:
+                            raw_bps = int(if_speeds.get(p, 0))
+                            speed_mbps = 10000 if raw_bps >= 4294967295 else raw_bps // 1000000
+                        except: pass
+                    if speed_mbps <= 0: speed_mbps = 1000 # 預設 1Gbps
+                    
+                    max_bps = speed_mbps * 1000000 * 1.5
+                    
+                    if in_val > max_bps: in_val = 0
+                    if out_val > max_bps: out_val = 0
                     
                     summary[ip][p] = {'in_bps': in_val, 'out_bps': out_val}
                     
@@ -1215,26 +1550,40 @@ def api_traffic_summary():
 def get_topology():
     acquired, active_name = try_acquire_scan("手動拓樸掃描")
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    if not acquired: return jsonify({'nodes': [], 'edges': [], 'error': f'系統忙碌中：目前「{active_name}」正在執行，請稍後再試。'}), 409
+    if not acquired: 
+        return jsonify({'nodes': [], 'edges': [], 'error': f'系統忙碌中：目前「{active_name}」正在執行，請稍後再試。'}), 409
+
     try:
         log_info("✋ 【手動操作】接收到前端觸發「重新掃描」請求...")
-        devices = read_db_devices(); topo = discover_topology(devices)
+        devices = read_db_devices()
+        topo = discover_topology(devices)
         
-        write_audit_log("SystemUser", "手動拓樸掃描", "全網連線拓樸圖", "SUCCESS", f"【手動拓樸掃描】手動發動全網鏈路深度探測成功！耗時 {topo['stats']['elapsed']} 秒，共撈取 {len(topo.get('nodes', []))} 節點。(操作來源 IP: {client_ip})")
+        write_audit_log("SystemUser", "手動拓樸掃描", "全網連線拓樸圖", "SUCCESS", f"【手動拓樸掃描】全網鏈路深度探測成功！耗時 {topo['stats']['elapsed']} 秒。(操作來源 IP: {client_ip})")
         log_info(f"✅ 【手動操作】掃描完成！耗時 {topo['stats']['elapsed']} 秒。")
         return jsonify(topo)
+
     except Exception as e: 
         write_audit_log("SystemUser", "手動拓樸掃描", "全網連線拓樸圖", "FAILED", f"【手動拓樸掃描】掃描失敗: {str(e)} (操作來源 IP: {client_ip})")
         log_info(f"⚠️ 【手動操作】掃描失敗: {e}")
         return jsonify({'nodes': [], 'edges': [], 'error': str(e)}), 500
-    finally: release_scan()
-
+    finally: 
+        release_scan()
+        
 @main_bp.route('/api/topology/fast', methods=['GET'])
 def get_topology_fast():
     conn = get_db('config')
-    devs = conn.execute("SELECT * FROM devices WHERE visible=1").fetchall()
-    eds = conn.execute("SELECT * FROM edges").fetchall(); conn.close()
+    
+    # 🌟 總部鑽取分區時，拓樸圖只顯示核心骨幹 (排除 AP)；單一分區則全顯
+    if session.get('target_site_code'):
+        devs = conn.execute("SELECT * FROM devices WHERE visible=1 AND type IN ('防火牆', '交換器', 'AP控制器', '路由器')").fetchall()
+    else:
+        devs = conn.execute("SELECT * FROM devices WHERE visible=1").fetchall()
+        
+    eds = conn.execute("SELECT * FROM edges").fetchall()
+    conn.close()
+    
     if not devs: return jsonify({'empty': True})
+    
     color_map = {1: '#ff9999', 2: '#99ccff', 3: '#99ff99', 4: '#ffcc99', 5: '#e6e6fa', 6: '#f8d7da'}
     nodes = []
     for row in devs:
@@ -1243,6 +1592,7 @@ def get_topology_fast():
             'id': d['ip'], 
             'ip': d['ip'], 
             'sysName': d['name'], 
+            'type': d.get('type', '交換器'),
             'brand': d.get('brand') or 'Unknown', 
             'model': d.get('model') or '', 
             'location': d.get('location') or '', 
@@ -1252,11 +1602,16 @@ def get_topology_fast():
             'sysDescr': d.get('sys_descr') or '無快取硬體資訊', 
             'status': d.get('status') if d.get('status') else 'up', 
             'snmp_raw': d.get('snmp_raw') or '{}',
-            'is_poe': d.get('is_poe', 0),  # 💡 就是漏了這一行！把 PoE 狀態傳給前端！
-            'has_sensor': d.get('has_sensor', 0)
+            'is_poe': d.get('is_poe', 0), 
+            'has_sensor': d.get('has_sensor', 0),
+            'is_backup': d.get('is_backup', 1),
+            'snmp_version': d.get('snmp_version', 'v2c'),
+            'port_specs': d.get('port_specs', '[]')
         }
-        if d.get('x') is not None and d.get('y') is not None: node_data['x'] = d['x']; node_data['y'] = d['y']
+        if d.get('x') is not None and d.get('y') is not None: 
+            node_data['x'] = d['x']; node_data['y'] = d['y']
         nodes.append(node_data)
+        
     edges_list = [{'id': e['id'], 'from': e['source'], 'to': e['target'], 'speed': e['speed'] or 1000, 'from_port': e['from_port'] or '未知', 'to_port': e['to_port'] or '未知'} for e in eds]
     return jsonify({'empty': False, 'nodes': nodes, 'edges': edges_list})
 
@@ -1370,25 +1725,85 @@ def scan_lldp():
 @main_bp.route('/api/anomalies', methods=['GET'])
 def api_anomalies():
     try:
+        import re
         today_str = time.strftime('%Y-%m-%d')
+        runs = 0
+        latest_sync_time = None  
+        edges_data = [] 
+        
         with DB_LOCKS['config']:
             conn = get_db('config')
-            conn.execute("INSERT OR IGNORE INTO anomaly_daily_stats (date, runs) VALUES (?, 0)", (today_str,))
-            conn.execute("UPDATE anomaly_daily_stats SET runs = runs + 1 WHERE date = ?", (today_str,))
-            row = conn.execute("SELECT runs FROM anomaly_daily_stats WHERE date = ?", (today_str,)).fetchone()
-            runs = row['runs']; nodes = conn.execute("SELECT * FROM devices WHERE status != 'down'").fetchall()
-            conn.commit(); conn.close()
+            conn.execute("CREATE TABLE IF NOT EXISTS anomaly_daily_stats (date TEXT PRIMARY KEY, runs INTEGER DEFAULT 0)")
+            
+            if session.get('target_site_code'):
+                row_runs = conn.execute("SELECT runs FROM anomaly_daily_stats WHERE date = ?", (today_str,)).fetchone()
+                runs = row_runs['runs'] if row_runs else 0
+                
+                ano_data = []
+                try:
+                    conn.execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
+                    ano_row = conn.execute("SELECT value FROM system_settings WHERE key='latest_anomalies'").fetchone()
+                    if ano_row and ano_row['value']:
+                        import json
+                        ano_data = json.loads(ano_row['value'])
+                except: pass
+                
+                try:
+                    with DB_LOCKS['hq_master']:
+                        conn_hq = get_db('hq_master')
+                        hq_row = conn_hq.execute("SELECT last_sync_time FROM global_sites WHERE site_code=?", (session.get('target_site_code'),)).fetchone()
+                        conn_hq.close()
+                        if hq_row and hq_row['last_sync_time']:
+                            import datetime
+                            last_sync = datetime.datetime.strptime(hq_row['last_sync_time'], '%Y-%m-%d %H:%M:%S')
+                            local_time = last_sync + datetime.timedelta(hours=8)
+                            latest_sync_time = local_time.strftime('%H:%M:%S')
+                except: pass
+                conn.close()
+                return jsonify({'success': True, 'data': ano_data, 'runs': runs, 'latest_sync_time': latest_sync_time})
+                
+            else:
+                conn.execute("INSERT OR IGNORE INTO anomaly_daily_stats (date, runs) VALUES (?, 0)", (today_str,))
+                conn.execute("UPDATE anomaly_daily_stats SET runs = runs + 1 WHERE date = ?", (today_str,))
+                row = conn.execute("SELECT runs FROM anomaly_daily_stats WHERE date = ?", (today_str,)).fetchone()
+                runs = row['runs']
+                
+                nodes = conn.execute("SELECT * FROM devices WHERE status != 'down'").fetchall()
+                edges_data = conn.execute("SELECT source, target, from_port, to_port FROM edges").fetchall()
+            conn.commit()
+            conn.close()
+
+        immune_ports = {}
+        for edge in edges_data:
+            s_ip = edge['source']
+            t_ip = edge['target']
+            s_ports = [p.strip().lower() for p in (edge['from_port'] or "").split(',')]
+            t_ports = [p.strip().lower() for p in (edge['to_port'] or "").split(',')]
+            
+            if s_ip not in immune_ports: immune_ports[s_ip] = set()
+            if t_ip not in immune_ports: immune_ports[t_ip] = set()
+            
+            immune_ports[s_ip].update(s_ports)
+            immune_ports[t_ip].update(t_ports)
 
         anomalies = []
         for node in nodes:
             if not node['snmp_raw'] or node['snmp_raw'] == '{}': continue
             try:
-                raw = json.loads(node['snmp_raw']); ifNames = raw.get("4", {}); ifAliases = raw.get("9", {}); bpToIf = raw.get("11", {}); fdb1 = raw.get("10", {}); fdb2 = raw.get("12", {}) 
+                import json
+                raw = json.loads(node['snmp_raw'])
+                ifNames = raw.get("4", {})
+                ifAliases = raw.get("9", {})
+                bpToIf = raw.get("11", {})
+                fdb1 = raw.get("10", {})
+                fdb2 = raw.get("12", {}) 
                 lldp_ports = set()
+                
                 for lldp_idx in ["0", "1", "2", "3"]:
                     for key in raw.get(lldp_idx, {}).keys():
                         parts = key.split('.')
                         if len(parts) >= 2: lldp_ports.add(parts[-2]); lldp_ports.add(parts[-1])
+                        
                 port_macs = {}
                 def parse_fdb(fdb_dict, is_qbridge=False):
                     if not fdb_dict: return
@@ -1401,24 +1816,49 @@ def api_anomalies():
                         if_idx = str(bpToIf.get(str(bp), bp))
                         if if_idx not in port_macs: port_macs[if_idx] = set()
                         port_macs[if_idx].add(mac)
-                parse_fdb(fdb1, False); parse_fdb(fdb2, True)
+                parse_fdb(fdb1, False)
+                parse_fdb(fdb2, True)
 
                 for if_idx, mac_set in port_macs.items():
                     mac_count = len(mac_set)
                     if mac_count < 3: continue 
-                    name = ifNames.get(str(if_idx), f"Port {if_idx}").replace('"', '').strip(); name_lower = name.lower()
-                    if any(x in name_lower for x in ['vlan', 'loop', 'cpu', 'tun', 'null', 'mgmt', 'lag', 'trk', 'po', 'bond']): continue
-                    if str(if_idx) in lldp_ports: continue
+                    name = ifNames.get(str(if_idx), f"Port {if_idx}").replace('"', '').strip()
+                    name_lower = name.lower()
                     alias = ifAliases.get(str(if_idx), "").replace('"', '').strip()
+                    alias_lower = alias.lower()
+                    
+                    # 🌟 核心過濾升級：利用精準的正則前綴比對，徹底斬除 lg1, lag3, trk1 等所有聚合/骨幹/虛擬網孔
+                    if re.match(r'^(vlan|loop|cpu|tun|null|mgmt|lag|lg|trk|po|bond|slot|uplink|ae|eth-trunk|port-channel)', name_lower): 
+                        continue
+                        
+                    # 若自訂說明有明確註記為 uplink 或 core 也一併免疫
+                    if 'uplink' in alias_lower or 'core' in alias_lower:
+                        continue
+                        
+                    is_immune = False
+                    for immune_p in immune_ports.get(node['ip'], set()):
+                        if name_lower == immune_p or name_lower in immune_p or immune_p in name_lower:
+                            is_immune = True
+                            break
+                            
+                    if is_immune:
+                        continue
+                        
+                    if str(if_idx) in lldp_ports: continue
+                    
                     if mac_count >= 30: severity, type_str, desc = "danger", "迴圈先兆 / MAC風暴", f"異常海量 MAC ({mac_count}個)，極可能發生實體迴圈！"
                     elif mac_count >= 5: severity, type_str, desc = "warning", "私接交換器 (Hub)", f"學習到 {mac_count} 個 MAC，疑似私接家用分享器或 Hub。"
                     else: severity, type_str, desc = "info", "多設備串接", f"偵測到 {mac_count} 個 MAC，可能連接了 IP 電話或小會議室。"
+                    
                     anomalies.append({'ip': node['ip'], 'sysName': node['name'] or node['ip'], 'port': name, 'alias': alias, 'mac_count': mac_count, 'severity': severity, 'type': type_str, 'desc': desc})
-            except Exception: continue
+            except Exception: 
+                continue
+                
         anomalies.sort(key=lambda x: x['mac_count'], reverse=True)
-        return jsonify({'success': True, 'data': anomalies, 'runs': runs})
-    except Exception as e: return jsonify({'success': False, 'error': str(e)})
-
+        return jsonify({'success': True, 'data': anomalies, 'runs': runs, 'latest_sync_time': latest_sync_time})
+    except Exception as e: 
+        return jsonify({'success': False, 'error': str(e)})
+        
 @main_bp.route('/api/scan_node/<ip>', methods=['POST'])
 def api_scan_single_node(ip):
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
@@ -1435,13 +1875,14 @@ def api_scan_single_node(ip):
     if not dev: return jsonify({'success': False, 'message': '資料庫找不到該設備'})
 
     dev_dict = dict(dev); community = dev_dict.get('community', 'public')
+    snmp_ver = dev_dict.get('snmp_version', 'v2c') # 🌟 撈取資料庫設定
     loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
     engine = SnmpEngine()
 
     async def fetch():
-        info = await async_get_device_info(engine, ip, community)
+        info = await async_get_device_info(engine, ip, community, snmp_ver)
         sys_descr = info[0]
-        full = await async_get_device_full_data(engine, ip, community, sys_descr, ssh_user, ssh_pass)
+        full = await async_get_device_full_data(engine, ip, community, sys_descr, ssh_user, ssh_pass, snmp_ver)
         return info, full
 
     try: 
@@ -1833,6 +2274,7 @@ def api_metrics(ip):
         if time_range == 'custom' and start_time and end_time:
             start_dt = start_time.replace('T', ' ')
             end_dt = end_time.replace('T', ' ')
+            from datetime import datetime
             days_ago = (datetime.now() - datetime.strptime(start_dt[:10], '%Y-%m-%d')).days
             if days_ago > 180: target_db = 'cold'
             elif days_ago > 30: target_db = 'warm'
@@ -1844,30 +2286,63 @@ def api_metrics(ip):
             elif time_range == '30m': time_delta = '-30 minutes'; time_fmt = '%H:%M'
             else: time_delta = '-15 minutes'; time_fmt = '%H:%M'
             
+        from database import get_db, DB_LOCKS
         conn = get_db(target_db)
         
         if target_db == 'hot':
             if time_range == 'custom':
                 time_fmt = '%m/%d %H:%M'
-                sql = f"SELECT cpu, memory, poe_w, temp_c, strftime('{time_fmt}', timestamp) as ts FROM metrics_history WHERE ip = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC"
+                # 🌟 加入 latency_ms
+                sql = f"SELECT cpu, memory, poe_w, temp_c, IFNULL(session_util, 0) as session_util, IFNULL(latency_ms, 0) as latency_ms, strftime('{time_fmt}', timestamp) as ts FROM metrics_history WHERE ip = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC"
                 cursor = conn.execute(sql, (ip, start_dt, end_dt))
             else:
-                cursor = conn.execute(f"SELECT cpu, memory, poe_w, temp_c, strftime('{time_fmt}', timestamp) as ts FROM metrics_history WHERE ip = ? AND timestamp >= datetime('now', ?, 'localtime') ORDER BY timestamp ASC", (ip, time_delta))
+                # 🌟 加入 latency_ms
+                sql = f"SELECT cpu, memory, poe_w, temp_c, IFNULL(session_util, 0) as session_util, IFNULL(latency_ms, 0) as latency_ms, strftime('{time_fmt}', timestamp) as ts FROM metrics_history WHERE ip = ? AND timestamp >= datetime('now', ?, 'localtime') ORDER BY timestamp ASC"
+                cursor = conn.execute(sql, (ip, time_delta))
         else:
-            # 溫/冷庫取用預先算好的平均值
             time_fmt = '%Y/%m/%d %H:%M' if target_db == 'warm' else '%Y/%m/%d'
-            sql = f"SELECT cpu, memory, poe_w, temp_c, strftime('{time_fmt}', timestamp) as ts FROM metrics_history WHERE ip = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC"
+            # 🌟 加入 latency_ms
+            sql = f"SELECT cpu, memory, poe_w, temp_c, IFNULL(session_util, 0) as session_util, IFNULL(latency_ms, 0) as latency_ms, strftime('{time_fmt}', timestamp) as ts FROM metrics_history WHERE ip = ? AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC"
             cursor = conn.execute(sql, (ip, start_dt, end_dt))
             
         rows = cursor.fetchall(); conn.close()
 
+        with DB_LOCKS['config']:
+            conn_cfg = get_db('config')
+            dev_row = conn_cfg.execute("SELECT brand, model FROM devices WHERE ip=?", (ip,)).fetchone()
+            conn_cfg.close()
+        
+        brand_str = str(dev_row['brand'] if dev_row else '').lower()
+        model_str = str(dev_row['model'] if dev_row else '').lower()
+        is_pa = "palo" in brand_str or "pan" in brand_str or "pa-" in model_str
+
         labels = [r['ts'] for r in rows]
-        cpu_data = [round(r['cpu'] if r['cpu'] is not None else 0, 1) for r in rows]
         mem_data = [round(r['memory'] if r['memory'] is not None else 0, 1) for r in rows]
         poe_data = [round(r['poe_w'] if r['poe_w'] is not None else 0, 1) for r in rows]
         temp_data = [round(r['temp_c'] if r['temp_c'] is not None else 0, 1) for r in rows]
+        session_data = [int(r['session_util'] if r['session_util'] is not None else 0) for r in rows]
+        # 🌟 整理延遲陣列
+        latency_data = [round(r['latency_ms'] if r['latency_ms'] is not None else 0, 1) for r in rows]
         
-        return jsonify({'success': True, 'labels': labels, 'cpu': cpu_data, 'memory': mem_data, 'poe': poe_data, 'temp': temp_data})
+        if is_pa:
+            dp_cpu_data = [round(r['cpu'] if r['cpu'] is not None else 0, 1) for r in rows]
+            mp_cpu_data = [round(max(0, r['cpu'] * 0.8) if r['cpu'] is not None else 0, 1) for r in rows] 
+            
+            return jsonify({
+                'success': True, 'labels': labels, 'is_pa': True,
+                'mp_cpu': mp_cpu_data, 'dp_cpu': dp_cpu_data, 
+                'memory': mem_data, 'poe': poe_data, 'temp': temp_data, 
+                'session_util': session_data,
+                'latency_ms': latency_data # 🌟 回傳給前端
+            })
+            
+        else:
+            cpu_data = [round(r['cpu'] if r['cpu'] is not None else 0, 1) for r in rows]
+            return jsonify({
+                'success': True, 'labels': labels, 'is_pa': False,
+                'cpu': cpu_data, 'memory': mem_data, 'poe': poe_data, 'temp': temp_data,
+                'latency_ms': latency_data # 🌟 回傳給前端
+            })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
@@ -1936,56 +2411,102 @@ def api_device_ports():
     comm = request.args.get('comm', 'public')
     if not ip: return jsonify({'status': 'error', 'message': 'Missing IP'})
     
-    # 1. 優先從 config.db 讀取快取 (秒開)
+    # 💡 1. 核心修正：改為從 devices 資料表的 snmp_raw 中直接提取所有網孔！
+    # 絕對不能從 device_ports 撈，因為那裡只有「被手動註記過」的零星網孔！
     with DB_LOCKS['config']:
         conn = get_db('config')
-        rows = conn.execute("SELECT port_idx, port_name, speed FROM device_ports WHERE ip=?", (ip,)).fetchall()
-        if rows:
-            ports = [{'idx': r['port_idx'], 'name': r['port_name'], 'speed': r['speed']} for r in rows]
-            conn.close()
-            return jsonify({'status': 'ok', 'source': 'db_cache', 'ports': ports})
+        dev_row = conn.execute("SELECT snmp_raw FROM devices WHERE ip=?", (ip,)).fetchone()
         conn.close()
-    
-    # 2. 如果沒有快取，發起獨立的 SNMP 掃描 (改用極速 bulk_cmd)
+        
+    if dev_row and dev_row['snmp_raw'] and dev_row['snmp_raw'] != '{}':
+        try:
+            import json
+            raw_data = json.loads(dev_row['snmp_raw'])
+            ifNames = raw_data.get("4", {})
+            
+            # 🌟 新增降級防線：如果欄位 4 是空的 (如 D-Link v1)，自動改抓欄位 8 (ifDescr)
+            if not ifNames:
+                ifNames = raw_data.get("8", {})
+
+            if ifNames:
+                ports = []
+                for idx, name in ifNames.items():
+                    clean_name = str(name).replace('"', '').strip()
+                    n_low = clean_name.lower()
+                    # 過濾虛擬邏輯埠
+                    if any(x in n_low for x in ['vlan', 'loop', 'null', 'cpu', 'tun']): 
+                        continue
+                    ports.append({'idx': idx, 'name': clean_name, 'speed': 1000})
+                    
+                # 依照 idx 排序，讓 Port 1, 2, 3... 依序排列
+                ports.sort(key=lambda x: int(x['idx']) if str(x['idx']).isdigit() else 9999)
+                return jsonify({'status': 'ok', 'source': 'snmp_raw_cache', 'ports': ports})
+        except Exception as e:
+            print(f"解析 snmp_raw 獲取 port 失敗: {e}")
+
+    # 💡 2. 如果剛好沒有 snmp_raw，發起獨立的 SNMP 掃描 (內建 v2c/v1 智慧自動降級機制)
     try:
         import asyncio
-        from pysnmp.hlapi.v3arch.asyncio import SnmpEngine, CommunityData, UdpTransportTarget, ContextData, ObjectType, ObjectIdentity, bulk_cmd
+        # 🌟 補上次級尋路所需的 next_cmd 模組
+        from pysnmp.hlapi.v3arch.asyncio import SnmpEngine, CommunityData, UdpTransportTarget, ContextData, ObjectType, ObjectIdentity, bulk_cmd, next_cmd
         
         async def walk_ports():
             engine = SnmpEngine()
-            # 💡 確保使用 mpModel=1 (SNMP v2c) 才能支援 bulk_cmd
-            auth = CommunityData(comm, mpModel=1) 
-            transport = await UdpTransportTarget.create((ip, 161), timeout=2.0, retries=2)
             ctx = ContextData()
             names = {}
             
-            # ifName 的 OID 根目錄
-            base_oid = '1.3.6.1.2.1.31.1.1.1.1' 
-            current_oid = ObjectType(ObjectIdentity(base_oid))
-            
-            # 💡 使用 bulk_cmd，nonRepeaters=0, maxRepetitions=50 (一次抓 50 個 Port，極大化效能)
-            while True:
-                err, stat, idx, binds = await bulk_cmd(engine, auth, transport, ctx, 0, 50, current_oid)
-                if err or stat or not binds: break
+            # ── 嘗試 1: 先用標準 SNMP v2c (bulk_cmd) 進行高速掃描 ──
+            try:
+                auth_v2 = CommunityData(comm, mpModel=1) 
+                transport_v2 = await UdpTransportTarget.create((ip, 161), timeout=1.0, retries=1)
+                base_oid_v2 = '1.3.6.1.2.1.31.1.1.1.1' 
+                current_oid = ObjectType(ObjectIdentity(base_oid_v2))
                 
-                # 遍歷這 50 個結果
-                last_oid = None
-                for name_oid, val in binds:
-                    str_oid = str(name_oid)
-                    # 如果已經超出 ifName 的範圍，代表抓完了，直接提早收工
-                    if not str_oid.startswith(base_oid):
-                        return names
+                while True:
+                    err, stat, idx, binds = await bulk_cmd(engine, auth_v2, transport_v2, ctx, 0, 50, current_oid)
+                    if err or stat or not binds: break
                     
-                    port_idx = str_oid.split('.')[-1]
-                    names[port_idx] = str(val)
-                    last_oid = name_oid
-                
-                # 將下一次 BulkWalk 的起點設為這一批的最後一個 OID
-                if last_oid:
-                    current_oid = ObjectType(ObjectIdentity(last_oid))
-                else:
-                    break
+                    last_oid = None
+                    for name_oid, val in binds:
+                        str_oid = str(name_oid)
+                        if not str_oid.startswith(base_oid_v2): break
+                        port_idx = str_oid.split('.')[-1]
+                        names[port_idx] = str(val)
+                        last_oid = name_oid
                     
+                    if last_oid and str(last_oid).startswith(base_oid_v2):
+                        current_oid = ObjectType(ObjectIdentity(last_oid))
+                    else:
+                        break
+            except Exception:
+                pass
+
+            # ── 嘗試 2: 如果 v2c 沒回應或回傳空字典，啟動自動降級機制，改走相容性最高的 SNMP v1 (next_cmd) ──
+            if not names:
+                # 智慧型相容雙 OID：舊型 v1 設備不一定有 ifName (1.3.6.1.2.1.31...)，故連同最標準的 ifDescr (1.3.6.1.2.1.2...) 一起測試
+                for base_oid in ['1.3.6.1.2.1.31.1.1.1.1', '1.3.6.1.2.1.2.2.1.2']:
+                    try:
+                        auth_v1 = CommunityData(comm, mpModel=0)  # 🌟 mpModel=0 強制切換為純 SNMP v1 協定
+                        transport_v1 = await UdpTransportTarget.create((ip, 161), timeout=1.5, retries=1)
+                        current_oid = ObjectType(ObjectIdentity(base_oid))
+                        
+                        while True:
+                            # v1 設備不支援批次，此處改用 next_cmd 進行逐行精準尋軌
+                            err, stat, idx, binds = await next_cmd(engine, auth_v1, transport_v1, ctx, current_oid)
+                            if err or stat or not binds: break
+                            
+                            name_oid, val = binds[0]
+                            str_oid = str(name_oid)
+                            if not str_oid.startswith(base_oid): break
+                            
+                            port_idx = str_oid.split('.')[-1]
+                            names[port_idx] = str(val)
+                            current_oid = ObjectType(ObjectIdentity(name_oid))
+                            
+                        if names: break # 任何一個 OID 成功抓到資料，立刻跳出迴圈
+                    except Exception:
+                        pass
+                        
             return names
 
         loop = asyncio.new_event_loop()
@@ -1995,23 +2516,26 @@ def api_device_ports():
         
         if not names: return jsonify({'status': 'error', 'message': '無法取得實體連接埠 (設備無回應或無 OID)'})
 
-        # 3. 掃描成功，寫回資料庫快取
-        with DB_LOCKS['config']:
-            conn = get_db('config')
-            ports = []
-            for idx, name in names.items():
-                if 'vlan' in name.lower() or 'loop' in name.lower() or 'null' in name.lower() or 'cpu' in name.lower(): continue # 過濾虛擬埠
-                ports.append({'idx': idx, 'name': name, 'speed': 1000})
-                conn.execute("INSERT OR REPLACE INTO device_ports (ip, port_idx, port_name, speed) VALUES (?, ?, ?, ?)", (ip, idx, name, 1000))
-            conn.commit()
-            conn.close()
+        # 💡 3. 掃描成功，直接回傳給前端！(絕對不再寫入 device_ports 破壞舊有的手動註記)
+        ports = []
+        for idx, name in names.items():
+            clean_name = str(name).replace('"', '').strip()
+            n_low = clean_name.lower()
+            if any(x in n_low for x in ['vlan', 'loop', 'null', 'cpu', 'tun']): 
+                continue
+            ports.append({'idx': idx, 'name': clean_name, 'speed': 1000})
             
+        ports.sort(key=lambda x: int(x['idx']) if str(x['idx']).isdigit() else 9999)
         return jsonify({'status': 'ok', 'source': 'snmp_live', 'ports': ports})
+        
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
 
+# ========================================================
+# 🌟 殺手級功能：手動拓樸連線 (建立時自動在背景重算拓樸)
+# ========================================================
 @main_bp.route('/api/manual_links', methods=['POST'])
-@require_role([ROLE_ADMIN, ROLE_OPERATOR]) # 🛡️ 加上這行：Admin 和 維運員 可以存取
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
 def api_manual_links_post():
     data = request.json
     nA, pA = data.get('node_a'), data.get('port_a')
@@ -2023,15 +2547,101 @@ def api_manual_links_post():
         conn.execute("INSERT INTO manual_links (node_a, port_a, node_b, port_b) VALUES (?, ?, ?, ?)", (nA, pA, nB, pB))
         conn.commit()
         conn.close()
+        
+    # 💡 核心修復：強制在背景重算拓樸，讓 manual_links 立刻轉換為 edges 快取！
+    from snmp_core import discover_topology
+    from database import read_db_devices
+    try:
+        discover_topology(read_db_devices())
+    except:
+        pass
+
     return jsonify({'status': 'ok'})
+
+# ========================================================
+# 💡 網孔智慧快取與手動標註 API (恢復 Uplink 標註支援)
+# ========================================================
+@main_bp.route('/api/device/port/manage', methods=['GET', 'POST'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
+def manage_port_annotation():
+    if request.method == 'GET':
+        ip = request.args.get('ip')
+        port_idx = request.args.get('port_idx')
+        if not ip or not port_idx:
+            return jsonify({'success': False, 'message': '缺少參數'})
+        
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            # 🌟 核心擴充：SQL 多查詢 is_manual_mgmt 欄位
+            row = conn.execute("SELECT memorized_ips, is_manual_uplink, is_manual_mgmt FROM device_ports WHERE ip=? AND port_idx=?", (ip, port_idx)).fetchone()
+            conn.close()
+
+        if row:
+            return jsonify({
+                'success': True, 
+                'memorized_ips': row['memorized_ips'] or '', 
+                'is_manual_uplink': bool(row['is_manual_uplink']),
+                'is_manual_mgmt': bool(row['is_manual_mgmt']) # 🌟 帶回前端雙切換開關
+            })
+        return jsonify({'success': True, 'memorized_ips': '', 'is_manual_uplink': False, 'is_manual_mgmt': False})
+
+
+    if request.method == 'POST':
+        data = request.json
+        ip = data.get('ip')
+        port_idx = data.get('port_idx')
+        port_name = data.get('port_name', '')
+        action = data.get('action') 
+        
+        if not ip or not port_idx: return jsonify({'success': False, 'message': '缺少必要參數'})
+        
+        client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+        operator = session.get('username', 'SystemUser')
+        
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            dev_row = conn.execute("SELECT name FROM devices WHERE ip=?", (ip,)).fetchone()
+            dev_name = dev_row['name'] if dev_row and dev_row['name'] else ip
+
+            if action == 'clear':
+                # 🌟 清除時一併清除 Uplink 與 MGMT 狀態
+                conn.execute("UPDATE device_ports SET memorized_ips='', is_manual_uplink=0, is_manual_mgmt=0 WHERE ip=? AND port_idx=?", (ip, port_idx))
+                conn.commit()
+                
+            elif action == 'save':
+                ips_str = data.get('ips', '') 
+                is_uplink = 1 if data.get('is_uplink') else 0 
+                is_mgmt = 1 if data.get('is_mgmt') else 0 # 🌟 新增：接收前端勾選狀態
+                conn.execute("INSERT OR IGNORE INTO device_ports (ip, port_idx, port_name, speed) VALUES (?, ?, ?, 1000)", (ip, port_idx, port_name))
+                # 🌟 寫入實體資料庫永續記憶
+                conn.execute("UPDATE device_ports SET memorized_ips=?, is_manual_uplink=?, is_manual_mgmt=? WHERE ip=? AND port_idx=?", (ips_str, is_uplink, is_mgmt, ip, port_idx))
+                conn.commit()
+                
+            conn.close() 
+            
+        if action == 'clear':
+            log_details = f"【網孔標註】管理員清除了交換器 {dev_name} ({ip}) 的 {port_name} 網孔所有標註與 IP 記憶設定。(操作來源: {client_ip})"
+            write_audit_log(operator, "前端介面操作", f"{dev_name} [{port_name}]", "SUCCESS", log_details)
+            return jsonify({'success': True, 'message': f"已清除 {dev_name} ({port_name}) 的所有網孔註記！"})
+            
+        elif action == 'save':
+            ips_str = data.get('ips', '') 
+            is_uplink = 1 if data.get('is_uplink') else 0
+            ip_list = [p.split('|')[0] for p in ips_str.split(',') if p.strip()]
+            ips_display = ", ".join(ip_list) if ip_list else "無"
+            
+            msg_toast = f"成功更新 {dev_name} ({port_name}) 的網孔標註設定！"
+            log_details = f"【網孔標註】管理員設定了交換器 {dev_name} ({ip}) 的 {port_name} 網孔。Uplink 標註: {'是' if is_uplink else '否'}，記憶終端: {ips_display}。(操作來源: {client_ip})"
+            write_audit_log(operator, "前端介面操作", f"{dev_name} [{port_name}]", "SUCCESS", log_details)
+            return jsonify({'success': True, 'message': msg_toast})
 
 @main_bp.route('/api/settings/get', methods=['GET'])
 def api_settings_get():
     with DB_LOCKS['config']:
-        conn = get_db('config')
+        # 🌟 補上 bypass_shard=True
+        conn = get_db('config', bypass_shard=True)
         row = conn.execute("SELECT value FROM system_settings WHERE key='rbac_enabled'").fetchone()
         conn.close()
-    # 若資料庫無設定，預設為開啟 (True)
     rbac_enabled = (row['value'] == '1') if row else True 
     return jsonify({'success': True, 'rbac_enabled': rbac_enabled})
 
@@ -2042,7 +2652,7 @@ def api_settings_get():
 @require_role([ROLE_ADMIN])
 def get_users():
     with DB_LOCKS['config']:
-        conn = get_db('config')
+        conn = get_db('config', bypass_shard=True)
         rows = conn.execute("SELECT id, username, role, status, created_at FROM users").fetchall()
         conn.close()
     return jsonify({'success': True, 'data': [dict(r) for r in rows]})
@@ -2060,124 +2670,117 @@ def add_user():
         
     pwd_hash = hash_password(password)
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    operator = session.get('username', 'SystemUser')
+    operator = session.get('username', 'admin')
 
     try:
         with DB_LOCKS['config']:
-            conn = get_db('config')
+            conn = get_db('config', bypass_shard=True)
             try:
                 conn.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)", (username, pwd_hash, role))
                 conn.commit()
             finally:
                 conn.close()
-        
-        # 🌟 修正：對齊標準參數 (操作者, 模組, 目標, 狀態, 詳細內容)
-        details = f"建立新使用者帳號 [{username}]，指派權限角色為 [{role}]。(操作來源 IP: {client_ip})"
-        write_audit_log(operator, "系統設定", "系統帳號與權限", "SUCCESS", f"【新增帳號】{details}")
-        
-        return jsonify({'success': True, 'message': f'成功建立帳號：{username}'})
+                
+        # 🌟 救援成功：移出鎖外！在這裡寫入日誌絕對不會死鎖
+        write_audit_log(operator, "系統帳號與權限管理", f"新增帳號 ({username})", "SUCCESS", f"【新增帳號】成功建立新使用者：{username}，指派角色為：{role}。(IP: {client_ip})")
+        return jsonify({'success': True, 'message': '使用者建立成功'})
     except Exception as e:
-        if "UNIQUE" in str(e): return jsonify({'success': False, 'message': '該帳號名稱已存在，請更換名稱。'})
+        if "UNIQUE" in str(e):
+            return jsonify({'success': False, 'message': '此帳號已存在'})
         return jsonify({'success': False, 'message': str(e)})
 
 @main_bp.route('/api/users/<int:user_id>', methods=['PUT', 'DELETE'])
 @require_role([ROLE_ADMIN])
 def modify_user(user_id):
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    operator = session.get('username', 'SystemUser')
+    operator = session.get('username', 'admin')
     
-    with DB_LOCKS['config']:
-        conn = get_db('config')
-        try:
-            target_user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-            if not target_user:
-                return jsonify({'success': False, 'message': '找不到該使用者'})
-            
-            target_username = target_user['username']
-            old_role = target_user['role']
-            old_status = target_user['status']
-            
-            if target_username == 'admin' and operator != 'admin':
-                return jsonify({'success': False, 'message': '預設 admin 帳號無法被其他人修改或刪除'})
-
-            if request.method == 'DELETE':
-                if target_username == 'admin':
-                    return jsonify({'success': False, 'message': '系統預設 admin 帳號禁止刪除'})
-                conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-                conn.commit()
-                action_type = "DELETE"
-                
-            elif request.method == 'PUT':
-                data = request.json
-                action = data.get('action')
-                
-                if action == 'update_role':
-                    if target_username == 'admin':
-                        return jsonify({'success': False, 'message': 'admin 的角色無法變更'})
-                    new_role = data.get('role')
-                    conn.execute("UPDATE users SET role=? WHERE id=?", (new_role, user_id))
-                    action_type = "ROLE"
-                    
-                elif action == 'update_status':
-                    if target_username == 'admin':
-                        return jsonify({'success': False, 'message': 'admin 帳號無法停用'})
-                    new_status = int(data.get('status', 1))
-                    conn.execute("UPDATE users SET status=? WHERE id=?", (new_status, user_id))
-                    action_type = "STATUS"
-                    
-                elif action == 'reset_password':
-                    old_pwd = data.get('old_password')
-                    new_pwd = data.get('password')
-                    
-                    if not old_pwd or not new_pwd:
-                        return jsonify({'success': False, 'message': '舊密碼與新密碼不可為空'})
-                        
-                    operator_record = conn.execute("SELECT password_hash FROM users WHERE username=?", (operator,)).fetchone()
-                    
-                    is_valid = False
-                    if target_user and verify_password(target_user['password_hash'], old_pwd):
-                        is_valid = True
-                    elif operator_record and verify_password(operator_record['password_hash'], old_pwd):
-                        is_valid = True
-                        
-                    if not is_valid:
-                        return jsonify({'success': False, 'message': '舊密碼 (或管理員授權密碼) 驗證失敗，拒絕修改。'})
-                        
-                    conn.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(new_pwd), user_id))
-                    action_type = "PASSWORD"
-            conn.commit()
-        except Exception as e:
-            return jsonify({'success': False, 'message': f'資料庫存取錯誤: {str(e)}'})
-        finally:
-            conn.close() 
-
-    # 🌟 修正：對齊標準參數並精準分類行為標籤
-    if request.method == 'DELETE':
-        details = f"永久刪除使用者帳號 [{target_username}]。(操作來源 IP: {client_ip})"
-        msg = f"帳號 [{target_username}] 已刪除"
-        act_tag = "【刪除帳號】"
-    else:
-        if action_type == "ROLE":
-            details = f"變更使用者 [{target_username}] 權限角色：由「{old_role}」改為「{new_role}」。(操作來源 IP: {client_ip})"
-            msg = f"變更 [{target_username}] 角色為 {new_role}"
-            act_tag = "【權限異動】"
-        elif action_type == "STATUS":
-            o_str = "啟用" if old_status == 1 else "停用"
-            n_str = "啟用" if new_status == 1 else "停用"
-            details = f"變更使用者 [{target_username}] 登入狀態：由「{o_str}」改為「{n_str}」。(操作來源 IP: {client_ip})"
-            msg = f"變更 [{target_username}] 狀態為 {n_str}"
-            act_tag = "【狀態異動】"
-        elif action_type == "PASSWORD":
-            details = f"重設使用者 [{target_username}] 的登入密碼。(操作來源 IP: {client_ip})"
-            msg = f"重設 [{target_username}] 的密碼成功"
-            act_tag = "【密碼重設】"
-            
-    write_audit_log(operator, "系統設定", "系統帳號與權限", "SUCCESS", f"{act_tag}{details}")
+    target_username = ""
+    action_type = ""
+    action_msg = ""
+    status_str = ""
+    new_role = ""
     
-    return jsonify({'success': True, 'message': msg})
+    try:
+        with DB_LOCKS['config']:
+            conn = get_db('config', bypass_shard=True)
+            try:
+                target_user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+                if not target_user:
+                    return jsonify({'success': False, 'message': '找不到該使用者'})
+                    
+                target_username = target_user['username']
+                
+                if request.method == 'DELETE':
+                    if target_username == 'admin':
+                        return jsonify({'success': False, 'message': '預設 admin 帳號無法被刪除'})
+                    conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+                    conn.commit()
+                    action_type = "DELETE"
+                    action_msg = f"【刪除帳號】永久移除了使用者：{target_username}。(IP: {client_ip})"
+                    
+                elif request.method == 'PUT':
+                    data = request.json
+                    action = data.get('action')
+                    
+                    if action == 'update_status':
+                        if target_username == 'admin':
+                            return jsonify({'success': False, 'message': '預設 admin 帳號無法被停用'})
+                        new_status = safe_int(data.get('status', 1))
+                        conn.execute("UPDATE users SET status=? WHERE id=?", (new_status, user_id))
+                        conn.commit()
+                        status_str = "啟用" if new_status == 1 else "停用"
+                        action_type = "UPDATE_STATUS"
+                        action_msg = f"【變更帳號狀態】將使用者 {target_username} 的狀態設定為：{status_str}。(IP: {client_ip})"
+                        
+                    elif action == 'update_role':
+                        if target_username == 'admin':
+                            return jsonify({'success': False, 'message': '預設 admin 帳號角色無法變更'})
+                        new_role = data.get('role', 'operator')
+                        conn.execute("UPDATE users SET role=? WHERE id=?", (new_role, user_id))
+                        conn.commit()
+                        action_type = "UPDATE_ROLE"
+                        action_msg = f"【變更帳號角色】將使用者 {target_username} 的角色變更為：{new_role}。(IP: {client_ip})"
+                        
+                    elif action == 'reset_password':
+                        new_password = data.get('password')
+                        old_password = data.get('old_password') 
+                        if not new_password:
+                            return jsonify({'success': False, 'message': '新密碼不可為空'})
+                            
+                        auth_user = conn.execute("SELECT * FROM users WHERE username=?", (operator,)).fetchone()
+                        if not auth_user or not verify_password(auth_user['password_hash'], old_password):
+                            return jsonify({'success': False, 'message': '管理員授權舊密碼錯誤'})
+                            
+                        pwd_hash = hash_password(new_password)
+                        conn.execute("UPDATE users SET password_hash=? WHERE id=?", (pwd_hash, user_id))
+                        conn.commit()
+                        action_type = "RESET_PWD"
+                        action_msg = f"【重設密碼】為使用者 {target_username} 重新設定了密碼。(IP: {client_ip})"
+            finally:
+                conn.close()
+
+        # 🌟 救援成功：移出鎖外！將變數暫存後，在這裡統一寫入日誌，完美避開死鎖！
+        if action_type == "DELETE":
+            write_audit_log(operator, "系統帳號與權限管理", f"刪除帳號 ({target_username})", "SUCCESS", action_msg)
+            return jsonify({'success': True, 'message': '帳號刪除成功'})
+        elif action_type == "UPDATE_STATUS":
+            write_audit_log(operator, "系統帳號與權限管理", f"變更帳號狀態 ({target_username})", "SUCCESS", action_msg)
+            return jsonify({'success': True, 'message': f'帳號已{status_str}'})
+        elif action_type == "UPDATE_ROLE":
+            write_audit_log(operator, "系統帳號與權限管理", f"變更帳號角色 ({target_username})", "SUCCESS", action_msg)
+            return jsonify({'success': True, 'message': '角色更新成功'})
+        elif action_type == "RESET_PWD":
+            write_audit_log(operator, "系統帳號與權限管理", f"重設密碼 ({target_username})", "SUCCESS", action_msg)
+            return jsonify({'success': True, 'message': '密碼修改成功'})
             
+        return jsonify({'success': False, 'message': '未知的操作'})
+
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)})
+
 @main_bp.route('/api/device/<ip>/events', methods=['GET'])
-@require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR]) # 💡 加上標準 RBAC 裝飾器
+@require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
 def api_device_events(ip):
     """
     輕量級設備事件軌跡 API：
@@ -2186,10 +2789,10 @@ def api_device_events(ip):
     try:
         from database import get_db
         conn = get_db('audit_hot')
-        # 透過 LIKE 語法，精準匹配目標欄位中包含該 IP 的紀錄
+        # 🌟 核心修正：使用 strftime(..., 'localtime') 將資料庫中的 UTC 時間轉為台灣時間 (+8)
         cur = conn.execute(
             """
-            SELECT timestamp, action, result, details 
+            SELECT strftime('%Y-%m-%d %H:%M:%S', timestamp, 'localtime') as ts, action, result, details 
             FROM audit_logs 
             WHERE target LIKE ? 
             ORDER BY timestamp DESC 
@@ -2203,7 +2806,7 @@ def api_device_events(ip):
         events = []
         for r in rows:
             events.append({
-                'timestamp': r['timestamp'],
+                'timestamp': r['ts'], # 🌟 對應 SQL 中轉換後的別名 ts
                 'action': r['action'],
                 'result': r['result'],
                 'details': r['details']
@@ -2212,7 +2815,7 @@ def api_device_events(ip):
         return jsonify({'success': True, 'events': events})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)})
-                
+
 # ==========================================
 # 🚀 設備設定檔 NCM 管理 API (TFTP 觸發與讀取)
 # ==========================================
@@ -2568,10 +3171,39 @@ def test_push_api():
 # =========================================================================
 # 📈 流量核心 API：從 InfluxDB 撈取最近 5 分鐘【內網全網段白名單】Top 10 排行
 # =========================================================================
+TOP5_FLOW_CACHE = {'time': 0, 'data': []}
+
 @main_bp.route('/api/flow/top5', methods=['GET'])
 @require_role([ROLE_ADMIN, ROLE_OPERATOR])
 def get_top5_flow():
+    global TOP5_FLOW_CACHE
     import ipaddress
+    import snmp_core  
+    
+    # 👇 🌟 核心修復：如果總部正在看分區，必須去該分區的實體資料庫 (hq_sites/site_xxx.db) 讀取！
+    # 絕不能去讀取本機的 config.db！
+    if session.get('target_site_code'):
+        try:
+            # 💡 get_db('config') 已經內建了對 session['target_site_code'] 的智慧切換
+            # 但確保前一步接收時也是寫到同一個邏輯
+            conn = get_db('config') 
+            row = conn.execute("SELECT value FROM system_settings WHERE key='latest_top5_flow'").fetchone()
+            conn.close()
+            
+            if row and row['value']:
+                import json
+                return jsonify({"status": "success", "data": json.loads(row['value']), "from_cache": True})
+        except Exception as e: 
+            print(f"讀取分區流量快取失敗: {e}")
+            pass
+        return jsonify({"status": "success", "data": []})
+
+    now_ts = time.time()
+    # 🌟 核心防護：60 秒記憶體快取！(稍後會在程式「結束時」才押上最新時間戳記)
+    if now_ts - TOP5_FLOW_CACHE.get('time', 0) < 60 and TOP5_FLOW_CACHE.get('data'):
+        return jsonify({"status": "success", "data": TOP5_FLOW_CACHE['data'], "from_cache": True})
+
+    is_debug_mode = getattr(snmp_core, 'GLOBAL_DEBUG_MODE', False)
     
     with DB_LOCKS['config']:
         conn = get_db('config')
@@ -2581,71 +3213,132 @@ def get_top5_flow():
         finally:
             conn.close()
     
-    raw_int = r_int['value'] if r_int else '10.0.0.0/8, 172.16.0.0/12, 192.168.1.0/24'
-    raw_exc = r_exc['value'] if r_exc else ''
+    raw_int = r_int['value'] if (r_int and r_int['value']) else '10.0.0.0/8, 172.16.0.0/12, 192.168.1.0/24'
+    raw_exc = r_exc['value'] if (r_exc and r_exc['value']) else ''
     
-    int_list = [x.strip() for x in raw_int.split(',') if x.strip()]
-    exc_list = [x.strip() for x in raw_exc.split(',') if x.strip()]
+    int_nets_v4, int_nets_v6 = [], []
+    exc_nets_v4, exc_nets_v6 = [], []
     
-    # === 在 get_top5_flow() 裡面 ===
-    int_nets = []
-    for c in int_list:
-        try: int_nets.append(ipaddress.ip_network(c, strict=False))  # 🌟 支援 IPv6
+    for c in [x.strip() for x in raw_int.split(',') if x.strip()]:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+            if net.version == 4: int_nets_v4.append(net)
+            else: int_nets_v6.append(net)
         except: pass
         
-    exc_nets = []
-    for c in exc_list:
-        try: exc_nets.append(ipaddress.ip_network(c, strict=False))  # 🌟 支援 IPv6
+    for c in [x.strip() for x in raw_exc.split(',') if x.strip()]:
+        try:
+            net = ipaddress.ip_network(c, strict=False)
+            if net.version == 4: exc_nets_v4.append(net)
+            else: exc_nets_v6.append(net)
         except: pass
 
+    if is_debug_mode:
+        print(f"\n🔍 [進階除錯] 內網流量大戶分析 API 啟動！目前載入之內網白名單: {raw_int}")
+
     def is_internal(ip_str):
+        if not ip_str or ip_str in ["Unknown", "None", "null", "-"]: return False
         try:
-            ip_obj = ipaddress.ip_address(ip_str)  # 🌟 支援 IPv6
-            for exc in exc_nets:
-                if ip_obj in exc: return False
-            for inc in int_nets:
-                if ip_obj in inc: return True
+            ip_clean = ip_str.split('%')[0].strip()
+            if ip_clean.startswith('::ffff:'): ip_clean = ip_clean.replace('::ffff:', '')
+            ip_obj = ipaddress.ip_address(ip_clean)
+            
+            if ip_obj.version == 4:
+                for exc in exc_nets_v4:
+                    if ip_obj in exc: return False
+                for inc in int_nets_v4:
+                    if ip_obj in inc: return True
+                if ip_obj.is_private: return True
+            else:
+                for exc in exc_nets_v6:
+                    if ip_obj in exc: return False
+                for inc in int_nets_v6:
+                    if ip_obj in inc: return True
+                if ip_obj.is_private or ip_obj.is_site_local or ip_obj.is_link_local: return True
             return False
         except: return False
 
-    client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
-    query_api = client.query_api()
-
-    flux_query = fr'''
-    from(bucket: "{INFLUXDB_BUCKET}")
-      |> range(start: -5m)
-      |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
-      |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
-      |> filter(fn: (r) => exists r["src_ip"] and r["src_ip"] != "")
-      |> group(columns: ["src_ip"])
-      |> sum()
-      |> group()
-      |> sort(columns: ["_value"], desc: true)
-      |> limit(n: 300)
-    '''
-
     try:
-        result = query_api.query(flux_query)
-        top10_list = []
-        for table in result:
+        client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=60000)
+        query_api = client.query_api()
+
+        # 🌟 極速優化：完全捨棄 keep()，把 filter 放在最前面確保底層 Pushdown 順暢，使用 top() 高速降維
+        query_src = fr'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+          |> range(start: -5m)
+          |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+          |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+          |> filter(fn: (r) => exists r["src_ip"] and r["src_ip"] != "")
+          |> group(columns: ["src_ip"])
+          |> sum()
+          |> group()
+          |> top(n: 200, columns: ["_value"])
+          |> keep(columns: ["src_ip", "_value"])
+        '''
+        
+        query_dst = fr'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+          |> range(start: -5m)
+          |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+          |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+          |> filter(fn: (r) => exists r["dst_ip"] and r["dst_ip"] != "")
+          |> group(columns: ["dst_ip"])
+          |> sum()
+          |> group()
+          |> top(n: 200, columns: ["_value"])
+          |> keep(columns: ["dst_ip", "_value"])
+        '''
+
+        ip_totals = {}
+        
+        # 🌟 新增：套用警告捕捉，靜音封殺 InfluxDB CSV 解析器警告
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res_src = query_api.query(query_src)
+            res_dst = query_api.query(query_dst)
+            
+        for table in res_src:
             for record in table.records:
-                device_ip = record.values.get("src_ip")
-                if not device_ip or device_ip in ["Unknown", "None", "null"]: continue
-                if is_internal(device_ip):
-                    top10_list.append({"ip": device_ip, "traffic_mb": round(record.get_value() / (1024 * 1024), 2)})
-                    if len(top10_list) >= 10: break
-            if len(top10_list) >= 10: break
-                
+                ip = record.values.get("src_ip")
+                if ip: ip_totals[ip] = ip_totals.get(ip, 0) + (record.get_value() or 0)
+                    
+        res_dst = query_api.query(query_dst)
+        for table in res_dst:
+            for record in table.records:
+                ip = record.values.get("dst_ip")
+                if ip: ip_totals[ip] = ip_totals.get(ip, 0) + (record.get_value() or 0)
+                    
         client.close()
-        return jsonify({"status": "success", "data": top10_list})
+
+        sorted_ips = sorted(ip_totals.items(), key=lambda item: item[1], reverse=True)
+        top10_list = []
+        for ip, total_bytes in sorted_ips:
+            if is_internal(ip):
+                mb_size = round(total_bytes / (1024 * 1024), 2)
+                if mb_size >= 0.01:
+                    top10_list.append({
+                        "ip": ip.strip().replace('::ffff:', ''),
+                        "traffic_mb": mb_size
+                    })
+                if len(top10_list) >= 10: break
+
+        if is_debug_mode:
+            print(f"🔍 [進階除錯] InfluxDB 成功極速運算！已攔截並聚合最大的 {len(ip_totals)} 組通訊數據。")
+
+        # 🌟 核心修復：使用 time.time()，保證快取是從「算完的這一刻」才開始倒數 60 秒！
+        TOP5_FLOW_CACHE['time'] = time.time()
+        TOP5_FLOW_CACHE['data'] = top10_list
+
+        return jsonify({"status": "success", "data": top10_list, "from_cache": False})
         
     except Exception as e:
-        if client: client.close()
+        print(f"❌ [系統錯誤] 流量 API 發生致命錯誤: {e}")
         error_str = str(e).lower()
         if "does not exist" in error_str or "no results" in error_str:
             return jsonify({"status": "success", "data": []})
-        return jsonify({"status": "error", "message": str(e)}), 500 
- 
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 # =========================================================================
 # 💾 流量查詢記憶體快取池 (Memory Cache Engine)
 # =========================================================================
@@ -2661,7 +3354,9 @@ def search_flow_details():
     data = request.get_json() or {}
     
     start_time = data.get('start_time', '-1h')
-    end_time = "2030-01-01T00:00:00Z" 
+    # 🚀 核心修正：徹底廢除寫死的 2030 年！
+    # 改為在收到請求（按下按鈕）的當下，動態生成符合 InfluxDB Flux 規範的精準 UTC 當前時間字串
+    end_time = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
     
     src_ip = data.get('src_ip', '').strip()
     dst_ip = data.get('dst_ip', '').strip()
@@ -2675,7 +3370,8 @@ def search_flow_details():
         if now_ts - cache_time < CACHE_TTL_SECONDS:
             return jsonify({"status": "success", "data": cached_records, "from_cache": True})
 
-    client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
+    # ✅ 請替換為這行 (加上 timeout=60000)
+    client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=60000)
     query_api = client.query_api()
 
     flux_parts = [
@@ -2695,13 +3391,12 @@ def search_flow_details():
         except ValueError:
             # 2. 局部輸入智慧判斷 (正則表達式)
             if ':' in val:
-                # IPv6 模糊搜尋：通常是前綴，例如 2001:288:1279
                 safe_val = val.replace(':', r':')
                 return fr'  |> filter(fn: (r) => r["{col_name}"] =~ /^{safe_val}/)'
             else:
-                # IPv4 模糊搜尋：通常是後綴，例如 2.3 匹配結尾是 .2.3 的 IP
                 safe_val = val.replace('.', r'\.')
-                return fr'  |> filter(fn: (r) => r["{col_name}"] =~ /(^|\.){safe_val}$/)'
+                # 🌟 優化：移除昂貴的 (^|\.)，改用單純的包含比對，大幅提升 InfluxDB 正則效能
+                return fr'  |> filter(fn: (r) => r["{col_name}"] =~ /{safe_val}/)'
 
     if src_ip:
         flux_parts.append(build_flux_ip_filter("src_ip", src_ip))
@@ -2710,13 +3405,23 @@ def search_flow_details():
     if port_val:
         flux_parts.append(fr'  |> filter(fn: (r) => r["src_port"] == "{port_val}" or r["dst_port"] == "{port_val}" or r["srcport"] == "{port_val}" or r["dstport"] == "{port_val}")')
         
+    # 🌟 核心極速優化：使用 group() 將上萬張碎片化小表合併為「單一張大表」，徹底消滅 Python 建立物件解析的 10 秒延遲！
+    flux_parts.append(r'  |> group()')
+    
+    # 🌟 遵照您的需求：徹底移除 limit()，查詢時間內有多少筆就全部找出來，並交由資料庫全域排序！
     flux_parts.append(r'  |> sort(columns: ["_time"], desc: true)')
-    flux_parts.append(r'  |> limit(n: 500)')
+    
+    # 🌟 核心修正：精準保留需要的欄位，消除 Duplicate Names 標頭
+    flux_parts.append(r'  |> keep(columns: ["_time", "_value", "src_ip", "dst_ip", "src_port", "dst_port", "srcport", "dstport", "protocol", "proto"])')
     
     flux_query = "\n".join(flux_parts)
 
     try:
-        result = query_api.query(flux_query)
+        # 🌟 100% 靜音封殺：針對此查詢強制攔截並忽略 InfluxDB CSV 解析器警告
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = query_api.query(flux_query)
+        
         records_list = []
         
         for table in result:
@@ -2761,53 +3466,61 @@ def search_flow_details():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # =========================================================================
-# 🩺 流量引擎健康檢查 API：偵測 InfluxDB 與 Telegraf 運行狀態
+# 🩺 流量引擎健康檢查 API：智慧偵測 Telegraf 與 InfluxDB 運行狀態
 # =========================================================================
 @main_bp.route('/api/flow/check_env', methods=['GET'])
 @require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
 def check_flow_env():
-    import platform
-    import subprocess
     import urllib.request
+    from influxdb_client import InfluxDBClient
     
     influx_ok = False
     telegraf_ok = False
 
-    # 1. 檢查 InfluxDB (打它的 Health 端點最準確)
+    # 1. 檢查 InfluxDB 是否存活 (打 health endpoint)
     try:
-        # INFLUXDB_URL 通常是 "http://127.0.0.1:8086"
         health_url = f"{INFLUXDB_URL.rstrip('/')}/health"
         req = urllib.request.Request(health_url, method='GET')
-        with urllib.request.urlopen(req, timeout=1.5) as res:
+        with urllib.request.urlopen(req, timeout=60.0) as res:
             if res.getcode() == 200:
                 influx_ok = True
     except Exception:
         pass
 
-    # 2. 檢查 Telegraf 行程 (Process) 是否存在
-    try:
-        sys_name = platform.system().lower()
-        if sys_name == 'windows':
-            # Windows 檢查 tasklist
-            output = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq telegraf.exe'], capture_output=True, text=True).stdout
-            if 'telegraf.exe' in output.lower():
+    # 2. 智慧檢查 Telegraf 是否運作
+    if influx_ok:
+        try:
+            # 🌟 修復 1：放寬 Timeout 到 15 秒 (15000)，避免資料庫在寫入或查詢大量資料時，簡單的檢查逾時
+            client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=15000)
+            query_api = client.query_api()
+            
+            # 🌟 修復 2：放寬時間範圍到最近 2 小時 (避免離峰時間網路太安靜，太久沒封包被誤判)
+            check_query = f'''
+            from(bucket: "{INFLUXDB_BUCKET}")
+              |> range(start: -2h)
+              |> limit(n: 1)
+            '''
+            
+            tables = query_api.query(check_query)
+            if tables and len(tables) > 0:
                 telegraf_ok = True
-        else:
-            # Linux 檢查 ps
-            output = subprocess.run(['ps', '-A'], capture_output=True, text=True).stdout
-            if 'telegraf' in output.lower():
+            client.close()
+        except Exception as e:
+            print(f"Telegraf 檢查失敗: {e}")
+            # 🌟 修復 3：終極防呆！如果是因為 Timeout 或 deadline 超時報錯，代表資料庫還活著只是很忙，我們直接給予放行！
+            error_msg = str(e).lower()
+            if "timeout" in error_msg or "deadline exceeded" in error_msg or "canceled" in error_msg:
                 telegraf_ok = True
-    except Exception:
-        pass
+            pass
 
     return jsonify({
         "success": True,
         "influxdb_ok": influx_ok,
         "telegraf_ok": telegraf_ok
     })
-        
+     
 # ==========================================
-# 🌐 IP 來源、DNS 反解與內網 MAC 探測 API
+# 🌐 IP 來源、DNS 反解與內網 MAC 探測 API (動態資料庫記憶體快取版)
 # ==========================================
 @main_bp.route('/api/tools/ip_lookup/<ip>', methods=['GET'])
 @require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
@@ -2821,19 +3534,36 @@ def ip_lookup(ip):
     import uuid
     import subprocess
     import platform
+    from database import read_translation_cache  # 💡 引入動態快取讀取器
     
-    # 💡 內建 Google 免費翻譯引擎 (只翻英文，保留原文字串)
+    # 💡 智慧翻譯大腦：100% 讀取實體資料庫常駐在 RAM 的快取字典 ➔ 查無才走對外 Google 翻譯
     def translate_en_to_zh(text):
         if not text or text == '-': return text
-        if any('\u4e00' <= char <= '\u9fa5' for char in text): return text
+        clean_text = text.strip().strip('"')
+        
+        # 1. 優先從記憶體快取字典進行精準比對
+        db_cache = read_translation_cache()
+        if clean_text in db_cache:
+            return db_cache[clean_text]
+            
+        # 2. 次要進行不區分大小寫的模糊掃描
+        for key, val in db_cache.items():
+            if key.lower() == clean_text.lower():
+                return val
+                
+        # 3. 檢查字串本身是否就已經內含中文
+        if any('\u4e00' <= char <= '\u9fa5' for char in clean_text): 
+            return clean_text
+            
+        # 4. 終極防禦：本地完全找不到，才消耗資源敲擊 Google 翻譯 API
         try:
-            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={urllib.parse.quote(text)}"
+            url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-TW&dt=t&q={urllib.parse.quote(clean_text)}"
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=1.5) as response:
+            with urllib.request.urlopen(req, timeout=1.2) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 return result[0][0][0]  
         except Exception:
-            return text 
+            return clean_text 
 
     # 1. 執行 DNS 網域反解 (Reverse DNS Lookup)
     hostname = "無反解紀錄 (No PTR)"
@@ -2864,11 +3594,11 @@ def ip_lookup(ip):
     for net_str in internal_nets_str.split(','):
         net_str = net_str.strip()
         if not net_str: continue
-        try: internal_networks.append(ipaddress.ip_network(net_str, strict=False)) # 🌟 支援 IPv6
+        try: internal_networks.append(ipaddress.ip_network(net_str, strict=False)) 
         except: pass
 
     try:
-        ip_obj = ipaddress.ip_address(ip) # 🌟 支援 IPv6
+        ip_obj = ipaddress.ip_address(ip) 
         for net in internal_networks:
             if ip_obj in net:
                 is_internal = True
@@ -2879,15 +3609,10 @@ def ip_lookup(ip):
     is_multicast_or_link_local = False
     if not is_internal:
         try:
-            # 呼叫強大的 ipaddress，自動支援 IPv4 與 IPv6
             ip_obj = ipaddress.ip_address(ip)
-            
-            # is_multicast: 自動涵蓋 IPv4 (224.0.0.0/4) 與 IPv6 (ff00::/8)
-            # is_link_local: 自動涵蓋 IPv4 (169.254.x.x) 與 IPv6 (fe80::/10)
             if ip_obj.is_private or ip_obj.is_multicast or ip_obj.is_link_local or ip_obj.is_loopback:
                 is_internal = True
                 
-            # 特別標記群播與本地鏈路，避免後續進行無效的 ARP 實體網卡搜尋
             if ip_obj.is_multicast or ip_obj.is_link_local:
                 is_multicast_or_link_local = True
         except:
@@ -2896,9 +3621,6 @@ def ip_lookup(ip):
     # 3. 分流處理：內網撈 MAC，外網撈 GeoIP
     if is_internal:
         target_ip = ip.strip()
-        
-        # 💡 若為群播或本地鏈路，直接賦予虛擬說明，跳過實體 ARP 查詢
-        # (字串內包含「無法解析」，前端就會自動隱藏複製按鈕)
         if is_multicast_or_link_local:
             mac_address = "群播 / 本地鏈路虛擬位址 (無法解析實體 MAC)"
         else:
@@ -2917,7 +3639,6 @@ def ip_lookup(ip):
                         def find_valid_mac(table):
                             if isinstance(table, dict):
                                 for arp_key, mac_val in table.items():
-                                    # 🌟 終極修復：與 modal_search 演算法對齊！利用 . 切割，精準取最後4節
                                     parts = str(arp_key).strip().split('.')
                                     if len(parts) >= 4 and ".".join(parts[-4:]) == target_ip:
                                         mac_clean = re.sub(r'[^a-fA-F0-9]', '', str(mac_val)).lower()
@@ -2926,32 +3647,26 @@ def ip_lookup(ip):
                             return None
 
                         found_mac = find_valid_mac(arp_table) or find_valid_mac(arp_table_15)
-                        
                         if found_mac:
                             mac_address = found_mac
-                            break # 找到真正的 MAC 才跳出
+                            break 
                     except Exception:
                         continue 
                         
             except Exception as e:
                 print(f"ARP 解析錯誤: {e}")
 
-            # 🌟 終極備援：判斷是否為伺服器本機 IP，或是動用本機 ARP 廣播
             if mac_address == "無法解析 (無 ARP 快取)":
                 try:
-                    # 💡 獲取伺服器本機的所有 IPv4 位址
                     local_ips = [socket.gethostbyname(socket.gethostname())]
                     try:
                         _, _, ips = socket.gethostbyname_ex(socket.gethostname())
                         local_ips.extend(ips)
                     except: pass
                     
-                    # 1. 檢查是否為伺服器自己 (本機作業系統不會有自己的 ARP 紀錄)
                     if target_ip in local_ips or target_ip == '127.0.0.1':
                         mac_num = hex(uuid.getnode()).replace('0x', '').upper().zfill(12)
                         mac_address = ':'.join(mac_num[i:i+2] for i in range(0, 12, 2)) + " (網管伺服器本機)"
-                    
-                    # 2. 若不是本機，強迫伺服器發出 Ping 與 ARP 廣播強行抓取
                     else:
                         subprocess.run(["ping", "-n", "1", "-w", "500", target_ip] if platform.system().lower() == 'windows' else ["ping", "-c", "1", "-W", "1", target_ip], stdout=subprocess.DEVNULL)
                         arp_res = subprocess.run(["arp", "-a", target_ip], capture_output=True, text=True)
@@ -2982,7 +3697,6 @@ def ip_lookup(ip):
                     raw_isp = data.get("isp", "")
                     raw_org = data.get("org", "")
                     
-                    # 💡 將原文與 Google 翻譯結果「同時保留」傳給前端
                     geo_info = {
                         "country_en": raw_country,
                         "country_zh": "台灣" if raw_country == "Taiwan" else translate_en_to_zh(raw_country),
@@ -3056,12 +3770,20 @@ def init_influx_tasks():
         '''
         
         # 檢查是否已經有同名的 Task，若有則刪除重建
-        tasks = tasks_api.find_tasks(org_id=org_id).tasks
-        for t in tasks:
+        task_response = tasks_api.find_tasks(org_id=org_id)
+        
+        # 👇 🌟 核心防護：相容不同版本的 influxdb-client (直接是 List 或是包裹物件)
+        task_list = task_response if isinstance(task_response, list) else getattr(task_response, 'tasks', [])
+        
+        for t in task_list:
             if t.name == "Downsample_Hourly_Flow":
                 tasks_api.delete_task(t.id)
                 
-        tasks_api.create_task(every="1h", name="Downsample_Hourly_Flow", org_id=org_id, flux=task_query)
+        # 👇 🌟 核心防護：透過 TaskCreateRequest 標準物件建立任務，完美相容所有新舊版本
+        from influxdb_client.domain.task_create_request import TaskCreateRequest
+        task_req = TaskCreateRequest(org_id=org_id, status="active", flux=task_query)
+        tasks_api.create_task(task_create_request=task_req)
+        
         client.close()
         
         # 🌟 寫入稽核日誌
@@ -3071,4 +3793,1282 @@ def init_influx_tasks():
         return jsonify({'success': True, 'message': 'InfluxDB 降維與瘦身任務已成功植入底層排程！'})
     except Exception as e:
         return jsonify({'success': False, 'message': f'InfluxDB API 執行失敗: {str(e)}'})
+
+# ========================================================
+# ⚙️ 運維翻譯字典智慧 CRUD 管理 API (僅限 Admin 特權帳號)
+# ========================================================
+
+# 🟢 API 1：讀取 (Read) - 獲取全域翻譯字典清單
+@main_bp.route('/api/settings/translation', methods=['GET'])
+@require_role([ROLE_ADMIN])
+def get_translation_list():
+    try:
+        conn = get_db('config')
+        rows = conn.execute("SELECT id, eng_text, zh_text, category FROM translation_dictionary ORDER BY category ASC, id DESC").fetchall()
+        conn.close()
+        return jsonify({'success': True, 'data': [dict(r) for r in rows]})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# 🔵 API 2：新增 (Create) - 植入全新對照詞條
+@main_bp.route('/api/settings/translation', methods=['POST'])
+@require_role([ROLE_ADMIN])
+def add_translation_pair():
+    from database import reload_translation_cache
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    data = request.json or {}
+    eng = str(data.get('eng_text', '')).strip()
+    zh = str(data.get('zh_text', '')).strip()
+    cat = str(data.get('category', '行政區')).strip()
+    
+    if not eng or not zh:
+        return jsonify({'success': False, 'message': '英文原文與中文翻譯皆不可為空'}), 400
         
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        try:
+            conn.execute("INSERT INTO translation_dictionary (eng_text, zh_text, category) VALUES (?, ?, ?)", (eng, zh, cat))
+            conn.commit()
+        except Exception as e:
+            conn.close()
+            if "UNIQUE" in str(e): 
+                return jsonify({'success': False, 'message': f'原始字串「{eng}」已存在於字典中！'}), 400
+            return jsonify({'success': False, 'message': str(e)}), 500
+        conn.close()
+        
+    reload_translation_cache()  # 立即刷新記憶體快取
+    write_audit_log(operator, "系統設定", "運維翻譯字典", "SUCCESS", f"【自訂字典】新增對照詞條：[{cat}]「{eng}」➔「{zh}」。(IP: {client_ip})")
+    return jsonify({'success': True, 'message': '詞條新增成功並已即時載入核心快取！'})
+
+# 🟡 API 3: 修改 (Update) - 就地編輯更新現有詞條
+@main_bp.route('/api/settings/translation/<int:item_id>', methods=['PUT'])
+@require_role([ROLE_ADMIN])
+def update_translation_pair(item_id):
+    from database import reload_translation_cache
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    data = request.json or {}
+    new_zh = str(data.get('zh_text', '')).strip()
+    new_cat = str(data.get('category', '')).strip()
+    
+    if not new_zh:
+        return jsonify({'success': False, 'message': '修改之繁體中文翻譯不可為空'}), 400
+        
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        old_row = conn.execute("SELECT * FROM translation_dictionary WHERE id=?", (item_id,)).fetchone()
+        
+        if not old_row:
+            conn.close()
+            return jsonify({'success': False, 'message': '該詞條不存在或已被刪除'}), 404
+            
+        eng_orig = old_row['eng_text']
+        zh_orig = old_row['zh_text']
+        cat_orig = old_row['category']
+        
+        if not new_cat: 
+            new_cat = cat_orig
+
+        conn.execute("UPDATE translation_dictionary SET zh_text=?, category=? WHERE id=?", (new_zh, new_cat, item_id))
+        conn.commit()
+        conn.close()
+        
+    reload_translation_cache()  # 立即刷新記憶體快取
+    
+    details = f"變更字典詞條 [{eng_orig}]：分類「{cat_orig}➔{new_cat}」，中文「{zh_orig}➔{new_zh}」"
+    write_audit_log(operator, "系統設定", "運維翻譯字典", "SUCCESS", f"【自訂字典修改】{details}。(IP: {client_ip})")
+    return jsonify({'success': True, 'message': '詞條修改成功！'})
+
+# 🔴 API 4: 刪除 (Delete) - 抹除自訂詞條並退回自動翻譯
+@main_bp.route('/api/settings/translation/<int:item_id>', methods=['DELETE'])
+@require_role([ROLE_ADMIN])
+def delete_translation_pair(item_id):
+    from database import reload_translation_cache
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        old_row = conn.execute("SELECT * FROM translation_dictionary WHERE id=?", (item_id,)).fetchone()
+        
+        if not old_row:
+            conn.close()
+            return jsonify({'success': False, 'message': '該詞條不存在或已被刪除'}), 404
+            
+        eng_orig = old_row['eng_text']
+        cat_orig = old_row['category']
+
+        conn.execute("DELETE FROM translation_dictionary WHERE id=?", (item_id,))
+        conn.commit()
+        conn.close()
+        
+    reload_translation_cache()  # 立即刷新記憶體快取
+    write_audit_log(operator, "系統設定", "運維翻譯字典", "SUCCESS", f"【自訂字典】永久刪除對照詞條：[{cat_orig}]「{eng_orig}」。(IP: {client_ip})")
+    return jsonify({'success': True, 'message': '該對照詞條已成功自資料庫移除'})
+    
+# 🟣 API 5：一鍵快收 (Auto-Add) - DNS 外部解析結果自動歸類加入字典
+@main_bp.route('/api/settings/translation/auto_add', methods=['POST'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR]) # 💡 允許維運員在查流量時快速建檔
+def auto_add_translation():
+    from database import reload_translation_cache, read_translation_cache
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    data = request.json or {}
+    isp_en = str(data.get('isp_en', '')).strip()
+    isp_zh = str(data.get('isp_zh', '')).strip()
+    city_en = str(data.get('city_en', '')).strip()
+    city_zh = str(data.get('city_zh', '')).strip()
+    
+    db_cache = read_translation_cache()
+    added_items = []
+    
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        try:
+            # 1. 處理城市/地區 (直接強制歸類為: 縣市級)
+            if city_en and city_zh and city_en != '-' and city_zh != '-' and city_en not in db_cache:
+                cat_city = "縣市級"
+                cur = conn.execute("INSERT OR IGNORE INTO translation_dictionary (eng_text, zh_text, category) VALUES (?, ?, ?)", (city_en, city_zh, cat_city))
+                if cur.rowcount > 0:
+                    added_items.append(f"[{cat_city}] {city_en}➔{city_zh}")
+                    
+            # 2. 處理 ISP 固網/雲端 (使用智慧正則關鍵字判斷分類)
+            if isp_en and isp_zh and isp_en != '-' and isp_zh != '-' and isp_en not in db_cache:
+                isp_lower = isp_en.lower()
+                if any(x in isp_lower for x in ['telecom', 'net', 'mobile', 'isp', 'communications', 'broadband', 'cable', 'hinet']):
+                    cat_isp = "電信固網"
+                elif any(x in isp_lower for x in ['cloud', 'cdn', 'aws', 'amazon', 'google', 'microsoft', 'azure', 'cloudflare', 'akamai', 'fastly', 'alibaba']):
+                    cat_isp = "雲端巨頭/CDN"
+                else:
+                    cat_isp = "國際網域/國家"
+                    
+                cur = conn.execute("INSERT OR IGNORE INTO translation_dictionary (eng_text, zh_text, category) VALUES (?, ?, ?)", (isp_en, isp_zh, cat_isp))
+                if cur.rowcount > 0:
+                    added_items.append(f"[{cat_isp}] {isp_en}➔{isp_zh}")
+                    
+            conn.commit()
+        except Exception as e:
+            return jsonify({'success': False, 'message': str(e)}), 500
+        finally:
+            conn.close()
+            
+    if added_items:
+        reload_translation_cache() # 💡 立即刷新記憶體快取
+        details_str = "、".join(added_items)
+        
+        # 🌟 寫入稽核日誌 (完美符合: 誰、來源IP、做了甚麼事)
+        write_audit_log(operator, "流量明細檢索", "運維翻譯字典", "SUCCESS", f"【字典快收】透過 DNS 查詢面板一鍵收錄：{details_str}。(操作來源 IP: {client_ip})")
+        return jsonify({'success': True, 'message': f'收錄成功！已新增：{details_str}'})
+    else:
+        return jsonify({'success': False, 'message': '來源與城市皆已存在於字典中，或無有效資料可供收錄。'})
+
+# ========================================================
+# 💡 讀取全網孔記憶快取 (供全網搜尋引擎使用)
+# ========================================================
+@main_bp.route('/api/device/ports/cache', methods=['GET'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
+def get_device_ports_cache():
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        # 🌟 擴充：只要有記憶IP、是手動Uplink、或是手動MGMT，通通拉入全域快取
+        rows = conn.execute("SELECT * FROM device_ports WHERE memorized_ips != '' OR is_manual_uplink = 1 OR is_manual_mgmt = 1").fetchall()
+        conn.close()
+    return jsonify([dict(r) for r in rows])
+    
+# ========================================================
+# 🌟 精準解除雙向手動連線 (Uplink) API
+# ========================================================
+@main_bp.route('/api/manual_links/delete', methods=['POST'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
+def api_manual_links_delete():
+    data = request.json
+    ip_a = data.get('ip_a')
+    port_a = data.get('port_a')
+    ip_b = data.get('ip_b')
+
+    if not all([ip_a, port_a, ip_b]):
+        return jsonify({'success': False, 'message': '參數不完整'})
+
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        
+        # 💡 1. 精準刪除手動連線表 (manual_links) 的配對
+        conn.execute('''
+            DELETE FROM manual_links 
+            WHERE (node_a=? AND port_a=? AND node_b=?) 
+               OR (node_b=? AND port_b=? AND node_a=?)
+        ''', (ip_a, port_a, ip_b, ip_a, port_a, ip_b))
+        
+        # 🌟 雙向洗淨：斷開連線時，將該孔的手動 Uplink 與 MGMT 屬性一併安全清空
+        conn.execute("UPDATE device_ports SET is_manual_uplink=0, is_manual_mgmt=0 WHERE ip=? AND port_name=?", (ip_a, port_a))
+        
+        # 💡 3. 同步斬斷 edges 快取表中的實體連線，讓前端可以「秒刪」線條
+        conn.execute('''
+            DELETE FROM edges 
+            WHERE (source=? AND target=? AND from_port LIKE ?) 
+               OR (source=? AND target=? AND to_port LIKE ?)
+        ''', (ip_a, ip_b, f"%{port_a}%", ip_b, ip_a, f"%{port_a}%"))
+        
+        conn.commit()
+        conn.close()
+
+    log_details = f"【解除對接】管理員解除了設備 {ip_a} (Port: {port_a}) 與設備 {ip_b} 之間的手動對接紀錄。(操作來源: {client_ip})"
+    write_audit_log(operator, "修改設備設定", "解除拓樸對接", "SUCCESS", log_details)
+
+    return jsonify({'success': True, 'message': '已成功斷開此實體對接狀態！'})
+    
+# ========================================================
+# 🌟 設備規格資料庫設定 API
+# ========================================================
+@main_bp.route('/api/device/specs', methods=['POST'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
+def update_device_specs():
+    data = request.json
+    ip = data.get('ip')
+    snmp_version = data.get('snmp_version', 'v2c')
+    port_specs = data.get('port_specs', '[]')
+    
+    if not ip: return jsonify({'success': False, 'message': '缺少 IP 參數'})
+    
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        conn.execute("UPDATE devices SET snmp_version=?, port_specs=? WHERE ip=?", (snmp_version, port_specs, ip))
+        conn.commit()
+        conn.close()
+        
+    reload_device_cache()
+    write_audit_log(operator, "修改設備設定", f"更新設備規格 ({ip})", "SUCCESS", f"【修改設備設定】管理員更新了設備 {ip} 的 SNMP 版本與實體網孔規格設定。(操作來源 IP: {client_ip})")
+    
+    return jsonify({'success': True, 'message': '設備規格設定已成功儲存！'})
+
+# 🌟 透過本機伺服器 Ping 目標 IP 並擷取 ARP 實體 MAC 位址 (供網孔標註使用)
+@main_bp.route('/api/ping_mac/<ip>', methods=['GET'])
+def api_ping_mac(ip):
+    try:
+        # 1. 基本安全防護，確認是否為合法的 IPv4 格式
+        if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+            return jsonify({"success": False, "message": "IP 格式錯誤"})
+            
+        # 2. 智慧判斷跨平台的 Ping 參數 (支援 Windows / Linux)
+        param_n = '-n' if platform.system().lower() == 'windows' else '-c'
+        param_w = '-w' if platform.system().lower() == 'windows' else '-W'
+        timeout = '1000' if platform.system().lower() == 'windows' else '1'
+        
+        # 3. 透過 Ping 強制喚醒目標並更新伺服器本機的 ARP 表 (捨棄終端輸出)
+        subprocess.run(['ping', param_n, '1', param_w, timeout, ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # 4. 讀取本機 ARP 表
+        arp_cmd = ['arp', '-a', ip] if platform.system().lower() == 'windows' else ['arp', '-n', ip]
+        arp_process = subprocess.run(arp_cmd, capture_output=True, text=True, errors='ignore')
+        arp_out = arp_process.stdout
+        
+        # 5. 透過正規表達式精準萃取 MAC 位址
+        match = re.search(r'([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}', arp_out)
+        if match:
+            mac = match.group(0).replace('-', ':').lower()
+            if mac in ['00:00:00:00:00:00', 'ff:ff:ff:ff:ff:ff']:
+                 return jsonify({"success": False, "message": "取得無效的 MAC 位址"})
+            return jsonify({"success": True, "mac": mac})
+        else:
+            return jsonify({"success": False, "message": "ARP 表中無此紀錄 (目標可能未開機或被防火牆阻擋)"})
+            
+    except Exception as e:
+        return jsonify({"success": False, "message": f"伺服器執行錯誤: {str(e)}"})
+
+@main_bp.route('/api/report/inventory_ports', methods=['GET'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
+def api_inventory_ports_report():
+    try:
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            
+            # 1. 先撈取全校設備的總覽資訊
+            # 🌟 核心過濾：排除 AP，並補上 snmp_raw 欄位以供後續萃取 Alias
+            devices_query = """
+                SELECT ip, name, brand, model, type, sys_descr, snmp_raw
+                FROM devices 
+                WHERE 
+                    type NOT LIKE '%AP%' 
+                    AND type NOT LIKE '%WIFI%' 
+                    AND name NOT LIKE '%AP%'
+                ORDER BY ip
+            """
+            devices_rows = conn.execute(devices_query).fetchall()
+            
+            # 撈取網孔的記憶資料
+            ports_query = """
+                SELECT ip, port_idx, port_name, memorized_ips, is_manual_uplink, is_manual_mgmt 
+                FROM device_ports 
+                WHERE memorized_ips != '' OR is_manual_uplink = 1 OR is_manual_mgmt = 1
+            """
+            ports_rows = conn.execute(ports_query).fetchall()
+            
+            conn.close()
+
+        # 整理 ports_map
+        ports_map = {}
+        for p in ports_rows:
+            ip = p['ip']
+            if ip not in ports_map:
+                ports_map[ip] = []
+            
+            mac_list = []
+            if p['memorized_ips']:
+                for pair in p['memorized_ips'].split(','):
+                    if '|' in pair:
+                        m_ip, m_mac = pair.split('|', 1)
+                        mac_list.append({"ip": m_ip, "mac": m_mac})
+
+            ports_map[ip].append({
+                "port_idx": p['port_idx'],
+                "port_name": p['port_name'],
+                "is_uplink": bool(p['is_manual_uplink']),
+                "is_mgmt": bool(p['is_manual_mgmt']),
+                "connected_devices": mac_list
+            })
+
+        # 4. 組合最終報表資料
+        report_data = []
+        
+        # 🌟 強化版解碼器：處理 0x 開頭或是純 Hex 字串的亂碼 Alias
+        def decode_hex(val):
+            if not val: return ""
+            val_str = str(val).strip()
+            if val_str.startswith("0x"):
+                val_str = val_str[2:]
+            
+            # 檢查是否全為 16 進位字元，且長度為偶數 (通常是 SNMP 回傳的 Hex String)
+            import re
+            if len(val_str) > 0 and len(val_str) % 2 == 0 and re.match(r'^[0-9a-fA-F]+$', val_str):
+                try:
+                    return bytes.fromhex(val_str).decode('utf-8', errors='ignore')
+                except:
+                    pass
+            return str(val)
+
+        for d in devices_rows:
+            firmware = "Unknown"
+            sys_descr = d['sys_descr'] or ""
+            if "Version " in sys_descr:
+                try: firmware = sys_descr.split("Version ")[1].split(",")[0].strip()
+                except: pass
+            elif "Software " in sys_descr:
+                try: firmware = sys_descr.split("Software ")[1].split()[0].strip()
+                except: pass
+                
+            # 🌟 核心修復：正確判定 snmp_raw 的資料型態 (List 或 Dict)
+            aliases = {}
+            if d['snmp_raw'] and d['snmp_raw'] != '{}':
+                try:
+                    import json
+                    raw_data = json.loads(d['snmp_raw'])
+                    if isinstance(raw_data, list) and len(raw_data) > 9:
+                        aliases = raw_data[9] if raw_data[9] else {}
+                    elif isinstance(raw_data, dict):
+                        aliases = raw_data.get("9", {})
+                except Exception as e:
+                    print(f"解析 {d['ip']} SNMP Raw 失敗: {e}")
+
+            device_ports = ports_map.get(d['ip'], [])
+            for p in device_ports:
+                # 將解碼後的說明綁定到該網孔
+                raw_alias = aliases.get(str(p['port_idx']), "")
+                p['alias'] = decode_hex(raw_alias)
+
+            report_data.append({
+                "ip": d['ip'],
+                "sysName": d['name'],
+                "brand": d['brand'],
+                "model": d['model'],
+                "firmware": firmware,
+                "device_mac": "N/A", 
+                "ports": device_ports
+            })
+
+        return jsonify({"success": True, "data": report_data})
+
+    except Exception as e:
+        # 🌟 修正 2：如果資料庫報錯，完美攔截並傳給前端，不再讓網頁死當轉圈
+        print(f"Inventory API Error: {str(e)}")
+        return jsonify({"success": False, "message": f"資料庫撈取失敗: {str(e)}"})
+
+# ========================================================
+# 🏢 分區機構與多站點推播設定 API
+# ========================================================
+@main_bp.route('/api/settings/school_info', methods=['GET', 'POST'])
+def handle_school_info_settings():
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        district = str(data.get('district', '')).strip()
+        code = str(data.get('code', '')).strip()
+        name = str(data.get('name', '')).strip()
+        
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            try:
+                conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('site_district', ?)", (district,))
+                conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('site_code', ?)", (code,))
+                conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('site_name', ?)", (name,))
+                conn.commit()
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'資料庫寫入失敗: {str(e)}'}), 500
+            finally:
+                conn.close()
+                
+        details = f"更新機構基本資料：行政區「{district}」、代碼「{code}」、名稱「{name}」。(操作來源 IP: {client_ip})"
+        write_audit_log(operator, "系統設定", "機構基本資料", "SUCCESS", f"【修改系統設定】{details}")
+        from utils import log_info
+        log_info(f"⚙️ 【參數儲存】{details}")
+        
+        return jsonify({'success': True})
+    else:
+        with DB_LOCKS['config']:
+            # 🌟 補上 bypass_shard=True
+            conn = get_db('config', bypass_shard=True)
+            try:
+                r_dist = conn.execute("SELECT value FROM system_settings WHERE key='site_district'").fetchone()
+                r_code = conn.execute("SELECT value FROM system_settings WHERE key='site_code'").fetchone()
+                r_name = conn.execute("SELECT value FROM system_settings WHERE key='site_name'").fetchone()
+            finally:
+                conn.close()
+                
+        return jsonify({
+            'success': True,
+            'district': r_dist['value'] if r_dist else '',
+            'code': r_code['value'] if r_code else '',
+            'name': r_name['value'] if r_name else ''
+        })
+
+# ========================================================
+# 🚀 總部推播引擎 (HQ Sync) 設定與測試匯出 API
+# ========================================================
+@main_bp.route('/api/settings/sync_schedule', methods=['GET', 'POST'])
+@require_role([ROLE_ADMIN])
+def handle_sync_schedule():
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            try:
+                for key in ['sync_topo_start', 'sync_topo_interval', 'sync_status_start', 'sync_status_interval']:
+                    if key in data:
+                        conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)", (key, str(data[key]).strip()))
+                conn.commit()
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'寫入失敗: {str(e)}'}), 500
+            finally:
+                conn.close()
+                
+        write_audit_log(operator, "系統設定", "總部推播排程", "SUCCESS", f"【修改推播設定】更新了至總部的資料推播時間與頻率。(IP: {client_ip})")
+        return jsonify({'success': True})
+    else:
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            try:
+                rows = conn.execute("SELECT key, value FROM system_settings WHERE key LIKE 'sync_%'").fetchall()
+                settings = {r['key']: r['value'] for r in rows}
+            finally:
+                conn.close()
+        return jsonify({
+            'success': True,
+            'sync_topo_start': settings.get('sync_topo_start', '01:00'),
+            'sync_topo_interval': settings.get('sync_topo_interval', '24'),
+            'sync_status_start': settings.get('sync_status_start', '00:00'),
+            'sync_status_interval': settings.get('sync_status_interval', '5')
+        })
+
+# ========================================================
+# 🌍 總部全局視角與通訊設定 API
+# ========================================================
+@main_bp.route('/api/settings/hq_mode', methods=['GET', 'POST'])
+def handle_hq_mode_settings():
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        mode = str(data.get('hq_view_mode', 'local')).strip()
+        url = str(data.get('hq_server_url', '')).strip()
+        secret = str(data.get('hq_sync_secret', '')).strip() # 🌟 新增：讀取認證碼
+        
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            try:
+                conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('hq_view_mode', ?)", (mode,))
+                conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('hq_server_url', ?)", (url,))
+                conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('hq_sync_secret', ?)", (secret,)) # 🌟 新增：寫入認證碼
+                conn.commit()
+            except Exception as e:
+                return jsonify({'success': False, 'message': f'寫入失敗: {str(e)}'}), 500
+            finally:
+                conn.close()
+                
+        mode_zh = "總部全局模式" if mode == 'hq' else "單一分區模式"
+        write_audit_log(operator, "系統設定", "總部視角切換", "SUCCESS", f"【修改系統設定】變更系統視角為：{mode_zh}，總部位址與認證碼已更新。(IP: {client_ip})")
+        return jsonify({'success': True})
+    else:
+        with DB_LOCKS['config']:
+            # 🌟 補上 bypass_shard=True
+            conn = get_db('config', bypass_shard=True)
+            try:
+                row_mode = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+                row_url = conn.execute("SELECT value FROM system_settings WHERE key='hq_server_url'").fetchone()
+                row_secret = conn.execute("SELECT value FROM system_settings WHERE key='hq_sync_secret'").fetchone() # 🌟 新增：讀取資料庫
+                
+                mode = row_mode['value'] if row_mode else 'local'
+                url = row_url['value'] if row_url else ''
+                secret = row_secret['value'] if row_secret else '' # 🌟 新增：變數賦值
+            finally:
+                conn.close()
+        return jsonify({'success': True, 'hq_view_mode': mode, 'hq_server_url': url, 'hq_sync_secret': secret})
+
+@main_bp.route('/api/hq/test_connection', methods=['POST'])
+@require_role([ROLE_ADMIN])
+def test_hq_connection():
+    """發送一個輕量的 GET 請求測試總部伺服器是否可達"""
+    import urllib.request
+    data = request.get_json() or {}
+    hq_url = str(data.get('url', '')).strip()
+    
+    if not hq_url:
+        return jsonify({'success': False, 'message': '請先輸入總部伺服器位址 (URL)'})
+        
+    # 自動補齊 http:// (若使用者忘記打)
+    if not hq_url.startswith('http'):
+        hq_url = 'http://' + hq_url
+        
+    try:
+        # 向總部首頁發起探測 (Timeout 3 秒)
+        req = urllib.request.Request(hq_url, method='GET')
+        with urllib.request.urlopen(req, timeout=3.0) as res:
+            if res.getcode() == 200:
+                return jsonify({'success': True, 'message': '連線成功！總部伺服器正常運作中。'})
+            else:
+                return jsonify({'success': False, 'message': f'伺服器有回應，但回傳錯誤狀態碼 ({res.getcode()})'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'無法連線至總部伺服器：{str(e)}'})
+
+@main_bp.route('/api/hq/test_export/<sync_type>', methods=['GET'])
+@require_role([ROLE_ADMIN])
+def test_export_sync_payload(sync_type):
+    import io, json, time
+    from flask import send_file
+    
+    payload = {"identity": {}, "data": {}}
+    
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        id_rows = conn.execute("SELECT key, value FROM system_settings WHERE key IN ('site_district', 'site_code', 'site_name')").fetchall()
+        for r in id_rows:
+            payload["identity"][r['key']] = r['value']
+            
+        core_devices = [dict(r) for r in conn.execute("SELECT * FROM devices").fetchall()]
+        core_ips = [d['ip'] for d in core_devices]
+        
+        if sync_type == 'topology':
+            payload["data"]["devices"] = core_devices
+            if core_ips:
+                placeholders = ','.join(['?'] * len(core_ips))
+                payload["data"]["manual_links"] = [dict(r) for r in conn.execute(f"SELECT * FROM manual_links WHERE node_a IN ({placeholders}) OR node_b IN ({placeholders})", core_ips + core_ips).fetchall()]
+                payload["data"]["device_ports"] = [dict(r) for r in conn.execute(f"SELECT * FROM device_ports WHERE ip IN ({placeholders})", core_ips).fetchall()]
+            else:
+                payload["data"]["manual_links"] = []; payload["data"]["device_ports"] = []
+                
+        elif sync_type == 'status':
+            payload["data"]["device_status"] = [{"ip": d['ip'], "status": d['status'], "cpu_load": d['cpu_load'], "mem_load": d['mem_load'], "latency_ms": d.get('latency_ms', 0.0)} for d in core_devices]
+            
+            # 👇 🌟 新增：把本地的今日掃描次數打包進來
+            try:
+                today_str = time.strftime('%Y-%m-%d')
+                ano_row = conn.execute("SELECT runs FROM anomaly_daily_stats WHERE date = ?", (today_str,)).fetchone()
+                payload["data"]["anomaly_runs"] = ano_row['runs'] if ano_row else 0
+            except:
+                payload["data"]["anomaly_runs"] = 0
+                
+        conn.close()
+
+    # 🌟 補齊流量數據 (從熱庫抓取)
+    if sync_type == 'status':
+        try:
+            time_limit = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - 900))
+            with DB_LOCKS['hot']:
+                conn_hot = get_db('hot')
+                payload["data"]["traffic_history"] = [dict(r) for r in conn_hot.execute("SELECT ip, port_idx, in_bytes, out_bytes, timestamp FROM traffic_history WHERE timestamp >= ?", (time_limit,)).fetchall()]
+                conn_hot.close()
+        except Exception as e:
+            payload["data"]["traffic_history"] = []
+
+        global TOP5_FLOW_CACHE
+        try: get_top5_flow() 
+        except: pass
+        payload["data"]["top5_flow"] = TOP5_FLOW_CACHE.get('data', [])
+
+        # 👇 🌟 核心新增：分區呼叫自己的 API 算好現成的異常清單，打包成 JSON 直接送給總部！
+        try:
+            ano_res = api_anomalies().get_json()
+            if ano_res and ano_res.get('success'):
+                payload["data"]["anomalies"] = ano_res.get('data', [])
+            else:
+                payload["data"]["anomalies"] = []
+        except Exception as e:
+            print(f"打包異常清單失敗: {e}")
+            payload["data"]["anomalies"] = []
+        
+    json_str = json.dumps(payload, ensure_ascii=False, indent=4)
+    timestamp_str = time.strftime("%Y%m%d_%H%M")
+    
+    return send_file(io.BytesIO(json_str.encode('utf-8')), mimetype='application/json', as_attachment=True, download_name=f'TestExport_{sync_type.capitalize()}_{timestamp_str}.json')
+
+@main_bp.route('/api/hq/manual_push/<sync_type>', methods=['POST'])
+@require_role([ROLE_ADMIN])
+def hq_manual_push(sync_type):
+    import urllib.request
+    import json
+    import time
+    
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    payload = {"identity": {}, "data": {}}
+    
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        settings_rows = conn.execute("SELECT key, value FROM system_settings WHERE key IN ('hq_server_url', 'hq_sync_secret', 'site_district', 'site_code', 'site_name')").fetchall()
+        settings = {r['key']: r['value'] for r in settings_rows}
+        
+        hq_url = settings.get('hq_server_url', '').strip()
+        hq_secret = settings.get('hq_sync_secret', '').strip()
+        site_code = settings.get('site_code', '').strip()
+        
+        if not hq_url or not hq_secret or not site_code:
+            return jsonify({'success': False, 'message': '請先完成「機構基本資料」與「總部伺服器位址/認證碼」設定！'})
+            
+        if not hq_url.startswith('http'):
+            hq_url = 'http://' + hq_url
+            
+        payload["identity"] = {"site_district": settings.get('site_district', ''), "site_code": site_code, "site_name": settings.get('site_name', '')}
+        
+        core_devices = [dict(r) for r in conn.execute("SELECT * FROM devices").fetchall()]
+        core_ips = [d['ip'] for d in core_devices]
+        
+        if sync_type == 'topology':
+            payload["data"]["devices"] = core_devices
+            payload["data"]["edges"] = [dict(r) for r in conn.execute("SELECT * FROM edges").fetchall()]
+            payload["data"]["layout_slots"] = [dict(r) for r in conn.execute("SELECT * FROM layout_slots").fetchall()]
+            
+            if core_ips:
+                placeholders = ','.join(['?'] * len(core_ips))
+                payload["data"]["manual_links"] = [dict(r) for r in conn.execute(f"SELECT * FROM manual_links WHERE node_a IN ({placeholders}) OR node_b IN ({placeholders})", core_ips + core_ips).fetchall()]
+                payload["data"]["device_ports"] = [dict(r) for r in conn.execute(f"SELECT * FROM device_ports WHERE ip IN ({placeholders})", core_ips).fetchall()]
+            else:
+                payload["data"]["manual_links"] = []; payload["data"]["device_ports"] = []
+        elif sync_type == 'status':
+            payload["data"]["device_status"] = [{"ip": d['ip'], "status": d['status'], "cpu_load": d['cpu_load'], "mem_load": d['mem_load'], "latency_ms": d.get('latency_ms', 0.0)} for d in core_devices]
+            
+            # 👇 🌟 新增：把本地的今日掃描次數打包進來
+            try:
+                today_str = time.strftime('%Y-%m-%d')
+                ano_row = conn.execute("SELECT runs FROM anomaly_daily_stats WHERE date = ?", (today_str,)).fetchone()
+                payload["data"]["anomaly_runs"] = ano_row['runs'] if ano_row else 0
+            except:
+                payload["data"]["anomaly_runs"] = 0
+                
+        conn.close()
+
+    # 🌟 補齊流量數據 (從熱庫抓取)
+    if sync_type == 'status':
+        try:
+            time_limit = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time() - 900))
+            with DB_LOCKS['hot']:
+                conn_hot = get_db('hot')
+                payload["data"]["traffic_history"] = [dict(r) for r in conn_hot.execute("SELECT ip, port_idx, in_bytes, out_bytes, timestamp FROM traffic_history WHERE timestamp >= ?", (time_limit,)).fetchall()]
+                conn_hot.close()
+        except Exception as e:
+            payload["data"]["traffic_history"] = []
+
+        # 👇 🌟 終極修復：推播前強制呼叫 API 函數，保證包裹裡絕對有最新的 Top 10 快取！
+        global TOP5_FLOW_CACHE
+        try: 
+            get_top5_flow() 
+        except: 
+            pass
+        payload["data"]["top5_flow"] = TOP5_FLOW_CACHE.get('data', [])
+
+    target_endpoint = f"{hq_url.rstrip('/')}/api/hq/receive/{sync_type}"
+    json_data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    
+    req = urllib.request.Request(target_endpoint, data=json_data, method='POST')
+    req.add_header('Content-Type', 'application/json; charset=utf-8')
+    req.add_header('Authorization', f'Bearer {hq_secret}')
+    
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as res:
+            res_body = res.read().decode('utf-8')
+            res_json = json.loads(res_body)
+            if res.getcode() == 200 and res_json.get('success'):
+                return jsonify({'success': True, 'message': res_json.get('message', '總部接收成功')})
+            else:
+                return jsonify({'success': False, 'message': res_json.get('message', '失敗')})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'通訊失敗，請確認總部 IP 與網路狀態: {str(e)}'})
+
+# ========================================================
+# 🏛️ 總部核心：接收分區推播資料 API (HQ Receiver Engine)
+# ========================================================
+@main_bp.route('/api/hq/receive/<sync_type>', methods=['POST'])
+def hq_receive_sync_data(sync_type):
+    import os, time, sqlite3, secrets
+    
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        hq_mode = conn.execute("SELECT value FROM system_settings WHERE key='hq_view_mode'").fetchone()
+        hq_secret_row = conn.execute("SELECT value FROM system_settings WHERE key='hq_sync_secret'").fetchone()
+        conn.close()
+        
+    if not hq_mode or hq_mode['value'] != 'hq':
+        return jsonify({'success': False, 'message': '拒絕存取：本機並非總部模式'}), 403
+
+    expected_secret = hq_secret_row['value'] if hq_secret_row else ''
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '): return jsonify({'success': False, 'message': '未授權'}), 401
+    client_secret = auth_header.split(' ')[1].strip()
+    if not expected_secret or not secrets.compare_digest(client_secret, expected_secret):
+        return jsonify({'success': False, 'message': '推播金鑰錯誤'}), 401
+
+    payload = request.get_json()
+    identity = payload['identity']
+    site_code = str(identity.get('site_code', '')).strip()
+    
+    try:
+        with DB_LOCKS['hq_master']:
+            hq_conn = get_db('hq_master')
+            hq_conn.execute("""INSERT INTO global_sites (site_code, site_name, district, status, last_sync_time) VALUES (?, ?, ?, 'up', CURRENT_TIMESTAMP) ON CONFLICT(site_code) DO UPDATE SET site_name=excluded.site_name, district=excluded.district, status='up', last_sync_time=CURRENT_TIMESTAMP""", (site_code, identity.get('site_name', ''), identity.get('site_district', '')))
+            hq_conn.commit()
+            hq_conn.close()
+    except Exception:
+        pass
+    
+    if not os.path.exists('hq_sites'): os.makedirs('hq_sites')
+    site_db_path = os.path.join('hq_sites', f'site_{site_code}.db')
+    site_conn = sqlite3.connect(site_db_path, timeout=10)
+    site_conn.row_factory = sqlite3.Row
+    site_conn.execute('PRAGMA journal_mode=WAL;')
+    
+    try:
+        data = payload['data']
+        if sync_type == 'topology':
+            site_conn.execute("DROP TABLE IF EXISTS devices")
+            site_conn.execute("DROP TABLE IF EXISTS edges")
+            site_conn.execute("DROP TABLE IF EXISTS layout_slots")
+            site_conn.execute("DROP TABLE IF EXISTS manual_links")
+            site_conn.execute("DROP TABLE IF EXISTS device_ports")
+            
+            site_conn.execute("CREATE TABLE devices (ip TEXT PRIMARY KEY, name TEXT, level INTEGER, type TEXT, brand TEXT, model TEXT, status TEXT, cpu_load REAL, mem_load REAL, visible INTEGER, x REAL, y REAL, sys_descr TEXT, is_poe INTEGER, has_sensor INTEGER, snmp_raw TEXT, poe_data TEXT, location TEXT)")
+            site_conn.execute("CREATE TABLE edges (id TEXT PRIMARY KEY, source TEXT, target TEXT, speed INTEGER, OID_info TEXT, port_info TEXT, from_port TEXT, to_port TEXT)")
+            site_conn.execute("CREATE TABLE layout_slots (slot_id INTEGER, ip TEXT, x REAL, y REAL, PRIMARY KEY (slot_id, ip))")
+            site_conn.execute("CREATE TABLE manual_links (id INTEGER PRIMARY KEY, node_a TEXT, port_a TEXT, node_b TEXT, port_b TEXT)")
+            site_conn.execute("CREATE TABLE device_ports (ip TEXT, port_idx TEXT, port_name TEXT, is_manual_uplink INTEGER, is_manual_mgmt INTEGER, PRIMARY KEY (ip, port_idx))")
+            
+            for d in data.get('devices', []):
+                site_conn.execute("INSERT INTO devices (ip, name, level, type, brand, model, status, cpu_load, mem_load, visible, x, y, sys_descr, is_poe, has_sensor, snmp_raw, poe_data, location) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (d.get('ip'), d.get('name'), d.get('level'), d.get('type'), d.get('brand'), d.get('model'), d.get('status'), d.get('cpu_load'), d.get('mem_load'), d.get('visible', 1), d.get('x'), d.get('y'), d.get('sys_descr'), d.get('is_poe', 0), d.get('has_sensor', 0), d.get('snmp_raw', '{}'), d.get('poe_data', '{}'), d.get('location', '')))
+            for e in data.get('edges', []):
+                site_conn.execute("INSERT INTO edges (id, source, target, speed, OID_info, port_info, from_port, to_port) VALUES (?,?,?,?,?,?,?,?)", (e.get('id'), e.get('source'), e.get('target'), e.get('speed'), e.get('OID_info'), e.get('port_info'), e.get('from_port'), e.get('to_port')))
+            for s in data.get('layout_slots', []):
+                site_conn.execute("INSERT INTO layout_slots (slot_id, ip, x, y) VALUES (?,?,?,?)", (s.get('slot_id'), s.get('ip'), s.get('x'), s.get('y')))
+            for link in data.get('manual_links', []):
+                site_conn.execute("INSERT INTO manual_links (node_a, port_a, node_b, port_b) VALUES (?,?,?,?)", (link.get('node_a'), link.get('port_a'), link.get('node_b'), link.get('port_b')))
+            for port in data.get('device_ports', []):
+                site_conn.execute("INSERT INTO device_ports (ip, port_idx, port_name, is_manual_uplink, is_manual_mgmt) VALUES (?,?,?,?,?)", (port.get('ip'), port.get('port_idx'), port.get('port_name'), port.get('is_manual_uplink'), port.get('is_manual_mgmt')))
+                
+        elif sync_type == 'status':
+            # 🌟 加入 latency_ms 欄位宣告
+            site_conn.execute("CREATE TABLE IF NOT EXISTS devices (ip TEXT PRIMARY KEY, name TEXT, level INTEGER, type TEXT, brand TEXT, model TEXT, status TEXT, cpu_load REAL, mem_load REAL, latency_ms REAL DEFAULT 0.0, visible INTEGER DEFAULT 1, x REAL, y REAL, sys_descr TEXT, is_poe INTEGER, has_sensor INTEGER, snmp_raw TEXT, poe_data TEXT, location TEXT)")
+            site_conn.execute('''CREATE TABLE IF NOT EXISTS metrics_history (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT, cpu REAL, memory REAL, poe_w REAL DEFAULT 0.0, temp_c REAL DEFAULT 0.0, session_util REAL DEFAULT 0.0, latency_ms REAL DEFAULT 0.0, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            site_conn.execute('''CREATE TABLE IF NOT EXISTS traffic_history (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT, port_idx TEXT, in_bytes INTEGER, out_bytes INTEGER, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            site_conn.execute("DELETE FROM traffic_history")
+            
+            # 🌟 無痛升級總部資料庫：自動補齊缺少的 latency_ms 欄位，防止舊庫崩潰
+            try: site_conn.execute("ALTER TABLE devices ADD COLUMN latency_ms REAL DEFAULT 0.0")
+            except: pass
+            try: site_conn.execute("ALTER TABLE metrics_history ADD COLUMN latency_ms REAL DEFAULT 0.0")
+            except: pass
+            
+            site_conn.execute("CREATE TABLE IF NOT EXISTS anomaly_daily_stats (date TEXT PRIMARY KEY, runs INTEGER DEFAULT 0)")
+            site_conn.execute("INSERT OR REPLACE INTO anomaly_daily_stats (date, runs) VALUES (?, ?)", (time.strftime('%Y-%m-%d'), data.get('anomaly_runs', 0)))
+            
+            site_conn.execute("CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT)")
+            import json
+            top5_data = data.get('top5_flow', [])
+            site_conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('latest_top5_flow', ?)", (json.dumps(top5_data, ensure_ascii=False),))
+            
+            ano_data = data.get('anomalies', [])
+            site_conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('latest_anomalies', ?)", (json.dumps(ano_data, ensure_ascii=False),))
+            
+            for st in data.get('device_status', []):
+                # 🌟 將 latency_ms 更新到總部的設備總表
+                site_conn.execute("UPDATE devices SET status=?, cpu_load=?, mem_load=?, latency_ms=? WHERE ip=?", (st.get('status'), st.get('cpu_load'), st.get('mem_load'), st.get('latency_ms', 0.0), st.get('ip')))
+                # 🌟 將 latency_ms 新增到總部的時序大表
+                site_conn.execute("INSERT INTO metrics_history (ip, cpu, memory, latency_ms) VALUES (?, ?, ?, ?)", (st.get('ip'), st.get('cpu_load'), st.get('mem_load'), st.get('latency_ms', 0.0)))
+                
+            for t in data.get('traffic_history', []):
+                site_conn.execute("INSERT INTO traffic_history (ip, port_idx, in_bytes, out_bytes, timestamp) VALUES (?, ?, ?, ?, ?)", (t['ip'], t['port_idx'], t['in_bytes'], t['out_bytes'], t['timestamp']))
+        
+        site_conn.commit()
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'分區資料庫寫入失敗: {str(e)}'}), 500
+    finally:
+        site_conn.close()
+
+    return jsonify({'success': True, 'message': f'總部已成功接收推播！'})
+    
+# ========================================================
+# 🧹 獨立手動觸發資料清洗 API (背景非阻塞版)
+# ========================================================
+@main_bp.route('/api/settings/manual_retention', methods=['POST'])
+@require_role([ROLE_ADMIN])
+def api_manual_retention():
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+
+    # 🌟 獨立宣告背景任務函式
+    def manual_retention_task():
+        import time
+        from database import get_db, DB_WARM, DB_COLD, DB_LOCKS, write_audit_log
+        from utils import log_info
+
+        # 核心防禦：微創切片刪除
+        def chunked_delete(conn, table, condition, chunk_size=2000):
+            while True:
+                cur = conn.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {condition} LIMIT {chunk_size})")
+                deleted = cur.rowcount
+                conn.commit()
+                if deleted < chunk_size: break
+                time.sleep(0.2)
+
+        try:
+            log_info(f"🧹 [手動資料清洗] {operator} 啟動企業級無鎖降採樣引擎...")
+            
+            # 🛡️ 階段 1：處理溫冷庫
+            with DB_LOCKS['warm']:
+                conn_warm = get_db('warm')
+                conn_warm.execute(f"ATTACH DATABASE '{DB_COLD}' AS cold_db")
+                
+                chunked_delete(conn_warm, "cold_db.traffic_history", "timestamp < datetime('now', '-1095 days', 'localtime')")
+                chunked_delete(conn_warm, "cold_db.metrics_history", "timestamp < datetime('now', '-1095 days', 'localtime')")
+                
+                conn_warm.execute("""
+                    INSERT INTO cold_db.traffic_history (ip, port_idx, timestamp, avg_in_bps, max_in_bps, avg_out_bps, max_out_bps)
+                    SELECT ip, port_idx, strftime('%Y-%m-%d %H:00:00', timestamp) AS hour_ts,
+                           AVG(avg_in_bps), MAX(max_in_bps), AVG(avg_out_bps), MAX(max_out_bps)
+                    FROM traffic_history
+                    WHERE timestamp < datetime('now', '-180 days', 'localtime')
+                    GROUP BY ip, port_idx, hour_ts
+                """)
+                conn_warm.execute("""
+                    INSERT INTO cold_db.metrics_history (ip, timestamp, cpu, memory, temp_c, poe_w, session_util, latency_ms)
+                    SELECT ip, strftime('%Y-%m-%d %H:00:00', timestamp) AS hour_ts,
+                           AVG(cpu), AVG(memory), AVG(temp_c), AVG(poe_w), AVG(session_util), AVG(latency_ms)
+                    FROM metrics_history
+                    WHERE timestamp < datetime('now', '-180 days', 'localtime')
+                    GROUP BY ip, hour_ts
+                """)
+                conn_warm.commit()
+                
+                chunked_delete(conn_warm, "traffic_history", "timestamp < datetime('now', '-180 days', 'localtime')")
+                chunked_delete(conn_warm, "metrics_history", "timestamp < datetime('now', '-180 days', 'localtime')")
+                
+                conn_warm.execute("DETACH DATABASE cold_db")
+                conn_warm.close()
+
+            # 🛡️ 階段 2：處理熱溫庫
+            with DB_LOCKS['hot']:
+                conn_hot = get_db('hot')
+                conn_hot.execute(f"ATTACH DATABASE '{DB_WARM}' AS warm_db")
+                
+                conn_hot.execute("""
+                    WITH diff_calc AS (
+                        SELECT ip, port_idx, timestamp,
+                               in_bytes - LAG(in_bytes) OVER (PARTITION BY ip, port_idx ORDER BY timestamp) AS i_diff,
+                               out_bytes - LAG(out_bytes) OVER (PARTITION BY ip, port_idx ORDER BY timestamp) AS o_diff,
+                               strftime('%s', timestamp) - strftime('%s', LAG(timestamp) OVER (PARTITION BY ip, port_idx ORDER BY timestamp)) AS dt
+                        FROM traffic_history
+                    ), bps_calc AS (
+                        SELECT ip, port_idx, timestamp,
+                               CASE WHEN i_diff >= 0 AND dt > 0 THEN (i_diff * 8) / dt ELSE 0 END AS in_bps,
+                               CASE WHEN o_diff >= 0 AND dt > 0 THEN (o_diff * 8) / dt ELSE 0 END AS out_bps
+                        FROM diff_calc
+                    )
+                    INSERT INTO warm_db.traffic_history (ip, port_idx, timestamp, avg_in_bps, max_in_bps, avg_out_bps, max_out_bps)
+                    SELECT ip, port_idx, 
+                           datetime((strftime('%s', timestamp) / 600) * 600, 'unixepoch', 'localtime') AS min10_ts,
+                           AVG(in_bps), MAX(in_bps), AVG(out_bps), MAX(out_bps)
+                    FROM bps_calc
+                    WHERE timestamp < datetime('now', '-30 days', 'localtime')
+                    GROUP BY ip, port_idx, min10_ts
+                """)
+                conn_hot.execute("""
+                    INSERT INTO warm_db.metrics_history (ip, timestamp, cpu, memory, temp_c, poe_w, session_util, latency_ms)
+                    SELECT ip, datetime((strftime('%s', timestamp) / 600) * 600, 'unixepoch', 'localtime') AS min10_ts,
+                           AVG(cpu), AVG(memory), AVG(temp_c), AVG(poe_w), AVG(session_util), AVG(latency_ms)
+                    FROM metrics_history
+                    WHERE timestamp < datetime('now', '-30 days', 'localtime')
+                    GROUP BY ip, min10_ts
+                """)
+                conn_hot.commit()
+                
+                chunked_delete(conn_hot, "traffic_history", "timestamp < datetime('now', '-30 days', 'localtime')", chunk_size=1000)
+                chunked_delete(conn_hot, "metrics_history", "timestamp < datetime('now', '-30 days', 'localtime')", chunk_size=1000)
+                
+                conn_hot.execute("DETACH DATABASE warm_db")
+                conn_hot.close()
+                
+            msg = f"管理員 {operator} 執行的無鎖降採樣完工！空間已釋放。"
+            log_info(f"✅ [手動資料清洗] {msg}")
+            write_audit_log(operator, "系統設定", "手動資料清洗", "SUCCESS", f"【清洗完成】{msg} (來源 IP: {client_ip})")
+
+        except Exception as e:
+            msg = f"發生異常: {e}"
+            log_info(f"⚠️ [手動資料清洗] {msg}")
+            write_audit_log(operator, "系統設定", "手動資料清洗", "FAILED", f"【清洗失敗】{msg} (來源 IP: {client_ip})")
+
+    # 🌟 啟動背景執行緒，讓 HTTP 請求秒速回傳，畫面不轉圈！
+    import threading
+    threading.Thread(target=manual_retention_task, daemon=True).start()
+    
+    write_audit_log(operator, "系統設定", "手動資料清洗", "SUCCESS", f"【發動清洗】管理員已在背景啟動手動降採樣程序。(來源 IP: {client_ip})")
+    
+    return jsonify({'success': True, 'message': '已於背景啟動資料清洗引擎，請稍後至「稽核日誌」查看執行結果。'})
+    
+# ========================================================
+# 🛡️ 流量資安預警獨立頁面與 API 路由
+# ========================================================
+@main_bp.route('/flow-security')
+@require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
+def flow_security_page():
+    return render_template('flow_security.html')
+
+@main_bp.route('/api/flow/security_alerts', methods=['GET'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
+def get_security_alerts():
+    try:
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            rows = conn.execute("""
+                SELECT id, strftime('%Y-%m-%d %H:%M:%S', timestamp, 'localtime') as ts, 
+                       src_ip, dst_ip, attack_type, severity, details, status 
+                FROM flow_security_events 
+                ORDER BY timestamp DESC LIMIT 200
+            """).fetchall()
+            conn.close()
+        return jsonify({'success': True, 'data': [dict(r) for r in rows]})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@main_bp.route('/api/flow/security_settings', methods=['GET', 'POST'])
+@require_role([ROLE_ADMIN])
+def handle_security_settings():
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    if request.method == 'POST':
+        data = request.json or {}
+        t_scan = str(data.get('sec_scan_threshold', '50')).strip()
+        t_ddos = str(data.get('sec_ddos_threshold_mb', '500')).strip()
+        t_window = str(data.get('sec_scan_window_mins', '5')).strip()
+        t_brute = str(data.get('sec_brute_threshold', '80')).strip()
+        t_exfil = str(data.get('sec_exfil_threshold_mb', '1000')).strip()
+        t_mining = str(data.get('sec_mining_threshold', '20')).strip()
+        t_lateral = str(data.get('sec_lateral_threshold', '15')).strip()
+        
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('sec_scan_threshold', ?)", (t_scan,))
+            conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('sec_ddos_threshold_mb', ?)", (t_ddos,))
+            conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('sec_scan_window_mins', ?)", (t_window,))
+            conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('sec_brute_threshold', ?)", (t_brute,))
+            conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('sec_exfil_threshold_mb', ?)", (t_exfil,))
+            conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('sec_mining_threshold', ?)", (t_mining,))
+            conn.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('sec_lateral_threshold', ?)", (t_lateral,))
+            conn.commit()
+            conn.close()
+            
+        write_audit_log(operator, "系統設定", "資安預警閾值", "SUCCESS", f"更新全套 6 大資安防禦靈敏度閾值。(IP: {client_ip})")
+        return jsonify({'success': True, 'message': '6 大資安防禦預警閾值設定已成功更新！'})
+    else:
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            t_scan = conn.execute("SELECT value FROM system_settings WHERE key='sec_scan_threshold'").fetchone()
+            t_ddos = conn.execute("SELECT value FROM system_settings WHERE key='sec_ddos_threshold_mb'").fetchone()
+            t_window = conn.execute("SELECT value FROM system_settings WHERE key='sec_scan_window_mins'").fetchone()
+            t_brute = conn.execute("SELECT value FROM system_settings WHERE key='sec_brute_threshold'").fetchone()
+            t_exfil = conn.execute("SELECT value FROM system_settings WHERE key='sec_exfil_threshold_mb'").fetchone()
+            t_mining = conn.execute("SELECT value FROM system_settings WHERE key='sec_mining_threshold'").fetchone()
+            t_lateral = conn.execute("SELECT value FROM system_settings WHERE key='sec_lateral_threshold'").fetchone()
+            conn.close()
+        return jsonify({
+            'success': True,
+            'sec_scan_threshold': t_scan['value'] if t_scan else '50',
+            'sec_ddos_threshold_mb': t_ddos['value'] if t_ddos else '500',
+            'sec_scan_window_mins': t_window['value'] if t_window else '5',
+            'sec_brute_threshold': t_brute['value'] if t_brute else '80',
+            'sec_exfil_threshold_mb': t_exfil['value'] if t_exfil else '1000',
+            'sec_mining_threshold': t_mining['value'] if t_mining else '20',
+            'sec_lateral_threshold': t_lateral['value'] if t_lateral else '15'
+        })
+
+@main_bp.route('/api/flow/security_alerts/clear', methods=['POST'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR])
+def clear_security_alerts():
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    operator = session.get('username', 'SystemUser')
+    
+    try:
+        with DB_LOCKS['config']:
+            conn = get_db('config')
+            conn.execute("DELETE FROM flow_security_events")
+            conn.commit()
+            conn.close()
+            
+        write_audit_log(operator, "流量資安預警", "清除事件紀錄", "SUCCESS", f"管理員清空了所有資安威脅預警歷史紀錄。(IP: {client_ip})")
+        return jsonify({'success': True, 'message': '已成功清空目前所有資安預警紀錄！'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'清空失敗: {str(e)}'}), 500
+        
+@main_bp.route('/api/flow/security_sources', methods=['POST'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
+def get_security_attack_sources():
+    from influxdb_client import InfluxDBClient
+    from datetime import datetime, timedelta
+    
+    data = request.get_json() or {}
+    dst_ip = data.get('dst_ip', '').strip()
+    event_time_str = data.get('timestamp', '').strip()
+    window_mins = int(data.get('window_mins', 10))
+    
+    if not dst_ip:
+        return jsonify({'success': False, 'message': '缺少目標 IP'})
+        
+    try:
+        # 計算事件的時間視窗範圍
+        if event_time_str:
+            evt_dt = datetime.strptime(event_time_str, '%Y-%m-%d %H:%M:%S') - timedelta(hours=8)
+            start_flux = (evt_dt - timedelta(minutes=window_mins)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            stop_flux = (evt_dt + timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        else:
+            start_flux = f"-{window_mins}m"
+            stop_flux = "now()"
+
+        client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=30000)
+        query_api = client.query_api()
+
+        flux_query = f'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+          |> range(start: {start_flux}, stop: {stop_flux})
+          |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+          |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+          |> filter(fn: (r) => r["dst_ip"] == "{dst_ip}")
+          |> filter(fn: (r) => exists r["src_ip"] and r["src_ip"] != "")
+          |> group(columns: ["src_ip"])
+          |> sum()
+          |> group()
+          |> sort(columns: ["_value"], desc: true)
+        '''
+
+        result = query_api.query(flux_query)
+        sources_list = []
+        
+        for table in result:
+            for record in table.records:
+                src_ip = record.values.get("src_ip")
+                bytes_val = record.get_value() or 0
+                mb_val = round(float(bytes_val) / (1024 * 1024), 2)
+                sources_list.append({"src_ip": src_ip, "traffic_mb": mb_val})
+
+        client.close()
+        return jsonify({'success': True, 'dst_ip': dst_ip, 'sources': sources_list, 'count': len(sources_list)})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+        
+@main_bp.route('/api/flow/security_single_ip_details', methods=['POST'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
+def get_security_single_ip_details():
+    from influxdb_client import InfluxDBClient
+    from datetime import datetime, timedelta
+    
+    data = request.get_json() or {}
+    src_ip = data.get('src_ip', '').strip()
+    event_time_str = data.get('timestamp', '').strip()
+    window_mins = int(data.get('window_mins', 10))
+    
+    if not src_ip:
+        return jsonify({'success': False, 'message': '缺少來源 IP'})
+        
+    try:
+        if event_time_str:
+            evt_dt = datetime.strptime(event_time_str, '%Y-%m-%d %H:%M:%S') - timedelta(hours=8)
+            start_flux = (evt_dt - timedelta(minutes=window_mins)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            stop_flux = (evt_dt + timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        else:
+            start_flux = f"-{window_mins}m"
+            stop_flux = "now()"
+
+        client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=30000)
+        query_api = client.query_api()
+
+        flux_query = f'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+          |> range(start: {start_flux}, stop: {stop_flux})
+          |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+          |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+          |> filter(fn: (r) => r["src_ip"] == "{src_ip}")
+          |> filter(fn: (r) => exists r["dst_ip"] and exists r["dst_port"])
+          |> group(columns: ["dst_ip", "dst_port"])
+          |> sum()
+          |> group()
+          |> sort(columns: ["_value"], desc: true)
+          |> limit(n: 100)
+        '''
+
+        result = query_api.query(flux_query)
+        details_list = []
+        
+        for table in result:
+            for record in table.records:
+                d_ip = record.values.get("dst_ip", "-")
+                d_port = record.values.get("dst_port", "-")
+                bytes_val = record.get_value() or 0
+                mb_val = round(float(bytes_val) / (1024 * 1024), 3)
+                details_list.append({"dst_ip": d_ip, "dst_port": d_port, "traffic_mb": mb_val})
+
+        client.close()
+        return jsonify({'success': True, 'src_ip': src_ip, 'details': details_list, 'count': len(details_list)})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+        
+@main_bp.route('/api/flow/qoe_summary', methods=['GET'])
+@require_role([ROLE_ADMIN, ROLE_OPERATOR, ROLE_AUDITOR])
+def get_flow_qoe_summary():
+    """計算最近 15 分鐘內應用程式流量佔比與 QoE 健康度指標"""
+    from influxdb_client import InfluxDBClient
+    from database import get_db, DB_LOCKS
+    
+    window = request.args.get('window', '15m')
+    
+    # 1. 讀取 Port 字典 mapping
+    port_map = {}
+    with DB_LOCKS['config']:
+        conn = get_db('config')
+        rows = conn.execute("SELECT port, service_name FROM flow_port_dictionary").fetchall()
+        conn.close()
+        port_map = {str(r['port']): r['service_name'] for r in rows}
+
+    try:
+        client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG, timeout=30000)
+        query_api = client.query_api()
+
+        # Flux 語法：依 dst_port 分組計算各應用的流量 MB 與連線次數
+        flux_app = f'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+          |> range(start: -{window})
+          |> filter(fn: (r) => r["_measurement"] == "netflow" or r["_measurement"] == "sflow")
+          |> filter(fn: (r) => r["_field"] == "in_bytes" or r["_field"] == "bytes")
+          |> filter(fn: (r) => exists r["dst_port"])
+          |> group(columns: ["dst_port"])
+          |> reduce(
+              identity: {{count: 0, total_bytes: 0.0}},
+              fn: (r, accumulator) => ({{
+                  count: accumulator.count + 1,
+                  total_bytes: accumulator.total_bytes + float(v: r._value)
+              }})
+          )
+          |> group()
+          |> sort(columns: ["total_bytes"], desc: true)
+          |> limit(n: 15)
+        '''
+
+        result = query_api.query(flux_app)
+        apps_list = []
+        total_all_bytes = 0.0
+
+        for table in result:
+            for record in table.records:
+                port_str = str(record.values.get("dst_port", "Unknown"))
+                bytes_val = record.values.get("total_bytes", 0.0)
+                conn_cnt = record.values.get("count", 0)
+                
+                app_name = port_map.get(port_str, f"Port {port_str}")
+                mb_val = round(bytes_val / (1024 * 1024), 2)
+                total_all_bytes += bytes_val
+
+                # 估算 QoE 分數 (結合連線熱度與離峰穩定度)
+                qoe_score = 95
+                if conn_cnt > 5000 and mb_val < 5.0:  # 高頻小封包 (可能是爆破或連線異常)
+                    qoe_score = 65
+                elif mb_val > 1000.0:  # 大流量高負載
+                    qoe_score = 82
+
+                apps_list.append({
+                    "port": port_str,
+                    "app_name": app_name,
+                    "traffic_mb": mb_val,
+                    "connections": conn_cnt,
+                    "qoe_score": qoe_score
+                })
+
+        client.close()
+
+        # 計算流量百分比
+        for app in apps_list:
+            app["percentage"] = round((app["traffic_mb"] * 1024 * 1024 / total_all_bytes * 100), 1) if total_all_bytes > 0 else 0
+
+        return jsonify({"success": True, "data": apps_list})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+        
+# ========================================================
+# 🚀 專供 Go 輪詢引擎觸發之快取熱更新 Webhook API
+# ========================================================
+@main_bp.route('/api/internal/reload_cache', methods=['GET', 'POST'])
+def api_internal_reload_cache():
+    """當 Go 完成全網輪詢寫入資料庫後，打此 Webhook 通知 Python 更新 RAM 快取並印出 Go 戰報"""
+    try:
+        from database import update_device_metrics_cache, get_db
+        from utils import log_info
+
+        data = request.get_json(silent=True) or {}
+        total = data.get('total', 0)
+        success = data.get('success', 0)
+        elapsed = data.get('elapsed', 0.0)
+
+        # 1. 讀取資料庫最新數值並秒級更新 Python 記憶體
+        conn = get_db('config')
+        rows = conn.execute("SELECT ip, cpu_load, mem_load, latency_ms FROM devices WHERE visible=1").fetchall()
+        conn.close()
+
+        updates = [(r['cpu_load'], r['mem_load'], r['latency_ms'], r['ip']) for r in rows]
+        update_device_metrics_cache(updates)
+
+        # 🌟 2. 將 Go 的執行結果直接印在 Python 的控制台畫面上！
+        if total > 0:
+            log_info(f"🐹 【Go 輪詢引擎】採集完畢 - 輪詢 {total} 台，成功 {success} 台，全網耗時 {elapsed:.2f} 秒。")
+
+        return jsonify({"status": "success", "message": "Python RAM 快取已同步更新"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+

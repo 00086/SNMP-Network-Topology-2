@@ -1,0 +1,394 @@
+{% extends 'layout.html' %}
+{% block title %}總部全域戰情中心 - 智慧網管平台{% endblock %}
+
+{% block head %}
+<style>
+    :root {
+        --bg-body: #1a202c; --bg-card: #2d3748; --border-color: #4a5568;
+        --text-main: #e2e8f0; --text-muted: #a0aec0;
+    }
+    
+    /* 👇 🌟 核心防護：鎖死最外層 Body，禁止瀏覽器產生全域捲軸 */
+    body { 
+        background-color: var(--bg-body); 
+        color: var(--text-main); 
+        overflow: hidden !important; 
+        height: 100vh;
+    }
+    
+    /* 🌟 自適應滿版高度外框 */
+    .hq-main-wrapper {
+        height: calc(100vh - 85px); 
+        display: flex;
+        flex-direction: column;
+    }
+    
+    /* 🌟 卡片矩陣專屬的內部獨立捲動區塊 */
+    .hq-scroll-area {
+        flex: 1;
+        min-height: 0; 
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 6px;
+        padding-bottom: 20px;
+    }
+
+    .custom-scroll::-webkit-scrollbar { width: 6px; }
+    .custom-scroll::-webkit-scrollbar-thumb { background: #6c757d; border-radius: 3px; }
+    .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+
+    .hq-stat-card {
+        background: linear-gradient(145deg, var(--bg-card), rgba(0,0,0,0.2));
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+    .hq-stat-value { font-size: 2.5rem; font-weight: 900; line-height: 1; margin-top: 10px; }
+    
+    .site-card {
+        background-color: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-left: 5px solid #6c757d;
+        border-radius: 8px;
+        padding: 15px;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .site-card:hover { transform: translateY(-3px); box-shadow: 0 8px 20px rgba(0,0,0,0.5); }
+    
+    .status-up { border-left-color: #198754 !important; }
+    .status-warning { border-left-color: #ffc107 !important; }
+    .status-down { border-left-color: #dc3545 !important; }
+    
+    .site-district { font-size: 0.75rem; color: var(--text-muted); letter-spacing: 1px; }
+    .site-name { font-size: 1.15rem; font-weight: bold; margin: 4px 0; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+    .site-sync { font-size: 0.8rem; font-family: monospace; color: #0dcaf0; }
+
+    body.modal-open { overflow: hidden !important; }
+    .modal { overflow: hidden !important; }
+    .modal-dialog-custom { max-width: 94vw !important; margin: 3vh auto !important; height: 94vh !important; }
+    .modal-dialog-custom .modal-content { height: 100% !important; border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
+    .modal-body { flex: 1; padding: 0; overflow: hidden; }
+    iframe.popup-iframe { width: 100%; height: 100%; border: none; display: block; background-color: #1a202c; }
+    
+    .modal-fullscreen-custom { max-width: 100vw !important; margin: 0 !important; }
+    .modal-fullscreen-custom .modal-content { height: 100vh !important; border-radius: 0 !important; border: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-3 hq-main-wrapper">
+    <div class="row g-3 mb-3 flex-shrink-0">
+        <div class="col-md-3">
+            <div class="hq-stat-card" style="border-top: 3px solid #0dcaf0;">
+                <div class="text-info fw-bold"><i class="bi bi-buildings-fill me-2"></i>納管分區總數</div>
+                <div class="hq-stat-value text-white" id="stat-total">--</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="hq-stat-card" style="border-top: 3px solid #198754;">
+                <div class="text-success fw-bold"><i class="bi bi-check-circle-fill me-2"></i>連線正常 (Up)</div>
+                <div class="hq-stat-value text-success" id="stat-up">--</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="hq-stat-card" style="border-top: 3px solid #ffc107;">
+                <div class="text-warning fw-bold"><i class="bi bi-exclamation-triangle-fill me-2"></i>推播遲到 (Warning)</div>
+                <div class="hq-stat-value text-warning" id="stat-warning">--</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="hq-stat-card" style="border-top: 3px solid #dc3545;">
+                <div class="text-danger fw-bold"><i class="bi bi-x-octagon-fill me-2"></i>失去聯繫 (Down)</div>
+                <div class="hq-stat-value text-danger" id="stat-down">--</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center mb-2 border-bottom border-secondary pb-2 flex-shrink-0">
+        <div class="d-flex align-items-center" id="dynamic-header-left">
+            <h5 class="fw-bold text-light m-0"><i class="bi bi-grid-3x3-gap-fill me-2"></i>全台分區連線矩陣</h5>
+        </div>
+        <div class="d-flex align-items-center" id="dynamic-header-right">
+            <span class="badge bg-dark border border-secondary text-info fs-6 shadow-sm" id="last-refresh-time">等待刷新...</span>
+        </div>
+    </div>
+    
+    <div class="hq-scroll-area custom-scroll mt-1">
+        <div class="row g-3 mb-4 px-1" id="sites-matrix">
+            <div class="col-12 text-center py-5">
+                <div class="spinner-border text-info" role="status"></div>
+                <div class="mt-3 text-white-50">正在呼叫總部大腦載入戰情資料...</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="hqPreviewModal" data-bs-backdrop="static" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-custom"> 
+    <div class="modal-content bg-dark text-white border-secondary shadow-lg">
+      <div class="modal-header py-2 bg-black bg-opacity-40 border-secondary">
+        <h6 class="modal-title fw-bold text-info" id="hqModalTitle">🔍 分區數據讀取中...</h6>
+        <div class="d-flex align-items-center ms-auto">
+            <button type="button" class="btn btn-sm btn-outline-light me-2 px-2 py-0.5" onclick="toggleModalFullscreen()" title="切換全螢幕 / 視窗視角">
+                <i class="bi bi-arrows-fullscreen" id="fullscreen-icon" style="font-size: 0.85rem;"></i>
+            </button>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+      </div>
+      <div class="modal-body p-0 m-0 overflow-hidden bg-black">
+         <iframe id="hqPreviewIframe" class="popup-iframe" src="about:blank"></iframe>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+	// 🌟 新增：點擊行政區卡片，鑽取進入該區學校清單
+	window.filterHqDistrict = function(distName) {
+        window.hqCurrentDistrictFilter = distName;
+        loadHqDashboard();
+    };
+
+    function loadHqDashboard() {
+        fetch('/api/hq/dashboard/stats')
+            .then(res => res.json())
+            .then(data => {
+                if(data.success) {
+                    const matrix = document.getElementById('sites-matrix');
+                    const headerLeft = document.getElementById('dynamic-header-left');
+                    const headerRight = document.getElementById('dynamic-header-right');
+                    
+                    let allSites = data.sites;
+                    let targetCity = window.hqCurrentCityFilter || 'ALL';
+                    let targetDist = window.hqCurrentDistrictFilter || 'ALL';
+
+                    // 取得當前時間字串
+                    const nowStr = new Date().toLocaleTimeString('zh-TW', {hour12: false});
+                    const refreshBadgeHtml = `<span class="badge bg-dark border border-secondary text-info fs-6 shadow-sm" id="last-refresh-time"><i class="bi bi-arrow-repeat me-1"></i>最後刷新: ${nowStr}</span>`;
+
+                    const matchCity = (district, cityKey) => {
+                        let d = district || '';
+                        if (cityKey === 'TPE') return d.includes('臺北') || d.includes('台北');
+                        if (cityKey === 'NTPC') return d.includes('新北');
+                        if (cityKey === 'TYC') return d.includes('桃園');
+                        if (cityKey === 'TC') return d.includes('臺中') || d.includes('台中');
+                        if (cityKey === 'TN') return d.includes('臺南') || d.includes('台南');
+                        if (cityKey === 'KHH') return d.includes('高雄');
+                        return false;
+                    };
+
+                    const updateTopStats = (sitesArray) => {
+                        let stats = { total: 0, up: 0, warning: 0, down: 0 };
+                        sitesArray.forEach(s => {
+                            stats.total++;
+                            if (s.status === 'up') stats.up++;
+                            else if (s.status === 'warning') stats.warning++;
+                            else if (s.status === 'down') stats.down++;
+                        });
+                        document.getElementById('stat-total').innerText = stats.total;
+                        document.getElementById('stat-up').innerText = stats.up;
+                        document.getElementById('stat-warning').innerText = stats.warning;
+                        document.getElementById('stat-down').innerText = stats.down;
+                    };
+
+                    const renderSchoolCards = (sitesArray) => {
+                        if(sitesArray.length === 0) {
+                            matrix.innerHTML = `<div class="col-12 text-center py-5 text-warning fw-bold"><i class="bi bi-inbox fs-1 d-block mb-3"></i>該區域目前尚未有任何學校註冊與推播。</div>`;
+                            return;
+                        }
+                        let html = '';
+                        sitesArray.forEach(site => {
+                            let statusClass = site.status === 'down' ? 'status-down' : (site.status === 'warning' ? 'status-warning' : 'status-up');
+                            let statusIcon = site.status === 'down' ? '<i class="bi bi-heartbreak-fill text-danger"></i>' : (site.status === 'warning' ? '<i class="bi bi-exclamation-circle-fill text-warning"></i>' : '<i class="bi bi-heart-pulse-fill text-success"></i>');
+                            
+                            html += `
+                                <div class="col-xl-3 col-lg-4 col-md-6">
+                                    <div class="site-card ${statusClass}">
+                                        <div class="d-flex justify-content-between align-items-start">
+                                            <div class="site-district">${site.district || '未分類行政區'}</div>
+                                            <div class="fs-5">${statusIcon}</div>
+                                        </div>
+                                        <div class="site-name">${site.site_name} <span class="badge bg-dark border text-secondary ms-1 fs-6">${site.site_code}</span></div>
+                                        <div class="site-sync"><i class="bi bi-clock-history me-1"></i>${site.last_sync_local}</div>
+                                        <div class="d-flex gap-2 mt-3 pt-2 border-top border-secondary">
+                                            <button class="btn btn-sm btn-outline-info w-50 fw-bold shadow-sm" style="font-size:0.8rem;" onclick="openHqPopup(event, '${site.site_code}', '${site.site_name}', 'topology')"><i class="bi bi-diagram-3-fill me-1"></i>拓樸圖</button>
+                                            <button class="btn btn-sm btn-info text-dark w-50 fw-bold shadow-sm" style="font-size:0.8rem;" onclick="openHqPopup(event, '${site.site_code}', '${site.site_name}', 'dashboard')"><i class="bi bi-speedometer2 me-1"></i>看戰情</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        matrix.innerHTML = html;
+                    };
+
+                    // ==========================================
+                    // 🚀 核心動態排版渲染邏輯
+                    // ==========================================
+                    if (targetCity === 'ALL') {
+                        // 【狀態 1】全域視角
+                        headerLeft.innerHTML = `<h5 class="fw-bold text-light m-0"><i class="bi bi-grid-3x3-gap-fill me-2"></i>全台分區連線矩陣</h5>`;
+                        headerRight.innerHTML = refreshBadgeHtml;
+                        
+                        updateTopStats(allSites);
+                        renderSchoolCards(allSites);
+                    } 
+                    else if (targetDist === 'ALL') {
+                        // 【狀態 2】城市視角
+                        headerLeft.innerHTML = `
+                            <h5 class="fw-bold text-light m-0 d-flex align-items-center">
+                                <i class="bi bi-grid-3x3-gap-fill me-2"></i>全台分區連線矩陣 
+                                <span class="text-secondary mx-3 fs-5">|</span>
+                                <span class="text-info"><i class="bi bi-map-fill me-2"></i>${window.hqCurrentCityLabel} - 行政區概況</span>
+                            </h5>
+                        `;
+                        headerRight.innerHTML = refreshBadgeHtml;
+
+                        let citySites = allSites.filter(s => matchCity(s.district, targetCity));
+                        updateTopStats(citySites);
+
+                        let districts = data.city_districts[targetCity] || [];
+                        if (districts.length === 0) {
+                            matrix.innerHTML = `<div class="col-12 text-center py-5 text-warning fw-bold">找不到該城市的行政區資料，請確認資料庫狀態。</div>`;
+                        } else {
+                            let html = '';
+                            districts.forEach(dist => {
+                                let schoolsInDist = citySites.filter(s => s.district && s.district.includes(dist));
+                                let count = schoolsInDist.length;
+                                let down = schoolsInDist.filter(s => s.status === 'down').length;
+                                let warning = schoolsInDist.filter(s => s.status === 'warning').length;
+                                
+                                let statusClass = 'border-secondary';
+                                let icon = '<i class="bi bi-inbox text-secondary"></i>';
+                                let alertHtml = '';
+                                
+                                if (count > 0) {
+                                    if (down > 0) {
+                                        statusClass = 'status-down'; icon = '<i class="bi bi-x-octagon-fill text-danger"></i>';
+                                        alertHtml = `<span class="badge bg-danger ms-2 shadow-sm">${down} 斷線</span>`;
+                                    } else if (warning > 0) {
+                                        statusClass = 'status-warning'; icon = '<i class="bi bi-exclamation-triangle-fill text-warning"></i>';
+                                        alertHtml = `<span class="badge bg-warning text-dark ms-2 shadow-sm">${warning} 異常</span>`;
+                                    } else {
+                                        statusClass = 'status-up'; icon = '<i class="bi bi-shield-check text-success"></i>';
+                                    }
+                                }
+
+                                html += `
+                                    <div class="col-xl-2 col-lg-3 col-md-4 col-sm-6">
+                                        <div class="site-card ${statusClass} h-100 d-flex flex-column justify-content-between" style="cursor: pointer; padding: 12px;" onclick="filterHqDistrict('${dist}')">
+                                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                                <div class="fs-6 text-light fw-bold">${dist}</div>
+                                                <div class="fs-5">${icon}</div>
+                                            </div>
+                                            <div class="mt-auto pt-2 border-top border-secondary d-flex justify-content-between align-items-end">
+                                                <div>
+                                                    <div class="text-white-50" style="font-size: 0.7rem;">納管學校</div>
+                                                    <div class="fs-3 fw-bold text-white lh-1">${count}</div>
+                                                </div>
+                                                <div>${alertHtml}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                            matrix.innerHTML = html;
+                        }
+                    } 
+                    else {
+                        // 【狀態 3】行政區視角
+                        
+                        // 👇 🌟 核心排版優化：將返回按鈕搬家到左側容器，緊貼在標題 <h5> 標籤的正右方！
+                        headerLeft.innerHTML = `
+                            <h5 class="fw-bold text-light m-0 d-flex align-items-center">
+                                <i class="bi bi-grid-3x3-gap-fill me-2"></i>全台分區連線矩陣 
+                                <span class="text-secondary mx-3 fs-5">|</span>
+                                <span class="text-info"><i class="bi bi-pin-map-fill me-2"></i>${window.hqCurrentCityLabel} - ${targetDist} 學校清單</span>
+                            </h5>
+                            <button class="btn btn-sm btn-outline-info shadow-sm fw-bold ms-3" onclick="filterHqCity('${targetCity}', '${window.hqCurrentCityLabel}')">
+                                <i class="bi bi-arrow-left me-1"></i>返回 ${window.hqCurrentCityLabel}
+                            </button>
+                        `;
+                        
+                        // 🌟 右側容器現在只剩下最後刷新時間
+                        headerRight.innerHTML = refreshBadgeHtml;
+
+                        let distSites = allSites.filter(s => matchCity(s.district, targetCity) && s.district && s.district.includes(targetDist));
+                        updateTopStats(distSites);
+                        renderSchoolCards(distSites);
+                    }
+                }
+            })
+            .catch(err => console.error('戰情版載入失敗:', err));
+    }
+
+    // 🌟 鑽取核心：先通報後端鎖定視角，再無縫注入 Iframe
+    function openHqPopup(event, code, name, type) {
+        if(event) event.stopPropagation(); // 阻斷卡片原生干擾
+        
+        fetch('/api/hq/switch_site', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({site_code: code, site_name: name})
+        })
+        .then(r => r.json())
+        .then(res => {
+            if(res.success) {
+                const titleEl = document.getElementById('hqModalTitle');
+                const iframe = document.getElementById('hqPreviewIframe');
+                
+                if(type === 'topology') {
+                    titleEl.innerHTML = `<i class="bi bi-diagram-3-fill text-info me-2"></i>【 ${name} 】 實時架構拓樸藍圖`;
+                    iframe.src = '/topology?iframe=1'; // 傳遞參數洗掉導覽列
+                } else {
+                    titleEl.innerHTML = `<i class="bi bi-speedometer2 text-warning me-2"></i>【 ${name} 】 詳細戰情即時儀表板 (內建 30s 自動輪詢機制)`;
+                    iframe.src = '/dashboard?iframe=1';
+                }
+                
+                // 顯示預覽視窗
+                const myModal = new bootstrap.Modal(document.getElementById('hqPreviewModal'));
+                myModal.show();
+            }
+        });
+    }
+
+    // 🌟 全螢幕與視角縮放雙態切換
+    function toggleModalFullscreen() {
+        const dialog = document.querySelector('#hqPreviewModal .modal-dialog');
+        const icon = document.getElementById('fullscreen-icon');
+        if (dialog.classList.contains('modal-fullscreen-custom')) {
+            // 🌟 修正：恢復時，必須加回 modal-dialog-custom！
+            dialog.className = 'modal-dialog modal-dialog-centered modal-xl modal-dialog-custom';
+            icon.className = 'bi bi-arrows-fullscreen';
+        } else {
+            dialog.className = 'modal-dialog modal-fullscreen-custom';
+            icon.className = 'bi bi-fullscreen-exit';
+        }
+    }
+
+    // 🌟 監聽視窗關閉：清空快取、解除後端 Session 鎖定，回歸全域
+    document.addEventListener("DOMContentLoaded", function() {
+        const modalEl = document.getElementById('hqPreviewModal');
+        if (modalEl) {
+            modalEl.addEventListener('hidden.bs.modal', function () {
+                document.getElementById('hqPreviewIframe').src = 'about:blank'; // 徹底阻斷排程輪詢耗能
+                fetch('/api/hq/clear_site', { method: 'POST' }); // 解除 Session 鎖定
+                
+                // 🌟 修正：還原視窗大小時，一樣要加回 modal-dialog-custom！
+                const dialog = document.querySelector('#hqPreviewModal .modal-dialog');
+                dialog.className = 'modal-dialog modal-dialog-centered modal-xl modal-dialog-custom';
+                document.getElementById('fullscreen-icon').className = 'bi bi-arrows-fullscreen';
+            });
+        }
+    });
+
+    // 排程刷新
+    window.onload = () => {
+        loadHqDashboard();
+        setInterval(loadHqDashboard, 15000);
+    };
+</script>
+{% endblock %}

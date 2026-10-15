@@ -188,6 +188,10 @@
                     .then(r => r.json())
                     .then(res => {
                         if (!res.empty) {
+                            // 🌟 核心同步：將全域快取完全更新，賦予獨立掃描與全網掃描平起平坐的資料刷新能力！
+                            if (typeof cachedTopologyData !== 'undefined') {
+                                cachedTopologyData = res;
+                            }
                             // 2. 更新底層拓樸圖的記憶體資料庫
                             if (typeof nodesDataSet !== 'undefined') {
                                 nodesDataSet.update(res.nodes); 
@@ -274,7 +278,7 @@ if (typeof window.logFrontendAction !== 'function') {
     };
 }
 
-async function showPortIps(event, deviceName, deviceIp, portName, ipListStr, isUplink) {
+async function showPortIps(event, deviceName, deviceIp, portIdx, portName, ipListStr, isUplink, peerIp = '', peerName = '') {
     event.preventDefault();   
     event.stopPropagation();
     
@@ -282,13 +286,8 @@ async function showPortIps(event, deviceName, deviceIp, portName, ipListStr, isU
     let bodyEl = document.getElementById('portIpModalBody');
     let devNameDisplay = deviceName && deviceName !== 'undefined' ? deviceName : deviceIp;
     
-    window.logFrontendAction(
-        "前端介面操作", 
-        `調閱埠位 [${portName}]`, 
-        `管理員對設備 [ ${devNameDisplay} ] (IP: ${deviceIp}) 的實體連接埠 【 ${portName} 】 點擊右鍵，查閱該孔位底下的終端 IP 與連線設備清單。`
-    );
-    
-    let ips = ipListStr ? ipListStr.split(',').filter(ip => ip.trim() !== '') : [];
+    // 解析傳入的 IP|MAC 字串
+    let ipMacPairs = ipListStr ? ipListStr.split(',').filter(s => s.trim() !== '') : [];
     
     titleEl.innerHTML = `
         <div class="d-flex flex-column w-100">
@@ -305,75 +304,173 @@ async function showPortIps(event, deviceName, deviceIp, portName, ipListStr, isU
     let apNodes = [];
     let normalIps = [];
 
-    if (!isUplink && ips.length > 0) {
+    // 分類 AP 與一般 IP
+    if (!isUplink && ipMacPairs.length > 0) {
         try {
             let response = await fetch('/api/devices');
             let allDevices = await response.json();
 
-            ips.forEach(ip => {
+            ipMacPairs.forEach(pair => {
+                let [ip, mac] = pair.split('|');
                 let node = allDevices.find(n => n.ip === ip);
                 let isAP = false;
+                
                 if (node) {
-                    let devType = String(node.type || node.device_type || '').toUpperCase();
+                    let devType = String(node.type || node.brand || '').toUpperCase();
                     let sysName = String(node.sysName || node.name || '').toUpperCase();
-                    let brand = String(node.brand || '').toUpperCase();
-                    let model = String(node.model || '').toUpperCase();
-                    let descr = String(node.sys_descr || node.sysDescr || '').toUpperCase();
                     
-                    if (devType.includes('AP') || devType.includes('無線') || devType.includes('WIFI') || devType.includes('WIRELESS')) {
-                        isAP = true;
-                    } else if (/\bAP\b/i.test(sysName) || /\bWIFI\b/i.test(sysName) || sysName.includes('RUCKUS') || sysName.includes('ARUBA')) {
-                        isAP = true;
-                    } else if (brand.includes('RUCKUS') || brand.includes('ARUBA')) {
-                        isAP = true;
-                    } else if (model.includes('AP') || model.includes('IAP') || model.includes('ICX')) {
-                        isAP = true;
-                    } else if (descr.includes('RUCKUS WIRELESS') || descr.includes('ARUBAOS')) {
+                    // 🌟 核心修正：明確排除「AP控制器」或「Controller」，它們是交換器核心，不是一般 AP！
+                    let isController = devType.includes('控制器') || devType.includes('CONTROLLER');
+                    
+                    // 只有在「不是控制器」的情況下，才允許被判定為一般 AP
+                    if (!isController && (devType.includes('AP') || devType.includes('WIFI') || /\bAP\b/i.test(sysName))) {
                         isAP = true;
                     }
                 }
+                
                 if (isAP) apNodes.push(node);
-                else normalIps.push(ip);
+                else normalIps.push({ip, mac: mac || '未知MAC'});
             });
         } catch(e) {
-            console.error("無法取得全網設備:", e);
-            normalIps = ips;
+            normalIps = ipMacPairs.map(p => { let [ip, mac] = p.split('|'); return {ip, mac: mac||'未知MAC'}; });
         }
     } else {
-        normalIps = ips;
+        normalIps = ipMacPairs.map(p => { let [ip, mac] = p.split('|'); return {ip, mac: mac||'未知MAC'}; });
     }
 
+    // ================== 從這裡開始替換 ==================
     let finalBodyHtml = '';
 
+    // 🌟 先檢查「直接透過 LLDP/拓樸對接」抓到的鄰居 (peerIp) 是不是 AP
+    let peerIsAP = false;
+    if (peerIp) {
+        try {
+            let pNode = cachedTopologyData.nodes.find(n => n.id === peerIp);
+            if (pNode) {
+                let devType = String(pNode.type || pNode.brand || '').toUpperCase();
+                let sysName = String(pNode.sysName || pNode.name || '').toUpperCase();
+                let isController = devType.includes('控制器') || devType.includes('CONTROLLER');
+                if (!isController && (devType.includes('AP') || devType.includes('WIFI') || /\bAP\b/i.test(sysName))) {
+                    peerIsAP = true;
+                    // 如果 peer 是 AP，把它塞進 apNodes 陣列一起漂亮渲染！
+                    if (!apNodes.find(a => a.ip === peerIp)) {
+                        apNodes.unshift(pNode);
+                    }
+                }
+            }
+        } catch(e) {}
+    }
+
+    // 💡 1. 渲染 AP 專屬橫幅 (完美還原經典樣式)
     if (apNodes.length > 0) {
         let apBannerHtml = `<div class="mb-2 pb-2 border-bottom border-secondary">`;
         apNodes.forEach(ap => {
-            let apName = ap.name || ap.sysName || ap.ip;
+            let apDisplayName = ap.name || ap.sysName || ap.ip;
             apBannerHtml += `
-                <div class="d-flex justify-content-between align-items-center mb-1 bg-black p-2 rounded border border-warning" style="box-shadow: 0 0 5px rgba(255,193,7,0.2);">
-                    <span class="text-warning fw-bold text-truncate me-2" style="font-size: 0.85rem;" title="${apName}"><i class="bi bi-broadcast me-2"></i>${apName}</span>
-                    <span class="badge bg-success text-white" style="font-size: 0.8rem; white-space: nowrap;">${ap.ip}</span>
+                <div class="d-flex justify-content-between align-items-center mb-1 bg-black p-2 rounded border border-warning">
+                    <span class="text-warning fw-bold text-truncate me-2" style="font-size: 0.85rem;"><i class="bi bi-broadcast me-2"></i>無線基地台接入 (AP) - ${apDisplayName}</span>
+                    <span class="badge bg-success text-white">${ap.ip}</span>
                 </div>`;
         });
         apBannerHtml += `</div>`;
         finalBodyHtml += apBannerHtml;
     }
     
-    if (normalIps.length === 0) {
-        if (apNodes.length > 0) {
-            finalBodyHtml += '<div class="p-3 text-center text-white-50 bg-black border border-secondary rounded my-2" style="font-size: 0.85rem;"><i class="bi bi-info-circle mb-2 d-block fs-4 opacity-50"></i>除了上述 AP 外，<br>目前無其他終端 IP 紀錄。</div>';
-        } else {
-            finalBodyHtml += '<div class="p-3 text-center text-white-50 bg-black border border-secondary rounded my-2" style="font-size: 0.85rem;"><i class="bi bi-info-circle mb-2 d-block fs-4 opacity-50"></i>此連接埠目前無任何對應的 IP 紀錄。</div>';
+    // 💡 2. 渲染 Uplink 中繼提示 (前提是它必須是真的 Uplink，且對端絕對不是 AP)
+    if (isUplink && peerIp && !peerIsAP) {
+        finalBodyHtml += `
+            <div class="mb-2 pb-2 border-bottom border-secondary">
+                <div class="d-flex justify-content-between align-items-center mb-1 p-2 rounded border border-info shadow-sm" 
+                     style="background-color: rgba(13, 202, 240, 0.1); cursor: pointer; transition: all 0.2s;"
+                     onmouseover="this.style.backgroundColor='rgba(220,53,69,0.2)'; this.style.borderColor='#dc3545'; this.querySelector('.badge').classList.replace('bg-secondary', 'bg-danger');"
+                     onmouseout="this.style.backgroundColor='rgba(13, 202, 240, 0.1)'; this.style.borderColor='#0dcaf0'; this.querySelector('.badge').classList.replace('bg-danger', 'bg-secondary');"
+                     onclick="confirmRemoveUplink('${deviceIp}', '${portName}', '${peerIp}', '${peerName}')"
+                     title="點擊以解除與 ${peerIp} 的對接狀態">
+                    <span class="text-info fw-bold text-truncate me-2" style="font-size: 0.85rem;"><i class="bi bi-link-45deg me-1 fs-6"></i>Uplink 連接至：${peerName}</span>
+                    <span class="badge bg-secondary text-white shadow"><i class="bi bi-scissors me-1"></i>解除連線</span>
+                </div>
+            </div>`;
+    }
+	
+    // 💡 3. 向後端查閱此網孔是否「已經被標註過」
+    let isAlreadyMemorized = false;
+    let isAlreadyUplink = false;
+    let isAlreadyMgmt = false; 
+    let oldMemorizedData = ''; 
+    try {
+        let cacheRes = await fetch('/api/device/ports/cache');
+        let cacheData = await cacheRes.json();
+        window.portSettingsCache = cacheData; // 🌟 順手同步更新全域快取，消滅時間差
+
+        let matchedPort = cacheData.find(p => p.ip === deviceIp && p.port_idx === String(portIdx));
+        if (matchedPort) {
+            if (matchedPort.memorized_ips && matchedPort.memorized_ips !== '') {
+                isAlreadyMemorized = true;
+                oldMemorizedData = matchedPort.memorized_ips; 
+            }
+            if (matchedPort.is_manual_uplink === 1 || matchedPort.is_manual_uplink === true) isAlreadyUplink = true;
+            if (matchedPort.is_manual_mgmt === 1 || matchedPort.is_manual_mgmt === true) isAlreadyMgmt = true; 
         }
+    } catch(e) { console.error("無法讀取網孔快取狀態", e); }
+
+    // 🌟 終極救援：用後端最新讀取的真實記憶，強制覆寫清單中的「未知 MAC」！
+    if (oldMemorizedData) {
+        let memPairs = oldMemorizedData.split(',');
+        normalIps.forEach(item => {
+            let matchPair = memPairs.find(p => p.startsWith(item.ip + '|'));
+            if (matchPair) {
+                let memMac = matchPair.split('|')[1];
+                // 如果資料庫有真正的 MAC，就直接無情覆寫畫面上的未知 MAC！
+                if (memMac && memMac.trim() !== '' && memMac !== '未知 MAC') {
+                    item.mac = memMac; 
+                }
+            }
+        });
+        // 把歷史紀錄裡有，但目前離線未掃到的 IP 也補進清單中顯示
+        memPairs.forEach(pair => {
+            let [mIp, mMac] = pair.split('|');
+            if (mIp && mIp.trim() !== '' && !normalIps.find(n => n.ip === mIp)) {
+                normalIps.push({ ip: mIp, mac: mMac || '未知 MAC', isHistory: true });
+            }
+        });
+    }
+
+    // 重新組合字串，確保傳給「標註網孔設定(Gear)」視窗的是最新、最正確的 MAC 數據！
+    let updatedIpListStr = normalIps.map(n => `${n.ip}|${n.mac}`).join(',');
+
+    // 💡 4. 渲染多重動態 Badge 標籤
+    let badgesHtml = '';
+    if (isAlreadyMemorized) badgesHtml += `<span class="badge bg-success me-1 shadow-sm"><i class="bi bi-pc-display me-1"></i>已記憶</span>`;
+    if (isAlreadyUplink) badgesHtml += `<span class="badge bg-info text-dark me-1 shadow-sm"><i class="bi bi-diagram-3-fill me-1"></i>Uplink</span>`;
+    if (isAlreadyMgmt) badgesHtml += `<span class="badge bg-danger me-2 shadow-sm"><i class="bi bi-shield-lock-fill me-1"></i>MGMT</span>`;
+    
+    let actionBtnHtml = `<div class="d-flex align-items-center">${badgesHtml}<button class="btn btn-sm btn-outline-info fw-bold py-0 px-2 shadow-sm" style="font-size:0.75rem;" onclick="bootstrap.Modal.getInstance(document.getElementById('portIpModal')).hide(); openPortManageModal('${deviceIp}', '${portIdx}', '${portName}', '${updatedIpListStr}')"><i class="bi bi-gear-fill me-1"></i>標註網孔設定</button></div>`;
+
+    // 💡 5. 渲染 一般 IP 與 MAC
+    if (normalIps.length === 0) {
+        if (actionBtnHtml) {
+            finalBodyHtml += `<div class="d-flex justify-content-end mb-2">${actionBtnHtml}</div>`;
+        }
+        finalBodyHtml += '<div class="p-3 text-center text-white-50 bg-black border border-secondary rounded my-2" style="font-size: 0.85rem;"><i class="bi bi-info-circle mb-2 d-block fs-4 opacity-50"></i>此連接埠目前無對應的 IP 紀錄。</div>';
     } else {
-        let listHtml = `<div class="text-success fw-bold mb-2 ps-1" style="font-size: 0.85rem;"><i class="bi bi-check-circle-fill me-1"></i>共追蹤到 ${normalIps.length} 個 IP</div>`;
+        let listHtml = `
+            <div class="d-flex justify-content-between align-items-center mb-2 ps-1">
+                <div class="text-success fw-bold" style="font-size: 0.85rem;"><i class="bi bi-check-circle-fill me-1"></i>共追蹤到 ${normalIps.length} 個設備</div>
+                <div>${actionBtnHtml}</div>
+            </div>
+        `;
         listHtml += '<div class="list-group list-group-flush border border-secondary rounded">';
-        normalIps.forEach(ip => {
-            listHtml += `<div class="list-group-item bg-black text-white-50 border-secondary py-2 d-flex align-items-center" style="font-size: 0.9rem;"><i class="bi bi-pc-display me-2 text-info"></i>${ip}</div>`;
+        normalIps.forEach(item => {
+            listHtml += `
+                <div class="list-group-item bg-black text-white border-secondary py-2 d-flex justify-content-between align-items-center" style="font-size: 1.1rem;">
+                    <div><i class="bi bi-pc-display me-2 text-info"></i><span class="fw-bold">${item.ip}</span></div>
+                    <div class="text-white-50 font-monospace fw-bold"><i class="bi bi-tag me-1"></i>${item.mac}</div>
+                </div>`;
         });
         listHtml += '</div>';
         finalBodyHtml += listHtml;
     }
+    // ================== 替換到這行結束 ==================
     
     bodyEl.innerHTML = finalBodyHtml;
 }
@@ -428,36 +525,95 @@ function bindRightClickEvent() {
     };
 
     function generateSwitchPanelHtml(nodeData) {
+        // 🌟 終極防線：如果該設備在資料庫中被明確標記為 AP (無線基地台)，絕對不畫交換器面板！
+        let devType = String(nodeData.type || nodeData.brand || '').toUpperCase();
+        let sysName = String(nodeData.sysName || nodeData.name || '').toUpperCase();
+        let isController = devType.includes('控制器') || devType.includes('CONTROLLER');
+        if (!isController && (devType.includes('AP') || devType.includes('WIFI') || /\bAP\b/i.test(sysName))) {
+            return `<div class="text-center mt-4 p-4 rounded border border-warning" style="background-color: rgba(255, 193, 7, 0.1);">
+                        <i class="bi bi-broadcast fs-1 d-block mb-2 text-warning"></i>
+                        <h6 class="text-warning fw-bold">無線基地台 (Access Point)</h6>
+                        <span class="text-white-50" style="font-size: 0.85rem;">此為終端無線接入點，不提供實體交換器網孔面板。</span>
+                    </div>`;
+        }
+
         let rawData = {};
         try { rawData = JSON.parse(nodeData.snmp_raw || "{}"); } catch(e){}
+        
+        // 🌟 提前解析規格：如果有自訂規格，就算沒抓到 SNMP 也強制繪製面板！
+        function parsePortSpecs(specsJson) {
+            let specMap = {};
+            try {
+                let specs = JSON.parse(specsJson || "[]");
+                specs.forEach(spec => {
+                    let rangeStr = spec.range || '';
+                    let type = spec.type || 'RJ-45';
+                    
+                    let hwType = 'rj45';
+                    if (type.includes('SFP') && !type.includes('QSFP')) hwType = 'sfp';
+                    else if (type.includes('QSFP')) hwType = 'qsfp';
+                    else if (type.includes('Combo')) hwType = 'combo';
+                    
+                    let parts = rangeStr.split(/[,，]/);
+                    parts.forEach(part => {
+                        part = part.trim(); if (!part) return;
+                        if (part.includes('-') || part.includes(':')) {
+                            let sep = part.includes('-') ? '-' : ':';
+                            let bounds = part.split(sep);
+                            if (bounds.length === 2) {
+                                let startStr = bounds[0].trim(); let endStr = bounds[1].trim();
+                                let sMatch = startStr.match(/^(.*?)(\d+)$/); let eMatch = endStr.match(/^(.*?)(\d+)$/);
+                                
+                                if (sMatch && eMatch && sMatch[1] === eMatch[1]) {
+                                    let prefix = sMatch[1];
+                                    let sNum = parseInt(sMatch[2]); let eNum = parseInt(eMatch[2]);
+                                    for (let i = sNum; i <= eNum; i++) { specMap[prefix + i] = { hwType: hwType, speed: spec.speed }; }
+                                } else { specMap[part] = { hwType: hwType, speed: spec.speed }; }
+                            }
+                        } else { specMap[part] = { hwType: hwType, speed: spec.speed }; }
+                    });
+                });
+            } catch(e) { console.warn("規格解析失敗:", e); }
+            return specMap;
+        }
+
+        let dbSpecsMap = parsePortSpecs(nodeData.port_specs);
+        let hasCustomSpecs = Object.keys(dbSpecsMap).length > 0;
+
         let ifNames = rawData[4] || {};
-        if (Object.keys(ifNames).length === 0) return '';
+        if (Object.keys(ifNames).length === 0) {
+            ifNames = rawData[8] || {};
+        }
+        
+        // 🌟 終極防線：如果既沒有自訂規格，也沒有 SNMP 網孔，才放棄繪圖
+        if (Object.keys(ifNames).length === 0 && !hasCustomSpecs) return '';
+
         let ifHighSpeed = rawData[5] || {}; let ifSpeed = rawData[6] || {};
         let ifAlias = rawData[9] || {}; let fdbData = rawData[10] || {};     
         let bpToIfIndex = rawData[11] || {}; let qFdbData = rawData[12] || {};    
         let arpData = rawData[13] || {}; let ruckusArpPort = rawData[16] || {};
         let traffic = nodeTrafficData[nodeData.ip] || {};
 		
+		let entSensor = rawData[31] || {};
 		// 💡 提取剛抓回來的新維度資料
         let adminStatus = rawData[32] || {};
-		let operStatus = rawData[44] || {}; // 🌟 新增：接收由快速輪詢即時揉入的實體網孔狀態碼
         let domTx = rawData[33] || {};
         let domRx = rawData[34] || {};
-		// 舊版 Aruba/HP 光纖資料
         let hpDomTx = rawData[35] || {};
         let hpDomRx = rawData[36] || {};
         let entPhysicalName = rawData[37] || {};
-        // 💡 新增 Aruba CX 專屬陣列
 		let arubaCxTx = rawData[38] || {};
         let arubaCxRx = rawData[39] || {};
-        // 💡 接收 Ruckus 新版 DOM 與 SSH 資料 (因插入新 OID，SSH 索引順延至 42)
         let ruckusNewTx = rawData[40] || {};
         let ruckusNewRx = rawData[41] || {};
-        let arubaSshDom = rawData[42] || {};
-		// 💡 接收背景 HTTPS 機器人截獲的 Palo Alto 全機 mW 光學數據
-        let paloAltoDom = rawData[43] || {};
-        
-        let entSensor = rawData[31] || {}; // 通用感測器資料庫
+        // 42~56 已保留給 Fortinet AP 控制清單
+        // 👇 🌟 新增：接住後端傳來的 MP/DP 陣列，並推擠原本的索引
+        let paMpCpuRaw = rawData[57] || {};
+        let paDpCpuRaw = rawData[58] || {};
+        let stdCpuRaw  = rawData[59] || {};  // 🌟 補回標準 CPU 備援表
+        let arubaSshDom = rawData[60] || {};
+        let paloAltoDom = rawData[61] || {};
+        let operStatus = rawData[62] || {};  // 🌟 刪除重複的，保留 62
 
         let poeTotal = 0;
         if (rawData[25]) {
@@ -601,10 +757,13 @@ function bindRightClickEvent() {
         }
 
         let physicalPorts = [];
+        
+        // 🌟 智慧混合引擎：無條件優先執行實體自動探測，精準建立設備底層真實物理結構
         for (let idx in ifNames) {
             let name = cleanStr(ifNames[idx]); let lowerName = name.toLowerCase();
             
-            if (/(vlan|loop|tun|null|cpu|bridge|switch|internal|vrrp|eoip|pppoe|gre|sit|wireguard|ovpn|l2tp|sstp|pptp)/i.test(lowerName)) {
+            // 🌟 升級黑名單：精準截擊 lo、lo0 等老舊虛擬孔，並剔除 vlan、wlan 等廣播虛擬介面
+            if (lowerName === 'lo' || /^lo\d+$/.test(lowerName) || /(vlan|loop|tun|null|cpu|bridge|internal|vrrp|eoip|pppoe|gre|sit|wireguard|ovpn|l2tp|sstp|pptp|wlan|vap|wifi|radio|ssid|bssid|ath)/i.test(lowerName)) {
                 if (!lowerName.includes('internal') || !/forti/i.test(nodeData.brand)) continue;
             }
 
@@ -620,14 +779,27 @@ function bindRightClickEvent() {
             
             let portNum = parseInt(idx);
             let nMatch = name.match(/\d+/g);
+            
             if (nMatch) {
-                if (/mikrotik/i.test(nodeData.brand) && lowerName.includes('qsfp')) portNum = parseInt(nMatch[0]); 
-                else portNum = parseInt(nMatch[nMatch.length - 1]); 
+                if (/d-link/i.test(nodeData.brand) && !lowerName.includes('port') && !lowerName.includes('eth') && nMatch.join('').length >= 4) {
+                    portNum = parseInt(idx); 
+                } else {
+                    if (/mikrotik/i.test(nodeData.brand) && lowerName.includes('qsfp')) portNum = parseInt(nMatch[0]); 
+                    else portNum = parseInt(nMatch[nMatch.length - 1]); 
+                }
             }
             
             let hwType = null; let rowGroup = null; let shortLabel = null;
             let _u = 0, _mod = 0, _p = 0;
-            
+
+            let purePortMatch = name.match(/(\d+(?:\/\d+)+)/);
+            let purePort = purePortMatch ? purePortMatch[1] : null;
+            if (!purePort) {
+                let singleMatch = name.match(/\d+/g);
+                purePort = singleMatch ? singleMatch[singleMatch.length - 1] : String(portNum);
+            }
+            shortLabel = purePort;
+
             if (matchedProfile) {
                 let conf = matchedProfile.ports(name, portNum, lowerName);
                 if (conf) { 
@@ -663,8 +835,51 @@ function bindRightClickEvent() {
                 isMgmt: isMgmt, isLag: isLag, _u: _u, _mod: _mod, _p: _p
             });
         }
-        
-        if (physicalPorts.length === 0) return '';
+
+        // 🌟 智慧比較查重處理：利用萃取器確保長孔名 (1/1/1) 與短孔名 (1) 能夠精準對齊，消滅重複幽靈孔！
+        if (hasCustomSpecs) {
+            let extractNum = function(str) { let m = String(str).match(/\d+(\/\d+)*/g); return m ? m[m.length - 1] : ""; };
+            
+            for (let portLabel in dbSpecsMap) {
+                let spec = dbSpecsMap[portLabel];
+                let labelNum = extractNum(portLabel);
+                
+                // 執行深度交叉比對
+                let existingPort = physicalPorts.find(p => {
+                    let pCleanLabel = String(p.shortLabel).trim();
+                    let pLowerName = String(p.lowerName).trim();
+                    let targetLabel = String(portLabel).trim();
+                    
+                    // 1. 完全相同 (例如 1/1/1 vs 1/1/1)
+                    if (pCleanLabel === targetLabel || String(p.num) === targetLabel) return true;
+                    
+                    // 2. 分別獨立萃取短孔與長孔數字，只要其中一個能完美咬合，就視為同一實體孔！
+                    let pNumLabel = extractNum(pCleanLabel);
+                    let pNumName = extractNum(pLowerName);
+                    
+                    if (pNumLabel !== "" && labelNum !== "" && (pNumLabel === labelNum || pNumLabel.endsWith('/' + labelNum))) return true;
+                    if (pNumName !== "" && labelNum !== "" && (pNumName === labelNum || pNumName.endsWith('/' + labelNum))) return true;
+                    
+                    return false;
+                });
+                
+                if (existingPort) {
+                    // 若抓到實體對應孔：尊重其實體卡槽與排線位置，僅覆蓋硬體類型 (例如覆寫成 QSFP 或 SFP)
+                    if (spec.hwType) existingPort.hwType = spec.hwType;
+                } else {
+                    // 若完全沒有實體配對 (如 F1, EAST, NORT 等文字虛擬孔)：安全降落至 9999 獨立列，保持物理面板純淨
+                    let u = 1, mod = 1, p = parseInt(portLabel.match(/\d+$/) || 1);
+                    let rowGroup = 9999; 
+                    
+                    physicalPorts.push({ 
+                        idx: `fake_${portLabel}`, 
+                        name: `Custom Port ${portLabel}`, lowerName: String(portLabel).toLowerCase(), speed: spec.speed || 1000, num: p, 
+                        hwType: spec.hwType || 'rj45', rowGroup: rowGroup, shortLabel: portLabel,
+                        isMgmt: false, isLag: false, _u: u, _mod: mod, _p: p
+                    });
+                }
+            }
+        }
         
         let standardPorts = []; let logicPorts = [];
         physicalPorts.forEach(p => {
@@ -682,14 +897,46 @@ function bindRightClickEvent() {
         standardPorts.sort(portSorter);
         logicPorts.sort(portSorter);
 
+        // 🌟 關鍵修復：這裡必須包在 renderPortHtml 裡面！
         let renderPortHtml = (p) => {
             let isUplink = false;
+            let peerIp = '';
+            let peerName = '';
+            let isPeerAP = false; // 🌟 追蹤對端是否為 AP
+            
             if (typeof cachedTopologyData !== 'undefined' && cachedTopologyData.edges) {
                 for (let edge of cachedTopologyData.edges) {
-                    if (edge.from === nodeData.ip) { let ports = (edge.from_port || '').split(','); if (ports.some(ep => isSamePort(ep, p.name))) { isUplink = true; break; } } 
-                    else if (edge.to === nodeData.ip) { let ports = (edge.to_port || '').split(','); if (ports.some(ep => isSamePort(ep, p.name))) { isUplink = true; break; } }
+                    let peerNode = null;
+                    if (edge.from === nodeData.ip) { 
+                        let ports = (edge.from_port || '').split(','); 
+                        if (ports.some(ep => isSamePort(ep, p.name))) { 
+                            peerNode = cachedTopologyData.nodes.find(n => n.id === edge.to);
+                        } 
+                    } 
+                    else if (edge.to === nodeData.ip) { 
+                        let ports = (edge.to_port || '').split(','); 
+                        if (ports.some(ep => isSamePort(ep, p.name))) { 
+                            peerNode = cachedTopologyData.nodes.find(n => n.id === edge.from);
+                        } 
+                    }
+                    
+                    if (peerNode) {
+                        peerIp = peerNode.ip; 
+                        peerName = peerNode.sysName || peerNode.ip;
+                        // 🌟 核心判斷：從資料庫種類判斷，如果它是 AP，就剝奪它的 Uplink 資格！
+                        let devType = String(peerNode.type || peerNode.brand || '').toUpperCase();
+                        let isController = devType.includes('控制器') || devType.includes('CONTROLLER');
+                        if (!isController && (devType.includes('AP') || devType.includes('WIFI') || /\bAP\b/i.test(peerName.toUpperCase()))) {
+                            isPeerAP = true;
+                            isUplink = false; // 降級為普通終端
+                        } else {
+                            isUplink = true;  // 只有非 AP 的交換器/防火牆才能當 Uplink
+                        }
+                        break; 
+                    }
                 }
             }
+            // 如果連著 AP，就不當作 Uplink 對待
             let treatAsUplink = isUplink || p.isLag || p.lowerName.includes('bond');
             
             let isActiveFdb = activeIfIdxs.has(String(p.idx));
@@ -716,7 +963,10 @@ function bindRightClickEvent() {
             }
 			
             let is10G = p.speed >= 10000;
-            let portClass = p.hwType === 'sfp' ? 'sfp-port' : 'rj45-port';
+            let portClass = 'rj45-port';
+            if (p.hwType === 'sfp') portClass = 'sfp-port';
+            else if (p.hwType === 'qsfp') portClass = 'qsfp-port';
+            else if (p.hwType === 'combo') portClass = 'combo-port';
             
             let inErr = (rawData[23] && rawData[23][p.idx]) ? parseInt(rawData[23][p.idx]) : 0;
             let outErr = (rawData[24] && rawData[24][p.idx]) ? parseInt(rawData[24][p.idx]) : 0;
@@ -753,14 +1003,12 @@ function bindRightClickEvent() {
             let rTx = ruckusNewTx[p.idx] || ruckusNewTx[p.idx + '.1'] || domTx[p.idx];
             let rRx = ruckusNewRx[p.idx] || ruckusNewRx[p.idx + '.1'] || domRx[p.idx];
             
-            // 💡 破解 Ruckus 索引陷阱：如果拿 ifIndex (例如 48) 找不到，就去實體設備表 (entPhysicalName) 裡面找對應的光纖模組編號 (例如 2647)
+            // 💡 破解 Ruckus 索引陷阱
             if (!rTx && !rRx && Object.keys(entPhysicalName).length > 0) {
-                let pNameLower = p.name.toLowerCase(); // 例如 "1/1/48"
+                let pNameLower = p.name.toLowerCase();
                 for (let eIdx in entPhysicalName) {
                     let eName = entPhysicalName[eIdx].toLowerCase();
-                    // 如果實體名稱包含 "1/1/48" (例如 "port optics 1/1/48")
                     if (eName.includes(pNameLower)) {
-                        // 檢查這個實體編號在 DOM 資料庫裡有沒有數值
                         if (ruckusNewTx[eIdx] || ruckusNewRx[eIdx]) {
                             rTx = ruckusNewTx[eIdx];
                             rRx = ruckusNewRx[eIdx];
@@ -770,39 +1018,27 @@ function bindRightClickEvent() {
                 }
             }
 
-            // 如果有找到 Ruckus 的數值，就正式採用
             if (rTx || rRx) {
                 txRaw = rTx;
                 rxRaw = rRx;
-            }
-            // (B) 嘗試 新版 Aruba CX OID
-            else if (arubaCxTx[p.idx] || arubaCxRx[p.idx]) {
+            } else if (arubaCxTx[p.idx] || arubaCxRx[p.idx]) {
                 txRaw = arubaCxTx[p.idx];
                 rxRaw = arubaCxRx[p.idx];
-            }
-            // (C) 嘗試 舊版 Ruckus (µW)
-            else if (domTx[p.idx] || domRx[p.idx]) {
+            } else if (domTx[p.idx] || domRx[p.idx]) {
                 txRaw = domTx[p.idx];
                 rxRaw = domRx[p.idx];
-            }
-            // (D) 嘗試 舊版 HP/Aruba
-            else if (hpDomTx[p.idx] || hpDomRx[p.idx]) {
+            } else if (hpDomTx[p.idx] || hpDomRx[p.idx]) {
                 txRaw = hpDomTx[p.idx];
                 rxRaw = hpDomRx[p.idx];
-            }
-            // (E) 終極備援：呼叫 SSH CLI 引擎的數據 (完美對應 p.name)
-            else if (arubaSshDom[p.name]) {
+            } else if (arubaSshDom[p.name]) {
                 txRaw = arubaSshDom[p.name].tx;
                 rxRaw = arubaSshDom[p.name].rx;
-            }
-			// (E1) 💡 新增：Palo Alto XML API 數據匹配 (完美對應 "ethernet1/1")
-            else if (paloAltoDom[p.name] || paloAltoDom[p.name.toLowerCase()]) {
+            } else if (paloAltoDom[p.name] || paloAltoDom[p.name.toLowerCase()]) {
                 let paPort = paloAltoDom[p.name] || paloAltoDom[p.name.toLowerCase()];
                 txRaw = paPort.tx;
                 rxRaw = paPort.rx;
             }
 
-            // (F) 如果以上「五大來源」都摃龜，啟動實體感測器跨表查詢 (ENTITY-MIB)
             if (!txRaw && !rxRaw && Object.keys(entPhysicalName).length > 0) {
                 let pNameLower = p.name.toLowerCase(); 
                 for (let eIdx in entPhysicalName) {
@@ -819,20 +1055,14 @@ function bindRightClickEvent() {
 
             let domStr = '';
             if (txRaw || rxRaw) {
-                // 單位智慧換算引擎
                 let calcDbm = (val) => {
                     let num = parseFloat(val);
                     if (isNaN(num)) return 'N/A';
-                    
-                    // 💡 新增：處理千分之一 dBm (例如 -19500 -> -19.50 dBm)
                     if (num < -1000) return (num / 1000).toFixed(2) + ' dBm'; 
-                    // 處理百分之一 dBm (例如 -1950 -> -19.50 dBm)
                     if (num < -100) return (num / 100).toFixed(2) + ' dBm'; 
-                    
                     if (num <= 0) return num.toFixed(2) + ' dBm'; 
                     if (num > 0 && num < 10) return num.toFixed(2) + ' dBm'; 
 
-                    // 視為微瓦 (µW)，進行對數換算 (Ruckus 與 Aruba CX 標準)
                     let mw = num / 1000;
                     if (mw <= 0) return 'N/A';
                     return (10 * Math.log10(mw)).toFixed(2) + ' dBm';
@@ -853,13 +1083,12 @@ function bindRightClickEvent() {
             let portAlias = ifAlias[p.idx] ? decodeHexIfNeeded(ifAlias[p.idx]) : '';
             if (portAlias) title += `<br>📝 說明: ${portAlias}`;
             
-            // 💡 4. 提示文字整合 Admin Down 與 光學 DOM
             if (isAdminDown) title += `<br>狀態: <span class="text-warning fw-bold">管理員強制停用 (Shutdown)</span> 🔒`;
             else if (isUplink) title += `<br>狀態: 中繼傳遞 (Uplink/Downlink)`; 
             else if (isActive) title += `<br>狀態: 終端接入 (Active)`; 
             else title += `<br>狀態: 空閒/未連線 (Down)`;
             
-            title += domStr; // 寫入光學數值
+            title += domStr; 
             
             if (poePower !== null) title += `<br>⚡ PoE供電: <span class="text-warning fw-bold">${poePower} W</span>`;
             if (!isUplink && portIps.size > 0) { let ipArr = Array.from(portIps); if (ipArr.length <= 3) title += `<br>🖥️ 設備 IP: ${ipArr.join(', ')}`; else title += `<br>🖥️ 設備 IP: ${ipArr.slice(0, 3).join(', ')} (等 ${ipArr.length} 台)`; }
@@ -871,11 +1100,44 @@ function bindRightClickEvent() {
             }
             title += `<br>🖱️ <span class="text-success">右鍵點擊可查看完整 IP 清單</span>`;
 
-            let ipListStr = Array.from(portIps).join(','); let safeSysName = (nodeData.sysName || '').replace(/'/g, "\\'");
+            let ipMacList = [];
+        portIps.forEach(ip => {
+            let mac = "未知 MAC";
+            
+            // 1. 優先從設備即時的 SNMP ARP 表獲取
+            if (arpData) {
+                Object.keys(arpData).forEach(suffix => {
+                    let parts = suffix.split('.');
+                    if (parts.length >= 4 && parts.slice(-4).join('.') === ip) {
+                        mac = arpData[suffix];
+                    }
+                });
+            }
+            
+            // 🌟 2. 核心修正：如果 SNMP 沒抓到，立刻向資料庫快取 (portSettingsCache) 請求救援！
+            // 把我們剛剛用 Ping 抓回來並存檔的實體 MAC 完美渲染到右鍵選單上
+            if (mac === "未知 MAC" && window.portSettingsCache) {
+                let cachedPort = window.portSettingsCache.find(cp => cp.ip === nodeData.ip && String(cp.port_idx) === String(p.idx));
+                if (cachedPort && cachedPort.memorized_ips) {
+                    let memPairs = cachedPort.memorized_ips.split(',');
+                    let matchPair = memPairs.find(pair => pair.startsWith(ip + '|'));
+                    if (matchPair) {
+                        let memMac = matchPair.split('|')[1];
+                        if (memMac && memMac.trim() !== '' && memMac !== '未知 MAC') {
+                            mac = memMac; // 完美撈回資料庫記憶的 MAC
+                        }
+                    }
+                }
+            }
+
+            ipMacList.push(`${ip}|${mac}`);
+        });
+        let ipListStr = ipMacList.join(','); 
+            let safeSysName = (nodeData.sysName || '').replace(/'/g, "\\'");
+            let safePeerName = peerName.replace(/'/g, "\\'");
 
             let clickAttr = (allowPoeControl && !isUplink && !p.isLag && !is10G && !p.isMgmt)
-                            ? `onclick="triggerPoeCycle('${nodeData.ip}', '${p.idx}', '${p.name}')"`
-                            : "";
+                            ? `onclick="triggerPoeCycle('${nodeData.ip}', '${p.idx}', '${p.name}')"` : "";
             let cursorStyle = clickAttr ? "pointer" : "default";
             let safeTitle = title.replace(/"/g, '&quot;');
             
@@ -883,7 +1145,7 @@ function bindRightClickEvent() {
                 <div class="${portClass}" style="${borderStyle} cursor: ${cursorStyle}; transition: transform 0.2s; flex-shrink: 0;"
                      onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'"
                      ${clickAttr}
-                     oncontextmenu="showPortIps(event, '${safeSysName}', '${nodeData.ip}', '${p.name}', '${ipListStr}', ${treatAsUplink})"
+                     oncontextmenu="showPortIps(event, '${safeSysName}', '${nodeData.ip}', '${p.idx}', '${p.name}', '${ipListStr}', ${treatAsUplink}, '${peerIp}', '${safePeerName}')"
                      data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom"
                      title="${safeTitle}">
                     <div class="port-led ${ledClass}" style="${glowStyle}"></div>
@@ -892,23 +1154,44 @@ function bindRightClickEvent() {
             `;
         };
 
-        let rowGroups = {};
+        // 🌟 物理真理大一統版：將所有實體網孔先依據「堆疊機器編號 (_u)」分組
+        let unitMap = {};
         standardPorts.forEach(p => {
-            if (!rowGroups[p.rowGroup]) rowGroups[p.rowGroup] = [];
-            rowGroups[p.rowGroup].push(p);
+            let uKey = p._u || 1;
+            if (!unitMap[uKey]) unitMap[uKey] = [];
+            unitMap[uKey].push(p);
         });
 
         let rowsHtml = '';
-        Object.keys(rowGroups).sort((a,b)=>parseInt(a)-parseInt(b)).forEach(groupKey => {
-            let groupPorts = rowGroups[groupKey];
-            let portsPerRow = 24; 
-            
-            for (let i = 0; i < groupPorts.length; i += portsPerRow) {
-                let chunk = groupPorts.slice(i, i + portsPerRow);
-                rowsHtml += `<div class="chassis-row" style="margin-bottom: 6px;">`;
-                chunk.forEach(p => { rowsHtml += renderPortHtml(p); });
-                rowsHtml += `</div>`;
+
+        // 步驟 1：依據主機編號 (1 號機、2 號機...) 由小到大嚴格巡檢
+        Object.keys(unitMap).sort((a, b) => parseInt(a) - parseInt(b)).forEach((uKey, uIdx) => {
+            let unitPorts = unitMap[uKey];
+
+            // 💡 堆疊機物理隔離線：若為 2 號機以上，精準繪製一條虛擬隔離背板線，完美識別 Stacking 邊界
+            if (uIdx > 0) {
+                rowsHtml += `<div style="margin-top: 12px; border-top: 2px dashed rgba(255,255,255,0.18); padding-top: 8px;"></div>`;
             }
+
+            // 步驟 2：不論電口還是光口，完全依據原廠 Module 結構產生的 rowGroup 進行硬體分群，拒絕本末倒置
+            let rowGroups = {};
+            unitPorts.forEach(p => {
+                if (!rowGroups[p.rowGroup]) rowGroups[p.rowGroup] = [];
+                rowGroups[p.rowGroup].push(p);
+            });
+
+            // 步驟 3：依據卡槽/模組行號由小到大（例如 111 ➡️ 112）順序倒出，每排滿 24 孔自動換行
+            Object.keys(rowGroups).sort((a, b) => parseInt(a) - parseInt(b)).forEach(groupKey => {
+                let groupPorts = rowGroups[groupKey];
+                let portsPerRow = 24; 
+                
+                for (let i = 0; i < groupPorts.length; i += portsPerRow) {
+                    let chunk = groupPorts.slice(i, i + portsPerRow);
+                    rowsHtml += `<div class="chassis-row" style="margin-bottom: 6px;">`;
+                    chunk.forEach(p => { rowsHtml += renderPortHtml(p); });
+                    rowsHtml += `</div>`;
+                }
+            });
         });
 
         if (logicPorts.length > 0) {
@@ -1046,6 +1329,7 @@ function bindRightClickEvent() {
         return panelHtml;
     }
 
+
     window.updateRightClickModalContent = function(nodeId) {
         var nodeData = nodesDataSet.get(nodeId);
         if (!nodeData) return;
@@ -1178,12 +1462,23 @@ function bindRightClickEvent() {
 				if (rawData.length >= 38) { formattedJson["entPhysicalName [實體設備對應表] (1.3.6.1.2.1.47.1.1.1.1.7)"] = rawData[37]; }
 				if (rawData.length >= 39) { formattedJson["arubaCxTxPwr [Aruba CX 10.14+ Tx] (1.3.6.1.4.1.47196.4.1.1.3.38.1.1.9)"] = rawData[38]; }
 				if (rawData.length >= 40) { formattedJson["arubaCxRxPwr [Aruba CX 10.14+ Rx] (1.3.6.1.4.1.47196.4.1.1.3.38.1.1.10)"] = rawData[39]; }
-				if (rawData.length >= 41) { formattedJson["ruckusIcxTxPwr [真實Ruckus Tx] (1.3.6.1.4.1.1991.1.1.3.3.10.1.3)"] = rawData[40]; }
-				if (rawData.length >= 42) { formattedJson["ruckusIcxRxPwr [真實Ruckus Rx] (1.3.6.1.4.1.1991.1.1.3.3.10.1.4)"] = rawData[41]; }
-				if (rawData.length >= 43) { formattedJson["Aruba_SSH_DOM [終極備援: 背景CLI實體抓取]"] = rawData[42]; }
-				// 💡 補上最後一行
-				if (rawData.length >= 44) { formattedJson["PaloAlto_API_DOM [Palo Alto XML API 抓取]"] = rawData[43]; }
-				if (rawData.length >= 45) { formattedJson["ifOperStatus [實體網孔狀態] (1.3.6.1.2.1.2.2.1.8)"] = rawData[44]; } // 🌟 補上這行
+				if (rawData.length >= 41) { formattedJson["ruckusIcxTxPwr [真實Ruckus Tx]"] = rawData[40]; }
+				if (rawData.length >= 42) { formattedJson["ruckusIcxRxPwr [真實Ruckus Rx]"] = rawData[41]; }
+				if (rawData.length >= 43) { formattedJson["fgApName [Config 表 AP 名稱]"] = rawData[42]; }
+				if (rawData.length >= 44) { formattedJson["fgApIp [Session 表 AP IP]"] = rawData[43]; }
+				if (rawData.length >= 45) { formattedJson["fgApProfile [Session 表 韌體/型號]"] = rawData[44]; }
+				if (rawData.length >= 46) { formattedJson["fgApClients1 [Session 人數 16]"] = rawData[45]; }
+				if (rawData.length >= 47) { formattedJson["fgApClients2 [Session 人數 11]"] = rawData[46]; }
+				if (rawData.length >= 48) { formattedJson["Aruba_SSH_DOM [背景CLI實體抓取]"] = rawData[47]; }
+				if (rawData.length >= 49) { formattedJson["PaloAlto_API_DOM [XML API 抓取]"] = rawData[48]; }
+				if (rawData.length >= 50) { formattedJson["ifOperStatus [實體網孔狀態]"] = rawData[49]; }
+				// 👇 🌟 修正與新增：對齊最新的 62 個欄位
+				if (rawData.length >= 57) { formattedJson["panSessionUtil [PA 連線數負載 %]"] = rawData[57]; }
+				if (rawData.length >= 58) { formattedJson["paDpCpu [PA 私有 DP CPU]"] = rawData[58]; }
+				if (rawData.length >= 59) { formattedJson["hrProcessorLoad [標準 CPU (1=MP, 2=DP)]"] = rawData[59]; }
+				if (rawData.length >= 60) { formattedJson["Aruba_SSH_DOM [背景CLI實體抓取]"] = rawData[60]; }
+				if (rawData.length >= 61) { formattedJson["PaloAlto_API_DOM [XML API 抓取]"] = rawData[61]; }
+				if (rawData.length >= 62) { formattedJson["ifOperStatus [實體網孔狀態]"] = rawData[62]; }
 
                 Object.keys(formattedJson).forEach(k => { if (Object.keys(formattedJson[k] || {}).length === 0) delete formattedJson[k]; });
                 snmpRawHtml = JSON.stringify(formattedJson, null, 2);
@@ -1191,7 +1486,271 @@ function bindRightClickEvent() {
             if (snmpRawHtml === '{}') snmpRawHtml = "沒有抓取到詳細的 MIB 資料 (可能 Timeout 或無資料)";
         } catch(e) { snmpRawHtml = "資料解析失敗或尚未掃描快取"; }
 
+        // ========================================================
+        // 🌟 智慧擴充：解析 FortiGate 官方 MIB 終端全紀錄聯查版
+        // ========================================================
+        let fgApName = rawData[42] || {};
+        let fgApIp = rawData[43] || {};
+        let fgApProfile = rawData[44] || {};
+        let fgApClients = rawData[45] || {};
+        let fgApState = rawData[46] || {};
+        
+        let fgStaMac = rawData[47] || {};
+        let fgStaWtpId = rawData[48] || {};
+        let fgStaIp = rawData[49] || {};
+        let fgStaSignal = rawData[50] || {};
+        
+        // 🌟 終端額外連線數據
+        let fgStaSsid = rawData[51] || {};
+        let fgStaChannel = rawData[52] || {};
+        let fgStaTx = rawData[53] || {};
+        let fgStaRx = rawData[54] || {};
+
+        let fgApCpu = rawData[55] || {};
+        let fgApMem = rawData[56] || {};
+
+        let normalizedAPs = {};
+
+        function extractSN(snClean) {
+            let parts = snClean.split('.');
+            let chars = "";
+            for (let i = 0; i < parts.length; i++) {
+                let len = parseInt(parts[i]);
+                if (len === parts.length - i - 1) { 
+                    chars = parts.slice(i+1).map(x => String.fromCharCode(parseInt(x))).join('');
+                    if (/^[A-Za-z0-9\-]+$/.test(chars)) return chars;
+                }
+            }
+            let asciiStr = parts.map(x => { let num = parseInt(x); return (num >= 32 && num <= 126) ? String.fromCharCode(num) : ''; }).join('');
+            let match = asciiStr.match(/([A-Z0-9]{12,20})/);
+            if (match) return match[1];
+            return snClean;
+        }
+
+        // 🌟 終端資料歸戶與解碼
+        let apToClientsMap = {};
+        Object.keys(fgStaWtpId).forEach(staIdx => {
+            let apSnRaw = String(fgStaWtpId[staIdx]).replace(/"/g, '').trim();
+            let targetApSn = extractSN(apSnRaw);
+            let clientMac = fgStaMac[staIdx] ? String(fgStaMac[staIdx]).replace(/"/g, '').trim() : '未知 MAC';
+            let clientIp = fgStaIp[staIdx] ? String(fgStaIp[staIdx]).replace(/"/g, '').trim() : '未知 IP';
+            
+            if (/^([0-9A-Fa-f]{2}[:\s-]){3}[0-9A-Fa-f]{2}$/.test(clientIp)) {
+                clientIp = clientIp.split(/[:\s-]/).map(hex => parseInt(hex, 16)).join('.');
+            } else if (/^0x([0-9A-Fa-f]{8})$/i.test(clientIp)) {
+                let hexStr = clientIp.substring(2);
+                let octets = [];
+                for(let i=0; i<8; i+=2) octets.push(parseInt(hexStr.substring(i, i+2), 16));
+                clientIp = octets.join('.');
+            }
+            
+            let clientRssi = fgStaSignal[staIdx] ? String(fgStaSignal[staIdx]).replace(/"/g, '').trim() : '-';
+            let clientSsid = fgStaSsid[staIdx] ? String(fgStaSsid[staIdx]).replace(/"/g, '').trim() : '未知 SSID';
+            let clientChannel = fgStaChannel[staIdx] ? String(fgStaChannel[staIdx]).replace(/"/g, '').trim() : '-';
+            let clientTx = fgStaTx[staIdx] ? String(fgStaTx[staIdx]).replace(/"/g, '').trim() : '0';
+            let clientRx = fgStaRx[staIdx] ? String(fgStaRx[staIdx]).replace(/"/g, '').trim() : '0';
+            
+            if (!apToClientsMap[targetApSn]) apToClientsMap[targetApSn] = [];
+            apToClientsMap[targetApSn].push({ mac: clientMac, ip: clientIp, rssi: clientRssi, ssid: clientSsid, ch: clientChannel, tx: clientTx, rx: clientRx });
+        });
+
+        // 建立基本 AP 結構
+        Object.keys(fgApIp).forEach(k => {
+            let snClean = k.replace(/"/g, '');
+            let realSn = extractSN(snClean);
+            let ipStr = String(fgApIp[k]).replace(/"/g, '').trim();
+            if (/^([0-9A-Fa-f]{2}[:\s-]){3}[0-9A-Fa-f]{2}$/.test(ipStr)) {
+                ipStr = ipStr.split(/[:\s-]/).map(hex => parseInt(hex, 16)).join('.');
+            } else if (/^0x([0-9A-Fa-f]{8})$/i.test(ipStr)) {
+                let hexStr = ipStr.substring(2);
+                let octets = [];
+                for(let i=0; i<8; i+=2) octets.push(parseInt(hexStr.substring(i, i+2), 16));
+                ipStr = octets.join('.');
+            }
+
+            normalizedAPs[realSn] = { sn: realSn, ip: ipStr, name: realSn, profile: '未知型號', state: '', clients: '0', cpu: '0', mem: '0' };
+        });
+
+        Object.keys(fgApName).forEach(k => { let realSn = extractSN(k.replace(/"/g, '')); if (normalizedAPs[realSn]) normalizedAPs[realSn].name = String(fgApName[k]).replace(/"/g, '').trim(); });
+        Object.keys(fgApProfile).forEach(k => { let realSn = extractSN(k.replace(/"/g, '')); if (normalizedAPs[realSn]) normalizedAPs[realSn].profile = String(fgApProfile[k]).replace(/"/g, '').trim(); });
+        Object.keys(fgApClients).forEach(k => { let realSn = extractSN(k.replace(/"/g, '')); if (normalizedAPs[realSn]) normalizedAPs[realSn].clients = String(fgApClients[k]).replace(/"/g, '').trim(); });
+        Object.keys(fgApState).forEach(k => { let realSn = extractSN(k.replace(/"/g, '')); if (normalizedAPs[realSn]) normalizedAPs[realSn].state = String(fgApState[k]).replace(/"/g, '').trim(); });
+        Object.keys(fgApCpu).forEach(k => { let realSn = extractSN(k.replace(/"/g, '')); if (normalizedAPs[realSn]) normalizedAPs[realSn].cpu = String(fgApCpu[k]).replace(/"/g, '').trim(); });
+        Object.keys(fgApMem).forEach(k => { let realSn = extractSN(k.replace(/"/g, '')); if (normalizedAPs[realSn]) normalizedAPs[realSn].mem = String(fgApMem[k]).replace(/"/g, '').trim(); });
+
+        let hasWLANController = Object.keys(normalizedAPs).length > 0;
+        let apTabBtnHtml = '';
+        let apTabContentHtml = '';
+        let brandRowHtml = ''; 
+
+        if (hasWLANController) {
+            let totalAPs = Object.keys(normalizedAPs).length;
+            let onlineAPs = 0; let offlineAPs = 0; let totalClients = 0; 
+            
+            Object.values(normalizedAPs).forEach(ap => {
+                if (ap.state === '2' || ap.state === '5' || (ap.ip && ap.ip !== '未知 IP')) onlineAPs++; else offlineAPs++;
+                totalClients += (parseInt(ap.clients) || 0);
+            });
+
+            brandRowHtml = `
+                <tr>
+                    <th style="white-space:nowrap;" class="text-secondary bg-black">廠牌 / 型號</th>
+                    <td><span class="text-warning">${nodeData.brand}</span> / ${nodeData.model || '無'}</td>
+                    <th style="white-space:nowrap;" class="text-secondary bg-black">管理 AP 數量</th>
+                    <td>
+                        <span class="text-info fw-bold" style="font-size: 1.15rem;">${totalAPs}</span> 台 
+                        <span class="text-white ms-2" style="font-size: 0.95rem; font-weight: 500;">
+                            ( 連線 <span class="text-success fw-bold">${onlineAPs}</span> / 
+                            未連線 <span class="text-danger fw-bold">${offlineAPs}</span> / 
+                            總連線人數 <span class="text-warning fw-bold" style="font-size: 1.15rem; letter-spacing: 0.5px;">${totalClients}</span> 人 )
+                        </span>
+                    </td>
+                </tr>
+            `;
+
+            apTabBtnHtml = `<li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" data-bs-toggle="tab" data-bs-target="#aplist" type="button" role="tab"><i class="bi bi-broadcast-pin me-1 text-success"></i>集中管理 AP 清單</button></li>`;
+            
+            let apRows = '';
+            let apArray = Object.values(normalizedAPs);
+            
+            apArray.sort((a, b) => {
+                let ipA = a.ip || '255.255.255.255'; let ipB = b.ip || '255.255.255.255';
+                let aParts = ipA.split('.').map(n => parseInt(n) || 0); let bParts = ipB.split('.').map(n => parseInt(n) || 0);
+                for(let i = 0; i < 4; i++) { if (aParts[i] !== bParts[i]) return aParts[i] - bParts[i]; } return 0;
+            });
+
+            apArray.forEach((ap, idx) => {
+                let model = ap.profile || '未知型號';
+                let ip = ap.ip || '未知 IP';
+                let name = ap.name || ap.sn;
+                let clients = ap.clients || '0';
+                if (isNaN(parseInt(clients))) clients = '0';
+                
+                let cpuNum = parseInt(ap.cpu) || 0;
+                let memNum = parseInt(ap.mem) || 0;
+                let cpuColor = cpuNum > 80 ? 'text-danger' : (cpuNum > 50 ? 'text-warning' : 'text-success');
+                let memColor = memNum > 80 ? 'text-danger' : (memNum > 50 ? 'text-warning' : 'text-success');
+                let perfHtml = `<span class="${cpuColor} fw-bold">${cpuNum}%</span> / <span class="${memColor} fw-bold">${memNum}%</span>`;
+
+                // 🌟 狀態文字精簡化：只留「連線」與「離線」
+                let stateHtml = '<span class="badge bg-secondary shadow-sm">離線</span>';
+                if (ap.state === '2' || ap.state === '5' || (ip !== '未知 IP' && !ap.state)) {
+                    stateHtml = '<span class="badge bg-success shadow-sm">連線</span>';
+                }
+                
+                let myClients = apToClientsMap[ap.sn] || [];
+                let clientSubRows = '';
+                if (myClients.length > 0) {
+                    myClients.forEach(c => {
+                        // 🌟 連線人資料改為表格內襯行，IP 與 MAC 靠左對齊 (text-start)
+                        clientSubRows += `
+                            <tr>
+                                <td class="font-monospace text-white text-start align-middle" style="padding: 6px;">${c.ip}</td>
+                                <td class="font-monospace text-start align-middle" style="padding: 6px;">${c.mac}</td>
+                                <td class="align-middle text-info" style="padding: 6px;">${c.ssid}</td>
+                                <td class="align-middle" style="padding: 6px;">CH ${c.ch}</td>
+                                <td class="align-middle" style="padding: 6px;"><span class="text-success">${c.tx}</span> / <span class="text-warning">${c.rx}</span></td>
+                                <td class="text-success fw-bold align-middle" style="padding: 6px;">${c.rssi}</td>
+                            </tr>`;
+                    });
+                }
+
+                // 🌟 AP 列的 S/N 與 韌體 強制縮小為 1rem，其餘保持 1.1rem
+                apRows += `
+                    <tr style="cursor: pointer;" onclick="const el = document.getElementById('sta-detail-${idx}'); el.classList.toggle('d-none');" class="hover-row">
+                        <td class="text-info fw-bold align-middle" style="padding: 1px 8px !important; font-size: 1rem;">${ap.sn}</td>
+                        <td class="text-success fw-bold align-middle" style="padding: 1px 8px !important;">${name}</td>
+                        <td class="font-monospace align-middle" style="padding: 1px 8px !important;">${ip}</td>
+                        <td class="text-warning align-middle" style="padding: 1px 8px !important; font-size: 1rem;">${model}</td>
+                        <td class="font-monospace align-middle text-center" style="padding: 1px 8px !important;">${perfHtml}</td>
+                        <td class="text-center align-middle" style="padding: 1px 8px !important;">${stateHtml}</td>
+                        <td class="text-center fw-bold text-success align-middle" style="padding: 1px 8px !important; font-size: 1.2rem;">
+                            ${clients} <span style="font-size:0.8rem; color:#888; font-weight:normal;">人</span>
+                            <i class="bi bi-chevron-down ms-1 text-muted" style="font-size:0.8rem;"></i>
+                        </td>
+                    </tr>
+                    <tr id="sta-detail-${idx}" class="d-none" style="background-color: rgba(0, 0, 0, 0.45);">
+                        <td colspan="7" class="p-3">
+                            <div class="border border-secondary rounded p-0" style="background-color: #0b0e14; overflow: hidden;">
+                                ${myClients.length > 0 ? `
+                                <div class="custom-scroll" style="max-height: 200px; overflow-y: auto;">
+                                <table class="table table-dark table-sm table-borderless text-white-50 mb-0 text-center" style="font-size: 0.95rem; --bs-table-bg: transparent;">
+                                    <thead class="text-info" style="position: sticky; top: 0; z-index: 5; background-color: #0b0e14; box-shadow: 0 1px 0 #6c757d;">
+                                        <tr>
+                                            <th style="width: 15%; padding: 8px 6px;" class="text-start">IP 位址</th>
+                                            <th style="width: 20%; padding: 8px 6px;" class="text-start">MAC 位址</th>
+                                            <th style="width: 20%; padding: 8px 6px;">SSID</th>
+                                            <th style="width: 10%; padding: 8px 6px;">頻道</th>
+                                            <th style="width: 20%; padding: 8px 6px;">Tx / Rx</th>
+                                            <th style="width: 15%; padding: 8px 6px;">訊號 (dBm)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${clientSubRows}
+                                    </tbody>
+                                </table>
+                                </div>` 
+                                : `<div class="text-center text-muted py-3" style="font-size: 1.0rem;"><i class="bi bi-info-circle me-1"></i>此 AP 目前無終端連線數據</div>`}
+                            </div>
+                        </td>
+                    </tr>`;
+            });
+            
+            if (!apRows) apRows = '<tr><td colspan="7" class="text-center text-white-50 py-3">查無已註冊的 AP 資料</td></tr>';
+
+            // 🌟 標頭「CPU / 記憶體」改為「CPU / RAM」
+            apTabContentHtml = `
+                <div class="tab-pane fade" id="aplist" role="tabpanel">
+                    <div class="table-responsive border border-secondary rounded custom-scroll" style="height: 35vh; overflow-y: auto;">
+                        <table class="table table-dark table-striped table-hover mb-0" style="font-size: 1.1rem;">
+                            <thead class="bg-black text-secondary" style="position: sticky; top: 0; z-index: 5;">
+                                <tr>
+                                    <th style="width: 20%; padding: 4px 8px !important;"><i class="bi bi-upc-scan me-1"></i>AP 序號 (S/N)</th>
+                                    <th style="width: 16%; padding: 4px 8px !important;"><i class="bi bi-fonts me-1"></i>AP 名稱</th>
+                                    <th style="width: 14%; padding: 4px 8px !important;"><i class="bi bi-hdd-network me-1"></i>管理 IP 位址</th>
+                                    <th style="width: 18%; padding: 4px 8px !important;"><i class="bi bi-tag me-1"></i>設備型號 / 韌體</th>
+                                    <th style="width: 14%; padding: 4px 8px !important;" class="text-center"><i class="bi bi-cpu-fill me-1"></i>CPU / RAM</th>
+                                    <th style="width: 10%; padding: 4px 8px !important;" class="text-center"><i class="bi bi-activity me-1"></i>狀態</th>
+                                    <th style="width: 8%; padding: 4px 8px !important;" class="text-center"><i class="bi bi-people-fill me-1"></i>人數</th>
+                                </tr>
+                            </thead>
+                            <tbody>${apRows}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+        } else {
+            brandRowHtml = `<tr><th style="white-space:nowrap;" class="text-secondary bg-black">廠牌 / 型號</th><td colspan="3"><span class="text-warning">${nodeData.brand}</span> / ${nodeData.model || '無'}</td></tr>`;
+        }
+		
+		// 👇 🌟 新增：Palo Alto 雙腦儀表板動態計算與 HTML 組合
+        let cpuHtmlRow = '';
+        let sysBrandStr = String(nodeData.brand || '').toUpperCase();
+        if (sysBrandStr.includes("PALO") || sysBrandStr.includes("PAN")) {
+            // 重新解包：我們現在知道 57 其實是 Session，59 才是真 CPU
+            let sessionRaw = rawData[57] || {}; 
+            let stdCpuRaw  = rawData[59] || {}; 
+
+            // 1. 解析 CPU (Index 1 永遠是 MP，其餘皆為 DP)
+            let mpVal = parseInt(stdCpuRaw['1']) || 0;
+            let dpSum = 0; let dpCount = 0;
+            
+            Object.keys(stdCpuRaw).forEach(k => {
+                let id = parseInt(k);
+                if (id > 1) {
+                    dpSum += parseInt(stdCpuRaw[k]) || 0;
+                    dpCount++;
+                }
+            });
+            let dpAvg = dpCount > 0 ? Math.round(dpSum / dpCount) : 0;
+            
+            // 2. 解析 Session 負載比例
+            let sessionUtil = parseInt(sessionRaw['0']) || 0;
+
+            cpuHtmlRow = `<tr><th style="white-space:nowrap;" class="text-secondary bg-black">系統負載</th><td colspan="3">🧠 CPU: MP <span class="text-warning fw-bold">${mpVal}%</span> / DP <span class="text-success fw-bold">${dpAvg}%</span><span class="ms-3 text-white-50 fw-bold" style="font-size:0.8rem;">| 🌐 活躍連線數: <span class="text-info">${sessionUtil}</span></span></td></tr>`;
+        }
+
         let ifNames = rawData[4] || {};
+        if (Object.keys(ifNames).length === 0) ifNames = rawData[8] || {}; // 🌟 降級防線
         let aliasData = rawData[9] || {};
         let fdbData = rawData[10] || {};
         let bpToIfIndex = rawData[11] || {};
@@ -1323,20 +1882,22 @@ function bindRightClickEvent() {
                             <td style="width:35%;">${statusBadge}</td>
                         </tr>
                         <tr>
-                            <th style="white-space:nowrap;" class="text-secondary bg-black">設備名稱</th>
-                            <td>${nodeData.sysName || '無'}</td>
-                            <th style="white-space:nowrap;" class="text-secondary bg-black">運行時間</th>
-                            <td>${uptimeBadge}</td>
-                        </tr>
-                        <tr><th style="white-space:nowrap;" class="text-secondary bg-black">廠牌 / 型號</th><td colspan="3"><span class="text-warning">${nodeData.brand}</span> / ${nodeData.model || '無'}</td></tr>
-                        <tr><th style="white-space:nowrap;" class="text-secondary bg-black">系統描述</th><td colspan="3" class="text-success" style="font-size: 0.8rem; font-family: Consolas, monospace; white-wrap: pre-wrap; word-break: break-all;">${sysDescrText}</td></tr>
+							<th style="white-space:nowrap;" class="text-secondary bg-black">設備名稱</th>
+							<td>${nodeData.sysName || '無'}</td>
+							<th style="white-space:nowrap;" class="text-secondary bg-black">運行時間</th>
+							<td>${uptimeBadge}</td>
+						</tr>
+						${brandRowHtml}
+						${cpuHtmlRow}
+						<tr><th style="white-space:nowrap;" class="text-secondary bg-black">系統描述</th><td colspan="3" class="text-success" style="font-size: 0.8rem; font-family: Consolas, monospace; white-wrap: pre-wrap; word-break: break-all;">${sysDescrText}</td></tr>
                     </tbody>
                 </table>
             </div>
             
             <ul class="nav nav-tabs border-secondary mb-3" id="snmpTabs" role="tablist">
               <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn active" data-bs-toggle="tab" data-bs-target="#panel" type="button" role="tab"><i class="bi bi-hdd-rack me-1"></i>交換器實體面板</button></li>
-              <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" data-bs-toggle="tab" data-bs-target="#portalias" type="button" role="tab"><i class="bi bi-card-text me-1"></i>連接埠說明 (Alias)</button></li>
+              ${apTabBtnHtml}
+			  <li class="nav-item" role="presentation"><button class="nav-link snmp-tab-btn" data-bs-toggle="tab" data-bs-target="#portalias" type="button" role="tab"><i class="bi bi-card-text me-1"></i>連接埠說明 (Alias)</button></li>
 			  
               <li class="nav-item" role="presentation">
                   <button class="nav-link snmp-tab-btn" id="config-tab" data-bs-toggle="tab" data-bs-target="#config-panel" type="button" role="tab" onclick="loadDeviceConfig('${nodeData.ip}')">
@@ -1351,8 +1912,8 @@ function bindRightClickEvent() {
             </ul>
             
             <div class="tab-content" id="snmpTabsContent">
-              <div class="tab-pane fade show active" id="panel" role="tabpanel">${panelViewHtml ? panelViewHtml : '<div class="alert alert-dark text-center mt-4 text-white-50"><i class="bi bi-info-circle me-2"></i>此設備無實體連接埠資料，無法繪製面板。</div>'}</div>
-              
+              <div class="tab-pane fade show active" id="panel" role="tabpanel">${panelViewHtml ? panelViewHtml : '<div class="text-center mt-4 p-4 rounded border border-secondary text-white-50" style="background-color: #1a202c;"><i class="bi bi-info-circle fs-4 d-block mb-2 opacity-75"></i>此設備無實體連接埠資料，無法繪製面板。</div>'}</div>
+              ${apTabContentHtml}
               <div class="tab-pane fade" id="portalias" role="tabpanel">
                 <div class="table-responsive border border-secondary rounded custom-scroll" style="height: 35vh; overflow-y: auto;">
                     <table class="table table-dark table-striped mb-0 dense-table">
@@ -1577,5 +2138,504 @@ function downloadCurrentConfig(ip) {
     } else {
         alert("無法取得目前的設備 IP！");
     }
+}
+
+</script>
+
+<div class="modal fade" id="portManageModal" tabindex="-1" aria-hidden="true" style="z-index: 1070;">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content bg-dark text-white shadow-lg border-secondary">
+            <div class="modal-header border-secondary py-2" style="background-color: #1a202c;">
+                <h6 class="modal-title text-info fw-bold" id="portManageTitle"><i class="bi bi-gear-fill me-2"></i>標註網孔設定</h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body p-3">
+                <input type="hidden" id="pm_ip">
+                <input type="hidden" id="pm_portIdx">
+                <input type="hidden" id="pm_portName">
+                
+                <div class="row g-2 mb-3">
+                    <div class="col-sm-6">
+                        <div class="p-3 border border-secondary rounded h-100" style="background-color: rgba(13, 202, 240, 0.05);">
+                            <label class="form-label text-info fw-bold mb-1"><i class="bi bi-diagram-3-fill me-1"></i>1. 中繼骨幹 (Uplink)</label>
+                            <div class="text-white-50 small mb-2">強制標註為 Uplink，系統不隨意清除快取。</div>
+                            <div class="form-check form-switch mt-3">
+                                <input class="form-check-input" type="checkbox" id="pm_isUplink" style="transform: scale(1.2); cursor:pointer;">
+                                <label class="form-check-label ms-2 text-white fw-bold" for="pm_isUplink">設為 Uplink</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6">
+                        <div class="p-3 border border-secondary rounded h-100" style="background-color: rgba(220, 53, 69, 0.05);">
+                            <label class="form-label text-danger fw-bold mb-1"><i class="bi bi-shield-lock-fill me-1"></i>2. 管理線路 (MGMT)</label>
+                            <div class="text-white-50 small mb-2">標註為頻外管理線路，收合時不視為資料備援。</div>
+                            <div class="form-check form-switch mt-3">
+                                <input class="form-check-input" type="checkbox" id="pm_isMgmt" style="transform: scale(1.2); cursor:pointer;">
+                                <label class="form-check-label ms-2 text-white fw-bold" for="pm_isMgmt">設為 MGMT</label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mb-2 p-3 border border-secondary rounded" style="background-color: rgba(25, 135, 84, 0.05);">
+                    <label class="form-label text-success fw-bold mb-1"><i class="bi bi-pc-display me-1"></i>3. 記憶終端設備 (上限 6 組)</label>
+                    <div class="text-white-50 small mb-2">請勾選要鎖定記憶的設備。清單已自動整合「歷史設定」與「目前連線」的設備。</div>
+                    
+                    <div class="input-group input-group-sm mb-2 shadow-sm">
+                        <span class="input-group-text bg-dark border-secondary text-white-50" title="手動綁定設備"><i class="bi bi-plus-circle"></i></span>
+                        <input type="text" id="pm_manual_ip" class="form-control bg-black text-white border-secondary fw-bold text-info" placeholder="手動輸入 IP (例: 192.168.1.50)">
+                        <input type="text" id="pm_manual_mac" class="form-control bg-black text-white border-secondary font-monospace" placeholder="MAC (選填，無則留空)">
+                        <button class="btn btn-outline-success fw-bold px-3" type="button" onclick="addManualIpMac()">加入清單</button>
+                    </div>
+					
+                    <div class="table-responsive mt-2 custom-scroll" style="max-height: 250px; overflow-y: auto;">
+                        <table class="table table-dark table-hover table-sm border-secondary align-middle mb-0" style="font-size: 0.9rem;">
+                            <thead class="text-secondary" style="position: sticky; top: 0; background-color: #11151c;">
+                                <tr>
+                                    <th class="ps-2">IP 位址</th>
+                                    <th>MAC 位址</th>
+                                    <th class="text-center">狀態與操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pm_ipListBody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer border-secondary py-2 d-flex justify-content-between" style="background-color: #11151c;">
+                <button type="button" class="btn btn-sm btn-outline-danger fw-bold" onclick="clearPortAnnotation()" id="btn-pm-clear"><i class="bi bi-trash-fill me-1"></i>清除此孔所有註記</button>
+                <div>
+                    <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-sm btn-info text-dark fw-bold px-3" onclick="savePortAnnotation()" id="btn-pm-save"><i class="bi bi-save-fill me-1"></i>儲存設定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let portManageModalInstance = null; 
+
+function openPortManageModal(ip, portIdx, portName, liveIpsStr) {
+    document.getElementById('pm_ip').value = ip;
+    document.getElementById('pm_portIdx').value = portIdx;
+    document.getElementById('pm_portName').value = portName;
+    document.getElementById('portManageTitle').innerHTML = `<i class="bi bi-gear-fill me-2"></i>標註網孔設定 - ${portName} <span class="text-white-50 ms-2" style="font-size: 0.85rem;">(${ip})</span>`;
+    
+    let liveItems = [];
+    if (liveIpsStr) {
+        liveIpsStr.split(',').forEach(pair => {
+            if(pair.trim()) {
+                let parts = pair.split('|');
+                liveItems.push({ ip: parts[0] || '', mac: parts[1] || '' });
+            }
+        });
+    }
+
+    fetch(`/api/device/port/manage?ip=${ip}&port_idx=${portIdx}`)
+    .then(r => r.json())
+    .then(res => {
+        if (res.success) {
+            // 💡 恢復 Uplink 與 MGMT 開關讀取
+            document.getElementById('pm_isUplink').checked = res.is_manual_uplink || false;
+            document.getElementById('pm_isMgmt').checked = res.is_manual_mgmt || false; // 🌟 讀取 MGMT
+
+            let savedItems = [];
+            if (res.memorized_ips) {
+                res.memorized_ips.split(',').forEach(pair => {
+                    if(pair.trim()) {
+                        let parts = pair.split('|');
+                        savedItems.push({ ip: parts[0] || '', mac: parts[1] || '', isSaved: true });
+                    }
+                });
+            }
+
+            let allItemsMap = {};
+            savedItems.forEach(item => { allItemsMap[item.ip] = { mac: item.mac, checked: true, isHistory: true }; });
+            
+            // 🌟 核心修正：將「實時資料 (liveItems)」與「歷史資料」完美整合
+            liveItems.forEach(item => { 
+                if (!allItemsMap[item.ip]) { 
+                    // 如果是完全新的設備，直接加入
+                    allItemsMap[item.ip] = { mac: item.mac, checked: false, isHistory: false }; 
+                } else {
+                    // 🌟 如果歷史記憶裡寫著「未知 MAC」，但實時資料 (包含我們剛 Ping 完覆寫傳進來的) 卻有真正的 MAC，
+                    // 則強制用真實 MAC 覆蓋掉資料庫裡的未知 MAC，確保畫面永遠呈現最正確的資料！
+                    if ((allItemsMap[item.ip].mac === '未知 MAC' || !allItemsMap[item.ip].mac) && item.mac && item.mac !== '未知 MAC') {
+                        allItemsMap[item.ip].mac = item.mac;
+                    }
+                }
+            });
+
+            let tbody = document.getElementById('pm_ipListBody');
+            tbody.innerHTML = '';
+            
+            let keys = Object.keys(allItemsMap);
+            if(keys.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="3" class="text-center text-white-50 py-4">此網孔目前尚無歷史記憶或實時連線設備。</td></tr>`;
+            } else {
+                keys.forEach((k, idx) => {
+                    let obj = allItemsMap[k];
+                    let chkId = `pm_chk_${idx}`;
+                    let historyBadge = obj.isHistory ? `<span class="badge bg-secondary ms-2" style="font-size: 0.7rem;">歷史記憶</span>` : '';
+                    
+                    // 🌟 核心升級：加入 d-flex 完美排版，並補上紅色垃圾桶與黃色 Ping 按鈕
+                    let safeIpForId = k.replace(/\./g, '_');
+                    tbody.innerHTML += `
+                        <tr>
+                            <td class="text-info fw-bold ps-2 align-middle">${k} ${historyBadge}</td>
+                            <td class="text-white-50 font-monospace align-middle" id="mac_display_${safeIpForId}">${obj.mac}</td>
+                            <td class="text-center align-middle">
+                                <div class="d-flex justify-content-center align-items-center gap-2 m-0">
+                                    <div class="form-check form-switch m-0" title="記憶開關">
+                                        <input class="form-check-input pm-ip-checkbox" type="checkbox" id="${chkId}" data-ip="${k}" data-mac="${obj.mac}" ${obj.checked ? 'checked' : ''} onchange="checkMaxLimits(this)" style="cursor:pointer; transform: scale(1.2);">
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 shadow-sm" onclick="fetchMacWithPing(this, '${k}', '${chkId}')" title="用本機伺服器取得 ARP MAC">
+                                        <i class="bi bi-activity"></i> Ping
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 shadow-sm" onclick="this.closest('tr').remove()" title="將此 IP 從記憶清單中移除">
+                                        <i class="bi bi-trash-fill"></i>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                });
+            }
+            
+            let modalEl = document.getElementById('portManageModal');
+            if (!portManageModalInstance) portManageModalInstance = new bootstrap.Modal(modalEl);
+            portManageModalInstance.show();
+        } else {
+            if(typeof window.showToast === 'function') window.showToast(res.message || "無法讀取網孔歷史設定", "danger");
+        }
+    })
+    .catch(err => {
+        console.error("API 錯誤:", err);
+    });
+}
+
+function checkMaxLimits(checkbox) {
+    let checkedBoxes = document.querySelectorAll('.pm-ip-checkbox:checked');
+    if (checkedBoxes.length > 6) {
+        if(typeof window.showToast === 'function') window.showToast("⚠️ 一個網孔最多只能記憶 6 組終端設備！", "warning");
+        checkbox.checked = false;
+    }
+}
+
+// 🌟 透過本機伺服器 Ping 並取得 ARP 的 MAC 位址
+function fetchMacWithPing(btn, ip, chkId) {
+    let originalHtml = btn.innerHTML;
+    // 點擊後按鈕變成轉圈圈讀取狀態
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    btn.classList.add('disabled');
+    
+    fetch(`/api/ping_mac/${ip}`)
+    .then(r => r.json())
+    .then(res => {
+        if (res.success && res.mac) {
+            let safeIp = ip.replace(/\./g, '_');
+            // 1. 將畫面上顯示的「未知 MAC」抽換成真實 MAC
+            document.getElementById(`mac_display_${safeIp}`).innerText = res.mac;
+            // 2. 將 MAC 寫入 checkbox 屬性，確保「儲存設定」時能正確寫入資料庫
+            document.getElementById(chkId).setAttribute('data-mac', res.mac);
+            if(typeof window.showToast === 'function') window.showToast(`✅ 成功取得實體 MAC: ${res.mac}`, "success");
+        } else {
+            if(typeof window.showToast === 'function') window.showToast(`❌ ${res.message}`, "warning");
+        }
+    })
+    .catch(err => {
+        if(typeof window.showToast === 'function') window.showToast(`❌ 網路錯誤，無法與伺服器連線`, "danger");
+    })
+    .finally(() => {
+        // 恢復按鈕原本的樣貌
+        btn.innerHTML = originalHtml;
+        btn.classList.remove('disabled');
+    });
+}
+
+// ➕ 手動新增 IP 與 MAC 至清單 (含智慧格式校正)
+function addManualIpMac() {
+    let ipInput = document.getElementById('pm_manual_ip');
+    let macInput = document.getElementById('pm_manual_mac');
+    let ip = ipInput.value.trim();
+    let macRaw = macInput.value.trim();
+    let mac = '未知 MAC (手動)';
+
+    // 🌟 智慧 MAC 校正引擎：容忍 "-" 並自動轉為標準 ":" 格式
+    if (macRaw) {
+        // 1. 先全部轉大寫，並把 Windows 習慣的 "-" 統一轉成 ":"
+        mac = macRaw.toUpperCase().replace(/-/g, ':');
+        
+        // 2. 如果管理員很懶，直接複製貼上連續 12 碼 (如 E454E863A600)，自動幫他切分補上 ":"
+        let cleanMac = mac.replace(/[^0-9A-F]/g, '');
+        if (cleanMac.length === 12) {
+            mac = cleanMac.match(/.{1,2}/g).join(':');
+        }
+    }
+
+    if (!ip) {
+        if(typeof window.showToast === 'function') window.showToast("⚠️ 請輸入要綁定的 IP 位址！", "warning");
+        return;
+    }
+
+    // 基礎 IPv4 格式驗證
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+        if(typeof window.showToast === 'function') window.showToast("⚠️ IP 格式不正確！", "danger");
+        return;
+    }
+
+    // 檢查是否已達 6 組上限
+    let checkedBoxes = document.querySelectorAll('.pm-ip-checkbox:checked');
+    if (checkedBoxes.length >= 6) {
+        if(typeof window.showToast === 'function') window.showToast("⚠️ 警告：一個網孔最多只能記憶 6 組終端設備！", "warning");
+        return;
+    }
+
+    // 檢查表格中是否已經有這個 IP，避免重複加入
+    let exists = false;
+    document.querySelectorAll('.pm-ip-checkbox').forEach(chk => {
+        if (chk.getAttribute('data-ip') === ip) exists = true;
+    });
+    
+    if (exists) {
+        if(typeof window.showToast === 'function') window.showToast("⚠️ 此 IP 已經在下方清單中了！", "warning");
+        return;
+    }
+
+    let chkId = `pm_chk_manual_${Date.now()}`;
+    
+    let safeIpForId = ip.replace(/\./g, '_');
+    // 建立新的一列 (自帶「手動加入」藍色標籤、開啟狀態、Ping 取號以及垃圾桶按鈕)
+    let newRow = `
+        <tr class="table-primary" style="--bs-table-bg: rgba(13, 110, 253, 0.1);">
+            <td class="text-info fw-bold ps-2 align-middle">${ip} <span class="badge bg-primary ms-2" style="font-size: 0.7rem;">手動加入</span></td>
+            <td class="text-white-50 font-monospace align-middle" id="mac_display_${safeIpForId}">${mac}</td>
+            <td class="text-center align-middle">
+                <div class="d-flex justify-content-center align-items-center gap-2 m-0">
+                    <div class="form-check form-switch m-0" title="記憶開關">
+                        <input class="form-check-input pm-ip-checkbox" type="checkbox" id="${chkId}" data-ip="${ip}" data-mac="${mac}" checked onchange="checkMaxLimits(this)" style="cursor:pointer; transform: scale(1.2);">
+                    </div>
+                    <button type="button" class="btn btn-sm btn-outline-warning py-0 px-2 shadow-sm" onclick="fetchMacWithPing(this, '${ip}', '${chkId}')" title="用本機伺服器取得 ARP MAC">
+                        <i class="bi bi-activity"></i> Ping
+                    </button>
+                    <button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 shadow-sm" onclick="this.closest('tr').remove()" title="將此 IP 從記憶清單中移除">
+                        <i class="bi bi-trash-fill"></i>
+                    </button>
+                </div>
+            </td>
+        </tr>
+    `;
+
+    let tbody = document.getElementById('pm_ipListBody');
+    
+    // 如果原本顯示「此網孔目前尚無歷史記憶」，先把它清空
+    if (tbody.innerHTML.includes("此網孔目前尚無歷史記憶")) {
+        tbody.innerHTML = '';
+    }
+    
+    // 將新資料插在表格的最上方
+    tbody.insertAdjacentHTML('afterbegin', newRow);
+    
+    // 清空輸入框方便下次輸入
+    ipInput.value = '';
+    macInput.value = '';
+    
+    if(typeof window.showToast === 'function') window.showToast("✅ 已手動加入清單，請記得點擊右下角「儲存設定」！", "success");
+}
+
+function savePortAnnotation() {
+    let btn = document.getElementById('btn-pm-save');
+    let oriHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>儲存中...';
+    btn.disabled = true;
+
+    let ip = document.getElementById('pm_ip').value;
+    let portIdx = document.getElementById('pm_portIdx').value;
+    let portName = document.getElementById('pm_portName').value;
+    let isUplink = document.getElementById('pm_isUplink').checked; 
+    let isMgmt = document.getElementById('pm_isMgmt').checked; // 🌟 抓取 MGMT 狀態
+    
+    let checkedBoxes = document.querySelectorAll('.pm-ip-checkbox:checked');
+    let ipsArr = [];
+    checkedBoxes.forEach(chk => { ipsArr.push(`${chk.getAttribute('data-ip')}|${chk.getAttribute('data-mac')}`); });
+    let ipsStr = ipsArr.join(',');
+
+    fetch('/api/device/port/manage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // 🌟 把 is_mgmt 塞進 payload 送給後端
+        body: JSON.stringify({ action: 'save', ip: ip, port_idx: portIdx, port_name: portName, is_uplink: isUplink, is_mgmt: isMgmt, ips: ipsStr }) 
+    })
+    .then(r => r.json())
+    .then(res => {
+        btn.innerHTML = oriHtml; btn.disabled = false;
+        if (res.success) {
+            if(typeof window.showToast === 'function') window.showToast(res.message, "success");
+            if(portManageModalInstance) portManageModalInstance.hide();
+            
+            // 🌟 終極殺招：因為 loadPortSettingsCache 是非同步的，我們必須「等」它把最新鮮的資料庫抓完，
+            // 再執行重繪 (updateRightClickModalContent)，否則重繪時會吃到舊快取，導致剛存好的 MAC 消失！
+            if(typeof window.loadPortSettingsCache === 'function') {
+                Promise.resolve(window.loadPortSettingsCache()).then(() => {
+                    if(typeof window.updateRightClickModalContent === 'function') window.updateRightClickModalContent(ip);
+                    if(typeof updateNodeVisibility === 'function') updateNodeVisibility(); // 立即套用新的收合規則
+                });
+            } else {
+                if(typeof window.updateRightClickModalContent === 'function') window.updateRightClickModalContent(ip);
+                if(typeof updateNodeVisibility === 'function') updateNodeVisibility();
+            }
+        } else {
+            if(typeof window.showToast === 'function') window.showToast(res.message, "danger");
+        }
+    })
+    .catch(err => {
+        btn.innerHTML = oriHtml; btn.disabled = false;
+        if(typeof window.showToast === 'function') window.showToast("網路連線異常，儲存失敗！", "danger");
+    });
+}
+
+function clearPortAnnotation() {
+    if(!confirm("⚠️ 確定要清除這個網孔的所有註記 (包含 IP 記憶與 Uplink) 嗎？\n此動作無法復原！")) return;
+    
+    let btn = document.getElementById('btn-pm-clear');
+    let oriHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>清除中...';
+    btn.disabled = true;
+
+    let ip = document.getElementById('pm_ip').value;
+    let portIdx = document.getElementById('pm_portIdx').value;
+    let portName = document.getElementById('pm_portName').value;
+
+    fetch('/api/device/port/manage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'clear', ip: ip, port_idx: portIdx, port_name: portName })
+    })
+    .then(r => r.json())
+    .then(res => {
+        btn.innerHTML = oriHtml; btn.disabled = false;
+        if (res.success) {
+            if(typeof window.showToast === 'function') window.showToast(res.message, "success");
+            if(portManageModalInstance) portManageModalInstance.hide();
+            if(typeof window.updateRightClickModalContent === 'function') window.updateRightClickModalContent(ip);
+        } else {
+            if(typeof window.showToast === 'function') window.showToast(res.message, "danger");
+        }
+    })
+    .catch(err => {
+        btn.innerHTML = oriHtml; btn.disabled = false;
+        if(typeof window.showToast === 'function') window.showToast("網路連線異常，清除失敗！", "danger");
+    });
+}
+
+// ==========================================
+// 🌟 獨立掃描與原地重畫引擎 (拔除全網掃描)
+// ==========================================
+function confirmRemoveUplink(deviceIp, portName, peerIp, peerName) {
+    let ipModal = bootstrap.Modal.getInstance(document.getElementById('portIpModal'));
+    if (ipModal) ipModal.hide();
+
+    let confirmModalEl = document.getElementById('removeUplinkModal');
+    if (!confirmModalEl) {
+        const modalHtml = `
+        <div class="modal fade" id="removeUplinkModal" tabindex="-1" aria-hidden="true" style="z-index: 1080;">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content bg-dark text-white shadow-lg border-danger">
+                    <div class="modal-header border-secondary" style="background-color: #2c0b0e;">
+                        <h6 class="modal-title text-danger fw-bold"><i class="bi bi-scissors me-2"></i>解除實體對接連線</h6>
+                        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body p-4 text-center">
+                        <div class="d-flex justify-content-center align-items-center mb-3">
+                            <span class="badge bg-secondary fs-6" id="ru_deviceIp"></span>
+                            <i class="bi bi-link text-danger mx-3" style="font-size: 2rem;"></i>
+                            <span class="badge bg-primary fs-6" id="ru_peerIp"></span>
+                        </div>
+                        <h6 class="mb-3 lh-base">確定要解除此網孔與 <span class="text-info fw-bold" id="ru_peerName"></span> 的連線嗎？</h6>
+                        <div class="text-white-50 small text-start bg-black p-2 rounded border border-secondary">
+                            <i class="bi bi-info-circle me-1"></i> <b>系統提示：</b>解除後，雙方交換器的配對紀錄將同步移除。若是 LLDP 自動發現的鏈路，將於下次掃描時自動恢復。
+                        </div>
+                        <input type="hidden" id="ru_portNameVal">
+                    </div>
+                    <div class="modal-footer border-secondary justify-content-center" style="background-color: #11151c;">
+                        <button type="button" class="btn btn-secondary px-4 fw-bold" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-danger fw-bold px-4" id="btn-confirm-ru" onclick="executeRemoveUplink()"><i class="bi bi-trash-fill me-1"></i>確定解除</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        confirmModalEl = document.getElementById('removeUplinkModal');
+    }
+
+    document.getElementById('ru_deviceIp').innerText = deviceIp;
+    document.getElementById('ru_peerIp').innerText = peerIp;
+    document.getElementById('ru_peerName').innerText = peerName;
+    document.getElementById('ru_portNameVal').value = portName;
+
+    new bootstrap.Modal(confirmModalEl).show();
+}
+
+function executeRemoveUplink() {
+    let btn = document.getElementById('btn-confirm-ru');
+    let oriHtml = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>解除中...';
+    btn.disabled = true;
+
+    let ipA = document.getElementById('ru_deviceIp').innerText;
+    let portA = document.getElementById('ru_portNameVal').value;
+    let ipB = document.getElementById('ru_peerIp').innerText;
+
+    fetch('/api/manual_links/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip_a: ipA, port_a: portA, ip_b: ipB })
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.success) {
+            bootstrap.Modal.getInstance(document.getElementById('removeUplinkModal')).hide();
+            if(typeof window.showToast === 'function') window.showToast(res.message, "success");
+            
+            // 💡 核心修復：使用 Promise.all 並行執行兩台單機掃描，完全拋棄 fetchSnmpData()
+            if(typeof window.showToast === 'function') window.showToast(`🔄 正在重新演算 ${ipA} 與 ${ipB} 的拓樸關聯...`, "info");
+            
+            Promise.all([
+                fetch(`/api/scan_node/${ipA}`, { method: 'POST' }),
+                fetch(`/api/scan_node/${ipB}`, { method: 'POST' })
+            ])
+            .then(() => {
+                // 掃描完畢，從後端拉最新 edges
+                return fetch('/api/topology/fast?t=' + Date.now()).then(r => r.json());
+            })
+            .then(fastData => {
+                if (!fastData.empty) {
+                    cachedTopologyData.edges = fastData.edges;
+                    cachedTopologyData.nodes = fastData.nodes;
+                    if (typeof renderGraph === 'function') renderGraph(false);
+                    
+                    // 💡 瞬間原地重繪實體面板！
+                    if (typeof window.updateRightClickModalContent === 'function') {
+                        window.updateRightClickModalContent(ipA);
+                    }
+                    if(typeof window.showToast === 'function') window.showToast("✅ 對接狀態已徹底斷開，面板已原地更新！", "success");
+                }
+            })
+            .catch(err => console.error("獨立掃描失敗:", err))
+            .finally(() => {
+                btn.innerHTML = oriHtml; btn.disabled = false;
+            });
+            
+        } else {
+            if(typeof window.showToast === 'function') window.showToast("解除失敗: " + res.message, "danger");
+            btn.innerHTML = oriHtml; btn.disabled = false;
+        }
+    })
+    .catch(err => {
+        btn.innerHTML = oriHtml; btn.disabled = false;
+        if(typeof window.showToast === 'function') window.showToast("網路連線異常", "danger");
+    });
 }
 </script>

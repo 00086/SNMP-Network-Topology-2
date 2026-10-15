@@ -13,6 +13,17 @@
         flex-direction: column; 
     }
     
+    /* 🌟 如果是 iframe，調整卡片高度 100% 滿版，沒有 header 扣除 */
+    {% if request.args.get('iframe') == '1' %}
+    #topology-card {
+        height: 100vh !important;
+        border: none !important;
+        border-radius: 0 !important;
+        padding: 0 !important;
+        background-color: transparent !important;
+    }
+    {% endif %}
+
     /* 💡 2. 左側拓樸圖：自動填滿卡片剩下的垂直空間 */
     #mynetwork { 
         width: 100%; 
@@ -25,6 +36,15 @@
         margin-top: 10px;
     }
     
+    /* 🌟 如果是 iframe，洗掉所有邊界與圓角 */
+    {% if request.args.get('iframe') == '1' %}
+    #mynetwork {
+        margin-top: 0 !important;
+        border-radius: 0 !important;
+        border: none !important;
+    }
+    {% endif %}
+
     /* 💡 3. 右側屬性區：顏色修正為與系統一致的深灰主題 */
     .info-box { 
         background-color: #2d3748 !important; 
@@ -137,7 +157,42 @@
     }
     .sfp-port .port-led { width: 10px; height: 4px; border-radius: 1px; position: absolute; top: 4px; z-index: 2; box-shadow: inset 0 1px 1px rgba(0,0,0,0.8); }
 
-    /* 共用燈號發光特效 */
+    /* 💡 QSFP 實體網孔 (較寬，代表 40G/100G 光纖) */
+    .qsfp-port {
+        width: 48px; height: 46px; 
+        background: linear-gradient(135deg, #e0e0e0 0%, #b8b8b8 50%, #888 100%);
+        border: 1px solid #444; border-radius: 2px;
+        display: flex; flex-direction: column; align-items: center; position: relative; box-shadow: inset 0 1px 2px rgba(255,255,255,0.9), 0 2px 4px rgba(0,0,0,0.6);
+    }
+    .qsfp-port::before {
+        content: ''; position: absolute; top: 10px; left: 6px; right: 6px; height: 16px;
+        background: #111; border: 1px solid #333; border-top: 2px solid #000; box-shadow: inset 0 2px 4px rgba(0,0,0,0.9);
+    }
+    .qsfp-port .port-label {
+        position: absolute; bottom: 2px; font-size: 0.75rem; font-weight: 900; color: #fff; 
+        background-color: rgba(0, 0, 0, 0.75); padding: 0 4px; border-radius: 3px;
+        font-family: Tahoma, sans-serif; z-index: 2; user-select: none;
+    }
+    .qsfp-port .port-led { width: 14px; height: 4px; border-radius: 1px; position: absolute; top: 4px; z-index: 2; box-shadow: inset 0 1px 1px rgba(0,0,0,0.8); }
+
+    /* 💡 Combo 實體網孔 (斜切雙色：左上黑底電口，右下金屬光纖) */
+    .combo-port {
+        width: 36px; height: 46px;
+        background: linear-gradient(135deg, #222 0%, #222 48%, #444 48%, #444 52%, #b8b8b8 52%, #888 100%);
+        border: 1px solid #111; border-radius: 3px;
+        display: flex; flex-direction: column; align-items: center; position: relative; box-shadow: inset 0 2px 4px rgba(0,0,0,0.8);
+    }
+    .combo-port::before {
+        content: ''; position: absolute; top: 12px; left: 6px; right: 6px; height: 16px;
+        background: #000; border-radius: 2px; box-shadow: inset 0 3px 5px rgba(0,0,0,1);
+    }
+    .combo-port .port-label {
+        position: absolute; bottom: 2px; font-size: 0.7rem; font-weight: bold; color: #fff;
+        background-color: rgba(0,0,0,0.75); padding: 0 3px; border-radius: 2px; font-family: Tahoma, sans-serif; z-index: 2; user-select: none;
+    }
+    .combo-port .port-led { width: 10px; height: 4px; border-radius: 1px; position: absolute; top: 4px; z-index: 2; box-shadow: inset 0 1px 1px rgba(0,0,0,0.8); }
+	
+	/* 共用燈號發光特效 */
     .led-down { background: #222; }
     .led-1g { background: #39ff14; box-shadow: 0 0 8px #39ff14, inset 0 1px 2px rgba(255,255,255,0.8); }
     .led-100m { background: #ff9900; box-shadow: 0 0 8px #ff9900, inset 0 1px 2px rgba(255,255,255,0.8); }
@@ -163,19 +218,40 @@
     .poe-bar-warn { background: linear-gradient(90deg, #ffc107, #fd7e14); }
     .poe-bar-danger { background: linear-gradient(90deg, #dc3545, #ff0000); animation: pulse-danger 1s infinite alternate; }
     @keyframes pulse-danger { from { opacity: 0.8; } to { opacity: 1; box-shadow: 0 0 8px red; } }
+	
+	/* 📍 拓樸圖地標閃爍動畫 */
+    @keyframes bounceFlash {
+        0%, 100% { transform: translateY(0) scale(1); opacity: 0.8; }
+        50% { transform: translateY(-15px) scale(1.3); opacity: 1; text-shadow: 0 0 15px rgba(255, 0, 0, 0.8); }
+    }
+    .map-marker-pin {
+        position: absolute;
+        pointer-events: none;
+        z-index: 9999;
+        font-size: 3rem;
+        animation: bounceFlash 0.5s infinite;
+    }
 </style>
 
 {% endblock %}
 
 {% block content %}
 <div class="row g-3">
-    <div class="col-lg-9">
+    <div class="col-lg-{% if request.args.get('iframe') == '1' %}12{% else %}9{% endif %}">
         <div class="card p-3" id="topology-card" style="transition: all 0.3s ease;">
+            
+            {% if request.args.get('iframe') != '1' %}
             <div class="d-flex flex-nowrap justify-content-between align-items-center mb-2 gap-1">
                 <h5 class="m-0 fw-bold text-secondary text-nowrap flex-shrink-0" id="topology-title" style="font-size: 1.1rem;"><i class="bi bi-globe2 me-1"></i>即時架構拓樸圖</h5>
                 
                 <div class="d-flex flex-nowrap align-items-center justify-content-end gap-1 flex-shrink-1">
-                    <button class="btn btn-sm btn-warning fw-bold shadow-sm px-2 text-nowrap" onclick="openGlobalSearch()" title="全網尋址"><i class="bi bi-search"></i></button>
+                    
+					<div class="input-group input-group-sm shadow-sm me-2" style="width: 160px;">
+                        <input type="text" class="form-control border-info bg-dark text-white" id="topo-search-ip" placeholder="找設備名稱/IP..." onkeypress="if(event.key==='Enter') findDeviceOnMap()">
+                        <button class="btn btn-info" type="button" onclick="findDeviceOnMap()" title="在拓樸圖上定位此設備"><i class="bi bi-geo-alt-fill text-dark"></i></button>
+                    </div>
+					
+					<button class="btn btn-sm btn-warning fw-bold shadow-sm px-2 text-nowrap" onclick="openGlobalSearch()" title="全網尋址"><i class="bi bi-search"></i></button>
 
                     <div class="btn-group btn-group-sm shadow-sm">
                         <button class="btn btn-success text-white dropdown-toggle px-2 text-nowrap" data-bs-toggle="dropdown" title="匯出"><i class="bi bi-download"></i></button>
@@ -189,13 +265,15 @@
                             <li><a class="dropdown-item text-info" href="#" onclick="exportPDF()"><i class="bi bi-file-earmark-pdf me-2"></i>產出 4K PDF 報表</a></li>
                         </ul>
                     </div>
-
+					
                     <div class="btn-group btn-group-sm shadow-sm">
                         <button class="btn btn-grid-on px-2" onclick="toggleGrid()" id="btn-grid" title="顯示/隱藏磁吸網格"><i class="bi bi-grid-3x3"></i></button>
                         <button class="btn btn-outline-secondary fw-bold px-2" onclick="alignNodes()" id="btn-align" title="強制依層級對齊Y軸"><i class="bi bi-distribute-vertical"></i></button>
                         <button class="btn btn-outline-secondary px-2" onclick="toggleDarkMode()" id="btn-theme" title="切換深/淺色模式"><i class="bi bi-moon-stars-fill"></i></button>
-                        <button class="btn btn-secondary text-white px-2" style="font-size: 0.75rem;" onclick="toggleShowIP()" id="btn-show-ip" title="顯示/隱藏IP">IP</button>
+                        <button class="btn btn-outline-secondary px-2" onclick="toggleCollapse()" id="btn-collapse" title="收合/展開 L4 以下終端設備"><i class="bi bi-arrows-collapse"></i></button>
+						<button class="btn btn-secondary text-white px-2" style="font-size: 0.75rem;" onclick="toggleShowIP()" id="btn-show-ip" title="顯示/隱藏IP">IP</button>
                         <button class="btn btn-secondary text-white px-2" style="font-size: 0.75rem;" onclick="toggleShowName()" id="btn-show-name" title="顯示/隱藏名稱">名稱</button>
+						<button class="btn btn-secondary text-white px-2" style="font-size: 0.75rem;" onclick="toggleShowMgmtLines()" id="btn-show-mgmt" title="顯示/隱藏手動標註的 MGMT 管理線路">MGMT</button>
                         <button class="btn btn-outline-secondary px-2" onclick="toggleShowLocation()" id="btn-show-location" title="顯示/隱藏位置"><i class="bi bi-geo-alt"></i></button>
                         <button class="btn btn-outline-secondary border-start px-2" onclick="toggleFlow()" id="btn-show-flow" title="動態資料流"><i class="bi bi-activity"></i></button>
                         <button class="btn btn-outline-secondary border-start px-2" onclick="toggleNodeTraffic()" id="btn-show-traffic-labels" title="於節點旁顯示即時總吞吐量"><i class="bi bi-speedometer2"></i></button>
@@ -244,9 +322,14 @@
                     </div>
                 </div>
             </div>
-            <div id="mynetwork" class="border" tabindex="0"></div>
+            {% endif %}
+
+            <div id="mynetwork" class="{% if request.args.get('iframe') != '1' %}border{% endif %}" tabindex="0"></div>
+            
         </div>
     </div>
+    
+    {% if request.args.get('iframe') != '1' %}
     <div class="col-lg-3">
         <div class="info-box shadow d-flex flex-column">
             <h5 class="fw-bold border-bottom pb-2 mb-2"><i class="bi bi-info-circle-fill me-2"></i>詳細屬性資訊</h5>
@@ -261,14 +344,18 @@
             <div class="mt-auto pt-2 border-top border-secondary text-center text-white-50" style="font-size:0.75rem;">核心引擎佈局：Vis.js Network</div>
         </div>
     </div>
+    {% endif %}
 </div>
 
+{% if request.args.get('iframe') != '1' %}
 <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1100" id="toastPlacement"></div>
 
 {% include 'topo_parts/modal_search.html' %}
 {% include 'topo_parts/modal_traffic.html' %}
 {% include 'topo_parts/event_right_click.html' %}
 {% include 'topo_parts/event_left_click.html' %}
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -276,9 +363,6 @@
 <script src="{{ url_for('static', filename='js/topology_ui.js') }}?v=1.3"></script>
 
 <script>
-    // 💡 因為所有全域變數與匯出邏輯都已順利封裝至 topology_engine.js 中
-    // 這裡只需要負責觸發初始化與掛載監聽器即可！
-    
     document.addEventListener("DOMContentLoaded", initApp);
     document.addEventListener("DOMContentLoaded", function() {
         let initTheme = isDarkMode ? TOPO_COLORS.dark : TOPO_COLORS.light;
@@ -290,10 +374,22 @@
         }
     });
     
-    // 🚀 啟動動態線條引擎
     if (typeof startDynamicEdges === 'function') {
         startDynamicEdges();
     }
-
+	
+	// 🌟 攔截誤導性的公版罐頭提示 (避免總部視角被前端腳本誤導)
+    if (window.location.search.includes('iframe=1')) {
+        const originalToast = window.showToast;
+        if(originalToast) {
+            window.showToast = function(msg, type, duration) {
+                if (msg.includes('資料庫目前為空') || msg.includes('設備管理')) {
+                    msg = '⚠️ 此分區尚未推播「拓樸藍圖 (Topology)」至總部！請先至該分區執行推送，總部才能建立設備節點。';
+                    type = 'warning';
+                }
+                originalToast(msg, type, duration);
+            };
+        }
+    }
 </script>
 {% endblock %}
