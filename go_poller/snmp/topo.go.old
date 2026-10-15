@@ -1,0 +1,693 @@
+package snmp
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"poller/database"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gosnmp/gosnmp"
+)
+
+type TopoEdge struct {
+	ID       string `json:"id"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Speed    int64  `json:"speed"`
+	FromPort string `json:"from_port"`
+	ToPort   string `json:"to_port"`
+}
+
+type TopoResult struct {
+	Nodes []map[string]interface{} `json:"nodes"`
+	Edges []TopoEdge               `json:"edges"`
+	Stats map[string]interface{}  `json:"stats"`
+}
+
+type DeviceTopoData struct {
+	Dev          database.Device
+	SysNames     map[string]string
+	PortDescs    map[string]string
+	PortIds      map[string]string
+	MgmtIPs      map[string]string
+	IfNames      map[string]string
+	IfHighSpeeds map[string]string
+	IfSpeeds     map[string]string
+	IfMacs       map[string]string
+}
+
+type MacPortRef struct {
+	NodeIP   string
+	PortName string
+}
+
+type ParsedNeighbor struct {
+	TargetNodeID  string
+	LocalPortName string
+	RemotePort    string
+	Speed         int64
+	TargetLvl     int
+}
+
+type LinkKey struct {
+	NodeA string
+	NodeB string
+}
+
+type SingleRawRec struct {
+	PortA string
+	PortB string
+	Speed int64
+}
+
+type ConnRecord struct {
+	DirectionFrom string
+	DirectionTo   string
+	RawRecords    []SingleRawRec
+}
+
+// ---------------------------------------------------------
+// 工具函式
+// ---------------------------------------------------------
+func cleanMAC(raw string) string {
+	re := regexp.MustCompile(`[^a-fA-F0-9]`)
+	cleaned := strings.ToLower(re.ReplaceAllString(raw, ""))
+	if len(cleaned) == 12 {
+		return cleaned
+	}
+	return ""
+}
+
+func cleanSysName(raw string) string {
+	s := strings.Trim(raw, `"`)
+	s = strings.TrimSpace(s)
+	if idx := strings.Index(s, "("); idx != -1 {
+		s = s[:idx]
+	}
+	s = strings.TrimSpace(s)
+	if net.ParseIP(s) == nil {
+		if idx := strings.Index(s, "."); idx != -1 {
+			s = s[:idx]
+		}
+	}
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+func isPureNumber(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func resolveToIP(input string, ipToDev map[string]database.Device, nameToIP map[string]string) string {
+	input = strings.TrimSpace(input)
+	if net.ParseIP(input) != nil {
+		if _, ok := ipToDev[input]; ok {
+			return input
+		}
+	}
+	cName := cleanSysName(input)
+	if ip, ok := nameToIP[cName]; ok {
+		return ip
+	}
+	for name, ip := range nameToIP {
+		if strings.Contains(name, cName) || strings.Contains(cName, name) {
+			return ip
+		}
+	}
+	return ""
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func mergePortsList(portList []string) []string {
+	var merged []string
+	reNonNum := regexp.MustCompile(`[^0-9/]`)
+	rePortFilter := regexp.MustCompile(`(?i)^(port|lag|lg|trk|bond|po)\s*-?\d+$`)
+
+	for _, p := range portList {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		found := false
+		n1 := reNonNum.ReplaceAllString(p, "")
+
+		for i, mp := range merged {
+			n2 := reNonNum.ReplaceAllString(mp, "")
+			if n1 != "" && n2 != "" && (n1 == n2 || (strings.Contains(n1, "/") && strings.HasSuffix(n1, "/"+n2)) || (strings.Contains(n2, "/") && strings.HasSuffix(n2, "/"+n1))) {
+				if len(p) > len(mp) || (strings.HasPrefix(strings.ToLower(p), "gigabit") && !strings.HasPrefix(strings.ToLower(mp), "gigabit")) {
+					merged[i] = p
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			merged = append(merged, p)
+		}
+	}
+
+	var filtered []string
+	for _, p := range merged {
+		if strings.Contains(p, "/") || !rePortFilter.MatchString(p) {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered
+}
+
+// ---------------------------------------------------------
+// 核心業務：含離線快速止損的極速拓樸算路引擎
+// ---------------------------------------------------------
+func DiscoverTopology() (*TopoResult, error) {
+	start := time.Now()
+	devices, err := database.GetActiveDevices()
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("🔍 [Go Topo Engine] 啟動極速拓樸算路引擎 (目標: %d 台)...", len(devices))
+
+	ipToDev := make(map[string]database.Device)
+	nameToIPMap := make(map[string]string)
+	devIPSet := make(map[string]bool)
+
+	for _, d := range devices {
+		ipToDev[d.IP] = d
+		devIPSet[d.IP] = true
+		cName := cleanSysName(d.Name)
+		if cName != "" {
+			nameToIPMap[cName] = d.IP
+		}
+	}
+
+	var wg sync.WaitGroup
+	dataChan := make(chan DeviceTopoData, len(devices))
+	sem := make(chan struct{}, 40) // 40 通道極速併發
+
+	for _, dev := range devices {
+		if dev.Level >= 5 {
+			continue
+		}
+
+		wg.Add(1)
+		go func(d database.Device) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			params := &gosnmp.GoSNMP{
+				Target:         d.IP,
+				Port:           161,
+				Community:      d.Community,
+				Version:        gosnmp.Version2c,
+				Timeout:        800 * time.Millisecond, // 🌟 800ms 快速回應，逾時立刻重試一次
+				Retries:        1,
+				MaxRepetitions: 15,
+			}
+			if d.SNMPVersion == "v1" {
+				params.Version = gosnmp.Version1
+			}
+			if err := params.Connect(); err != nil {
+				return
+			}
+			defer params.Conn.Close()
+
+			// 🌟 1. Fail-Fast 離線檢測：優先探測介面名稱與速度
+			ifNames := SmartWalk(params, "1.3.6.1.2.1.31.1.1.1.1", "")
+			ifSpeeds := SmartWalk(params, "1.3.6.1.2.1.2.2.1.5", "")
+
+			// 🌟 若設備離線或 SNMP 完全拒絕，立刻止損退出 (不浪費時間跑後續 6 次 Walk)
+			if len(ifNames) == 0 && len(ifSpeeds) == 0 {
+				return
+			}
+
+			// 老舊 D-Link v1 相容補全機制
+			if len(ifNames) == 0 {
+				fakeIfNames := make(map[string]string)
+				for idx := range ifSpeeds {
+					if isPureNumber(idx) {
+						fakeIfNames[idx] = "port" + idx
+					}
+				}
+				ifNames = fakeIfNames
+			}
+
+			// 🌟 2. 確定設備存活後，才發起其餘 LLDP 與 MAC 表採集
+			sysNames := SmartWalk(params, "1.0.8802.1.1.2.1.4.1.1.9", "")
+			portDescs := SmartWalk(params, "1.0.8802.1.1.2.1.4.1.1.7", "")
+			portIds := SmartWalk(params, "1.0.8802.1.1.2.1.4.1.1.6", "")
+			mgmtIPs := SmartWalk(params, "1.0.8802.1.1.2.1.4.1.1.8", "")
+			ifHighSpeeds := SmartWalk(params, "1.3.6.1.2.1.31.1.1.1.15", "")
+			ifMacs := SmartWalk(params, "1.3.6.1.2.1.2.2.1.6", "")
+
+			dataChan <- DeviceTopoData{
+				Dev:          d,
+				SysNames:     sysNames,
+				PortDescs:    portDescs,
+				PortIds:      portIds,
+				MgmtIPs:      mgmtIPs,
+				IfNames:      ifNames,
+				IfHighSpeeds: ifHighSpeeds,
+				IfSpeeds:     ifSpeeds,
+				IfMacs:       ifMacs,
+			}
+		}(dev)
+	}
+
+	wg.Wait()
+	close(dataChan)
+
+	devDataMap := make(map[string]DeviceTopoData)
+	globalMacToPort := make(map[string]MacPortRef)
+
+	var allDeviceData []DeviceTopoData
+	for topoData := range dataChan {
+		allDeviceData = append(allDeviceData, topoData)
+		devDataMap[topoData.Dev.IP] = topoData
+
+		for idx, macRaw := range topoData.IfMacs {
+			cMac := cleanMAC(macRaw)
+			if cMac != "" {
+				pName := topoData.IfNames[idx]
+				if pName == "" {
+					pName = fmt.Sprintf("Port %s", idx)
+				}
+				globalMacToPort[cMac] = MacPortRef{
+					NodeIP:   topoData.Dev.IP,
+					PortName: strings.Trim(pName, `"`),
+				}
+			}
+		}
+	}
+
+	connections := make(map[LinkKey]*ConnRecord)
+	macRegex := regexp.MustCompile(`(?i)^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$`)
+
+	for _, data := range allDeviceData {
+		ip := data.Dev.IP
+		lvl := data.Dev.Level
+		if lvl >= 5 {
+			continue
+		}
+
+		allSuffixes := make(map[string]bool)
+		for k := range data.SysNames {
+			allSuffixes[k] = true
+		}
+		for k := range data.PortDescs {
+			allSuffixes[k] = true
+		}
+		for k := range data.PortIds {
+			allSuffixes[k] = true
+		}
+		for k := range data.MgmtIPs {
+			allSuffixes[k] = true
+		}
+
+		var parsedNeighbors []ParsedNeighbor
+
+		for suffix := range allSuffixes {
+			sysNameVal := data.SysNames[suffix]
+			remSysName := ""
+			if sysNameVal != "" {
+				cleanVal := strings.Trim(sysNameVal, `"`)
+				parts := strings.Split(cleanVal, ".")
+				if len(parts) > 0 {
+					remSysName = parts[0]
+				}
+			}
+			if strings.ToLower(remSysName) == "none" {
+				remSysName = ""
+			}
+
+			parts := strings.Split(suffix, ".")
+			localPortIdx := parts[0]
+			if len(parts) >= 3 {
+				localPortIdx = parts[1]
+			} else if len(parts) > 0 {
+				localPortIdx = parts[len(parts)-1]
+			}
+
+			localPortName := data.IfNames[localPortIdx]
+			if localPortName == "" {
+				localPortName = fmt.Sprintf("Port %s", localPortIdx)
+			}
+			localPortName = strings.Trim(localPortName, `"`)
+
+			var speed int64 = 0
+			if hSpeedVal, ok := data.IfHighSpeeds[localPortIdx]; ok && hSpeedVal != "" {
+				fmt.Sscanf(hSpeedVal, "%d", &speed)
+			}
+			if speed <= 0 {
+				if speedVal, ok := data.IfSpeeds[localPortIdx]; ok && speedVal != "" {
+					var rawBps int64
+					fmt.Sscanf(speedVal, "%d", &rawBps)
+					if rawBps >= 4294967295 {
+						speed = 10000
+					} else if rawBps > 0 {
+						speed = rawBps / 1000000
+					}
+				}
+			}
+			if speed <= 0 {
+				speed = 1000
+			}
+
+			remPortDesc := strings.Trim(data.PortDescs[suffix], `"`)
+			remPortId := strings.Trim(data.PortIds[suffix], `"`)
+
+			descMacClean := cleanMAC(remPortDesc)
+			idMacClean := cleanMAC(remPortId)
+
+			isMacDesc := len(descMacClean) == 12 && macRegex.MatchString(remPortDesc)
+			isMacId := len(idMacClean) == 12 && macRegex.MatchString(remPortId)
+
+			remoteIP := ""
+			prefixPattern := suffix + "."
+			for mgmtSuffix := range data.MgmtIPs {
+				if strings.HasPrefix(mgmtSuffix, prefixPattern) {
+					ipParts := strings.Split(mgmtSuffix, ".")
+					if len(ipParts) >= 4 {
+						possibleIP := strings.Join(ipParts[len(ipParts)-4:], ".")
+						if net.ParseIP(possibleIP) != nil {
+							remoteIP = possibleIP
+							break
+						}
+					}
+				}
+			}
+
+			resolvedByMAC := false
+			targetNodeID := ""
+			remotePort := "未知埠"
+
+			if isMacDesc {
+				if ref, ok := globalMacToPort[descMacClean]; ok {
+					targetNodeID = ref.NodeIP
+					remotePort = ref.PortName
+					resolvedByMAC = true
+				}
+			}
+			if !resolvedByMAC && isMacId {
+				if ref, ok := globalMacToPort[idMacClean]; ok {
+					targetNodeID = ref.NodeIP
+					remotePort = ref.PortName
+					resolvedByMAC = true
+				}
+			}
+
+			if !resolvedByMAC {
+				if remPortDesc == "" && !isMacId && remoteIP != "" {
+					if remDevData, ok := devDataMap[remoteIP]; ok {
+						if pName, ok := remDevData.IfNames[remPortId]; ok && pName != "" {
+							remPortDesc = strings.Trim(pName, `"`)
+						}
+					}
+				}
+
+				if remPortDesc != "" && !isMacDesc {
+					remotePort = remPortDesc
+				} else if remPortId != "" && !isMacId {
+					if isPureNumber(remPortId) {
+						remotePort = "Port " + remPortId
+					} else {
+						remotePort = remPortId
+					}
+				} else if isMacDesc {
+					remotePort = "MAC: " + remPortDesc
+				}
+
+				if remoteIP != "" && devIPSet[remoteIP] {
+					targetNodeID = remoteIP
+				} else if remSysName != "" {
+					cleanRemSysName := strings.ToLower(remSysName)
+					if matchedIP, ok := nameToIPMap[cleanRemSysName]; ok {
+						targetNodeID = matchedIP
+					} else {
+						for sysNameLower, devIP := range nameToIPMap {
+							if strings.Contains(sysNameLower, cleanRemSysName) || strings.Contains(cleanRemSysName, sysNameLower) {
+								targetNodeID = devIP
+								break
+							}
+						}
+					}
+				}
+
+				if targetNodeID == "" {
+					if remoteIP != "" {
+						targetNodeID = remoteIP
+					} else {
+						targetNodeID = remSysName
+					}
+				}
+			}
+
+			if targetNodeID == "" || targetNodeID == ip {
+				continue
+			}
+
+			targetLvl := lvl + 1
+			if targetDev, ok := ipToDev[targetNodeID]; ok {
+				targetLvl = targetDev.Level
+			}
+			if targetLvl > 6 {
+				targetLvl = 6
+			}
+
+			if !devIPSet[targetNodeID] {
+				continue
+			}
+
+			parsedNeighbors = append(parsedNeighbors, ParsedNeighbor{
+				TargetNodeID:  targetNodeID,
+				LocalPortName: localPortName,
+				RemotePort:    remotePort,
+				Speed:         speed,
+				TargetLvl:     targetLvl,
+			})
+		}
+
+		portBestNeighbor := make(map[string]ParsedNeighbor)
+		for _, pn := range parsedNeighbors {
+			existing, ok := portBestNeighbor[pn.LocalPortName]
+			if !ok || pn.TargetLvl < existing.TargetLvl {
+				portBestNeighbor[pn.LocalPortName] = pn
+			}
+		}
+
+		for pName, best := range portBestNeighbor {
+			nodeA, nodeB := ip, best.TargetNodeID
+			if nodeA > nodeB {
+				nodeA, nodeB = best.TargetNodeID, ip
+			}
+			k := LinkKey{NodeA: nodeA, NodeB: nodeB}
+
+			fromNode := ip
+			toNode := best.TargetNodeID
+			if lvl > best.TargetLvl {
+				fromNode = best.TargetNodeID
+				toNode = ip
+			}
+
+			if connections[k] == nil {
+				connections[k] = &ConnRecord{
+					DirectionFrom: fromNode,
+					DirectionTo:   toNode,
+				}
+			}
+
+			portA, portB := pName, best.RemotePort
+			if ip != nodeA {
+				portA, portB = best.RemotePort, pName
+			}
+
+			connections[k].RawRecords = append(connections[k].RawRecords, SingleRawRec{
+				PortA: portA,
+				PortB: portB,
+				Speed: best.Speed,
+			})
+		}
+	}
+
+	_, _ = database.ConfigDB.Exec("PRAGMA busy_timeout = 10000;")
+
+	tx, err := database.ConfigDB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	_, _ = tx.Exec("DELETE FROM edges")
+
+	var edges []TopoEdge
+	hasUplink := make(map[string]bool)
+
+	for k := range connections {
+		lA := ipToDev[k.NodeA].Level
+		lB := ipToDev[k.NodeB].Level
+		if lA > lB {
+			hasUplink[k.NodeA] = true
+		} else if lB > lA {
+			hasUplink[k.NodeB] = true
+		}
+	}
+
+	for k, connRec := range connections {
+		lA := ipToDev[k.NodeA].Level
+		lB := ipToDev[k.NodeB].Level
+		if lA == lB && hasUplink[k.NodeA] && hasUplink[k.NodeB] {
+			continue
+		}
+
+		var aRaw, bRaw []string
+		var validSpeeds []int64
+
+		for _, rec := range connRec.RawRecords {
+			aRaw = append(aRaw, rec.PortA)
+			bRaw = append(bRaw, rec.PortB)
+			if rec.Speed > 0 {
+				validSpeeds = append(validSpeeds, rec.Speed)
+			}
+		}
+
+		aFinal := mergePortsList(aRaw)
+		bFinal := mergePortsList(bRaw)
+
+		sort.Strings(aFinal)
+		sort.Strings(bFinal)
+
+		multiplier := 1
+		if len(aFinal) > 0 && len(bFinal) > 0 {
+			multiplier = minInt(len(aFinal), len(bFinal))
+		} else {
+			multiplier = maxInt(1, maxInt(len(aFinal), len(bFinal)))
+		}
+
+		minSpeed := int64(1000)
+		if len(validSpeeds) > 0 {
+			minSpeed = validSpeeds[0]
+			for _, s := range validSpeeds {
+				if s < minSpeed {
+					minSpeed = s
+				}
+			}
+		}
+
+		totalSpeed := minSpeed * int64(multiplier)
+
+		aSlice := aFinal
+		if len(aSlice) > multiplier {
+			aSlice = aSlice[:multiplier]
+		}
+		bSlice := bFinal
+		if len(bSlice) > multiplier {
+			bSlice = bSlice[:multiplier]
+		}
+
+		aStr := strings.Join(aSlice, ", ")
+		if aStr == "" {
+			aStr = "未知"
+		}
+		bStr := strings.Join(bSlice, ", ")
+		if bStr == "" {
+			bStr = "未知"
+		}
+
+		pFrom, pTo := aStr, bStr
+		if connRec.DirectionFrom != k.NodeA {
+			pFrom, pTo = bStr, aStr
+		}
+
+		edgeID := fmt.Sprintf("%s-%s", connRec.DirectionFrom, connRec.DirectionTo)
+
+		edge := TopoEdge{
+			ID:       edgeID,
+			From:     connRec.DirectionFrom,
+			To:       connRec.DirectionTo,
+			Speed:    totalSpeed,
+			FromPort: pFrom,
+			ToPort:   pTo,
+		}
+		edges = append(edges, edge)
+
+		_, _ = tx.Exec(
+			"INSERT OR REPLACE INTO edges (id, source, target, speed, from_port, to_port) VALUES (?, ?, ?, ?, ?, ?)",
+			edgeID, connRec.DirectionFrom, connRec.DirectionTo, totalSpeed, pFrom, pTo,
+		)
+	}
+
+	manualRows, err := database.ConfigDB.Query("SELECT id, node_a, port_a, node_b, port_b, COALESCE(speed, 1000) FROM manual_links")
+	if err == nil {
+		for manualRows.Next() {
+			var mID int
+			var nA, pA, nB, pB string
+			var mSpeed int64
+			if err := manualRows.Scan(&mID, &nA, &pA, &nB, &pB, &mSpeed); err == nil {
+				ipA := resolveToIP(nA, ipToDev, nameToIPMap)
+				ipB := resolveToIP(nB, ipToDev, nameToIPMap)
+				if ipA == "" {
+					ipA = nA
+				}
+				if ipB == "" {
+					ipB = nB
+				}
+				if ipA != "" && ipB != "" && ipA != ipB {
+					edgeID := fmt.Sprintf("manual_%d_%s_%s", mID, ipA, ipB)
+					edge := TopoEdge{
+						ID:       edgeID,
+						From:     ipA,
+						To:       ipB,
+						Speed:    mSpeed,
+						FromPort: pA,
+						ToPort:   pB,
+					}
+					edges = append(edges, edge)
+					_, _ = tx.Exec(
+						"INSERT OR REPLACE INTO edges (id, source, target, speed, from_port, to_port) VALUES (?, ?, ?, ?, ?, ?)",
+						edgeID, ipA, ipB, mSpeed, pA, pB,
+					)
+				}
+			}
+		}
+		manualRows.Close()
+	}
+
+	_ = tx.Commit()
+
+	elapsed := time.Since(start).Seconds()
+	log.Printf("✅ [Go Topo Engine] 拓樸算路完工！耗時: %.2fs，生成 %d 條骨幹鏈路", elapsed, len(edges))
+
+	res := &TopoResult{
+		Nodes: []map[string]interface{}{},
+		Edges: edges,
+		Stats: map[string]interface{}{
+			"elapsed": fmt.Sprintf("%.2f", elapsed),
+			"scanned": len(devices),
+		},
+	}
+	return res, nil
+}
