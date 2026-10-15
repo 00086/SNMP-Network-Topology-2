@@ -1,0 +1,7 @@
+<service>
+  <id>InfluxDB_TSDB</id>
+  <name>InfluxDB Time Series Database</name>
+  <description>InfluxDB v2 高效能時間序列資料庫</description>
+  <executable>D:\python\SNMP3\FlowEngine\influxd.exe</executable>
+  <logmode>rotate</logmode>
+</service>

@@ -1,0 +1,8 @@
+<service>
+  <id>Telegraf_Collector</id>
+  <name>Telegraf Flow Collector</name>
+  <description>Telegraf 網路流量封包收集引擎</description>
+  <executable>D:\python\SNMP3\FlowEngine\telegraf.exe</executable>
+  <arguments>--config D:\python\SNMP3\FlowEngine\telegraf.conf</arguments>
+  <logmode>rotate</logmode>
+</service>
