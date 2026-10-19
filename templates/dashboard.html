@@ -33,6 +33,10 @@
     body.light-theme .bg-down { background-color: #fef2f2 !important; border-color: #ef4444 !important; color: #dc2626 !important; }
     body.light-theme .bg-warning-box { background-color: #fffbeb !important; border-color: #f59e0b !important; color: #d97706 !important; }
     body.light-theme .bg-total { background-color: #f0f9ff !important; border-color: #0ea5e9 !important; color: #0284c7 !important; }
+	
+	/* 🌟 淺色模式下深青色按鈕高對比補正 (避免亮青色在白底看不清) */
+    body.light-theme .btn-outline-info { color: #0284c7 !important; border-color: #0284c7 !important; }
+    body.light-theme .btn-outline-info:hover { background-color: #0284c7 !important; color: #ffffff !important; }
     
     /* 👇 將 text-light 加入淺色覆蓋，解決廠牌型號反白看不見的問題 */
     body.light-theme .text-white-50 { color: #64748b !important; }
@@ -83,6 +87,11 @@
 				<div id="dot4" class="page-indicator" onclick="switchPage(4)" title="全天候異常偵測與CPU負載"></div>
 				<div id="dot5" class="page-indicator" onclick="switchPage(5)" title="內網流量消耗 Top 10"></div>
 			</div>
+
+            <!-- 🌟 100% 依循資安預警中心 UI/UX 設計：開關按鈕 -->
+            <button id="btnMaskIp" class="btn btn-sm btn-outline-info fw-bold shadow-sm me-2" onclick="toggleHideInternalIp()" title="切換是否遮蔽內網敏感 IP 位址">
+                <i class="bi bi-eye-slash me-1"></i>隱藏內網 IP
+            </button>
 
             <button id="themeToggleBtn" class="btn btn-sm btn-outline-secondary text-white fw-bold shadow-sm me-2" onclick="toggleTheme()">
                 <i class="bi bi-sun-fill me-1 text-warning"></i>淺色模式
@@ -381,6 +390,10 @@
     let internalFlowChartInstance = null; 
 	let latencyTopChartInstance = null; // 🌟 新增：延遲圖表變數
     let allTrafficData = [], deviceLevelMap = {};
+	let isHideInternalIp = localStorage.getItem('dashboard_hide_ip') === '1'; // 🌟 記憶遮蔽狀態
+    let internalNetsConfig = []; // 🌟 儲存系統設定的「內網流量統計網段 (包含)」
+    let cachedLatestFlowData = []; // 🌟 暫存圓餅圖資料
+    let cachedLatestAnomalies = []; // 🌟 暫存異常清單資料
 	let globalCachedDevices = []; // 🌟 快取設備完整清單
 	
     let currentCarouselPage = 1;
@@ -389,7 +402,83 @@
     
     let isFetchingData = false; 
     let dashboardTimer = null; // 🌟 新增：彈性排程計時器
+	
+	// 🌟 判定 IP 是否屬於系統設定之「內網流量統計網段 (包含)」
+    function isInternalIp(ipStr) {
+        if (!ipStr) return false;
+        const cleanIp = String(ipStr).split('%')[0].replace('::ffff:', '').trim();
+        
+        // 若尚未載入完成，以常見私有網段保底
+        const nets = internalNetsConfig.length > 0 ? internalNetsConfig : ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '192.50.0.0/16'];
+        
+        for (let net of nets) {
+            try {
+                if (net.includes(':') && cleanIp.includes(':')) {
+                    const prefix = net.split('/')[0].toLowerCase();
+                    if (cleanIp.toLowerCase().startsWith(prefix.replace(/::.*$/, ''))) return true;
+                } else if (!net.includes(':') && !cleanIp.includes(':')) {
+                    const [netIp, maskStr] = net.split('/');
+                    const mask = maskStr ? parseInt(maskStr, 10) : 32;
+                    const ipParts = cleanIp.split('.').map(Number);
+                    const netParts = netIp.split('.').map(Number);
+                    if (ipParts.length === 4 && netParts.length === 4) {
+                        const ipNum = ((ipParts[0]<<24) | (ipParts[1]<<16) | (ipParts[2]<<8) | ipParts[3]) >>> 0;
+                        const netNum = ((netParts[0]<<24) | (netParts[1]<<16) | (netParts[2]<<8) | netParts[3]) >>> 0;
+                        const maskNum = mask === 0 ? 0 : (~0 << (32 - mask)) >>> 0;
+                        if ((ipNum & maskNum) === (netNum & maskNum)) return true;
+                    }
+                }
+            } catch(e) {}
+        }
+        return false;
+    }
 
+    // 🌟 動態 IP 脫敏遮罩：若為內網 IP 則遮蔽後半段 (例如 192.50.2.146 ➔ 192.50.*.*)
+    function maskIp(ipStr) {
+        if (!isHideInternalIp || !ipStr) return ipStr;
+        if (!isInternalIp(ipStr)) return ipStr; // 外網 IP 不遮蔽
+        
+        const clean = String(ipStr).trim();
+        if (clean.includes('.')) {
+            const parts = clean.split('.');
+            if (parts.length === 4) return `${parts[0]}.${parts[1]}.*.*`;
+        } else if (clean.includes(':')) {
+            const parts = clean.split(':');
+            return parts.slice(0, 3).join(':') + ':*:*:*';
+        }
+        return clean;
+    }
+
+    // 🌟 按鈕切換開關 (點擊即時全域重繪，免重新整理)
+    function toggleHideInternalIp() {
+        isHideInternalIp = !isHideInternalIp;
+        localStorage.setItem('dashboard_hide_ip', isHideInternalIp ? '1' : '0');
+        updateHideIpBtnUI();
+        
+        // 1. 即時刷新圓餅圖標籤
+        if (internalFlowChartInstance && cachedLatestFlowData.length > 0) {
+            internalFlowChartInstance.data.labels = cachedLatestFlowData.map(item => maskIp(item.ip));
+            internalFlowChartInstance.update();
+        }
+        // 2. 即時刷新異常偵測守護清單
+        if (cachedLatestAnomalies.length > 0) {
+            renderAnomalyTable(cachedLatestAnomalies);
+        }
+    }
+
+    // 🌟 比照資安預警中心：切換時字數等長（不跳動），深黑文字（不隱形）
+    function updateHideIpBtnUI() {
+        const btn = document.getElementById('btnMaskIp');
+        if (!btn) return;
+        if (isHideInternalIp) {
+            btn.className = 'btn btn-sm btn-info text-dark fw-bold shadow-sm me-2';
+            btn.innerHTML = '<i class="bi bi-eye me-1"></i>顯示內網 IP';
+        } else {
+            btn.className = 'btn btn-sm btn-outline-info fw-bold shadow-sm me-2';
+            btn.innerHTML = '<i class="bi bi-eye-slash me-1"></i>隱藏內網 IP';
+        }
+    }
+	
     // 🌟 智慧背景更新排程 (徹底解決 setInterval 撞車重疊問題)
     // 🌟 智慧背景更新排程 (傳入 false 代表是背景靜音更新)
     function scheduleNextUpdate() {
@@ -444,9 +533,18 @@
         if (localStorage.getItem('dashboard_theme') === 'light') toggleTheme();
         else { Chart.defaults.color = '#ffffff'; } 
         
+        updateHideIpBtnUI(); // 🌟 初始化按鈕外觀
+        
+        // 🌟 讀取系統設定中的「內網流量統計網段 (包含)」
+        fetch('/api/settings/allowed_ips').then(r => r.json()).then(res => {
+            if (res.success && res.flow_internal_nets) {
+                internalNetsConfig = res.flow_internal_nets.split(',').map(s => s.trim()).filter(Boolean);
+            }
+        }).catch(() => {});
+
         initAnomalyPolling(); 
         showToast('📡 正在載入全網數據，請稍候...', 'info');
-        fetchDashboardData(false); // 🌟 初始載入也視為背景靜音更新
+        fetchDashboardData(false); 
         startCarousel();
     });
 
@@ -477,54 +575,58 @@
     
 	function fetchAnomalyStatus() {
         fetch('/api/anomalies').then(res => res.json()).then(res => {
-            let tbody = document.getElementById('anoTableBody');
-            let badge = document.getElementById('anoStatusBadge');
-            
             if (res.success) {
                 document.getElementById('anoRuns').innerText = res.runs || 0;
                 
-                // 👇 🌟 核心修復：優先顯示總部最後接收時間，若無則降級顯示本機時間
                 let finalTimeStr = res.latest_sync_time ? res.latest_sync_time : new Date().toLocaleTimeString('zh-TW', {hour12: false});
                 document.getElementById('anoLastRun').innerText = finalTimeStr;
                 
-                let d = res.data;
-
-                if (d.length === 0) {
-                    badge.innerHTML = '<span class="badge bg-success fs-6 px-3 py-2 shadow-sm"><i class="bi bi-shield-check me-1"></i>全網安全</span>';
-                    // 🌟 放大「全網安全」提示字體 (加上 fs-5, icon 放大為 fs-4)
-                    tbody.innerHTML = '<tr><td colspan="3" class="text-center text-success py-5 fw-bold fs-5"><i class="bi bi-check-circle-fill me-1 fs-4"></i><br>目前未偵測到任何私接 Hub 或迴圈。</td></tr>';
-                } else {
-                    badge.innerHTML = `<span class="badge bg-danger blink-danger fs-6 px-3 py-2 shadow-sm"><i class="bi bi-exclamation-triangle-fill me-1"></i>發現 ${d.length} 項異常</span>`;
-                    let html = '';
-                    d.forEach(item => {
-                        // 🌟 把危險/警告的徽章也放大 (加上 fs-6)
-                        let sevBadge = item.severity === 'danger' ? '<span class="badge bg-danger fs-6">危險</span>' : '<span class="badge bg-warning text-dark fs-6">警告</span>';
-                        // 🌟 把網孔 Alias 的小字由 0.7rem 放大到 0.85rem
-                        let aliasHtml = item.alias ? `<br><span class="text-white-50" style="font-size:0.85rem;">(${item.alias})</span>` : '';
-                        
-                        // 🌟 把 IP 字體由 0.7 放大到 0.85rem，並放寬設備名稱的截斷限制
-                        html += `<tr>
-                                    <td><div class="text-info fw-bold text-truncate" style="max-width: 180px; font-size: 1.05rem;" title="${item.sysName}">${item.sysName}</div><div class="text-white-50" style="font-size:0.85rem;">${item.ip}</div></td>
-                                    <td style="font-size: 1.05rem;"><span class="text-warning">${item.port}</span>${aliasHtml}</td>
-                                    <td style="font-size: 1.05rem;">${sevBadge} <span class="${item.severity === 'danger' ? 'text-danger fw-bold' : 'text-light'}">${item.desc}</span></td>
-                                 </tr>`;
-                    });
-                    tbody.innerHTML = html;
-                }
+                cachedLatestAnomalies = res.data || []; // 🌟 存入全域快取
+                renderAnomalyTable(cachedLatestAnomalies); // 🌟 呼叫獨立繪製函式
             } else {
-                // 👇 🌟 核心防呆：如果後端報錯，必須把轉圈圈消掉並顯示錯誤！
-                badge.innerHTML = '<span class="badge bg-secondary fs-6 px-3 py-2">暫無資料</span>';
-                tbody.innerHTML = `<tr><td colspan="3" class="text-center text-white-50 py-5">無法取得異常偵測資料: ${res.error || '未知錯誤'}</td></tr>`;
+                let badge = document.getElementById('anoStatusBadge');
+                let tbody = document.getElementById('anoTableBody');
+                if (badge) badge.innerHTML = '<span class="badge bg-secondary fs-6 px-3 py-2">暫無資料</span>';
+                if (tbody) tbody.innerHTML = `<tr><td colspan="3" class="text-center text-white-50 py-5">無法取得異常偵測資料: ${res.error || '未知錯誤'}</td></tr>`;
             }
         }).catch(err => {
-            // 👇 🌟 網路斷線防護：攔截 fetch 失敗的狀況
             let tbody = document.getElementById('anoTableBody');
             let badge = document.getElementById('anoStatusBadge');
             if (badge) badge.innerHTML = '<span class="badge bg-danger fs-6 px-3 py-2">連線失敗</span>';
             if (tbody) tbody.innerHTML = '<tr><td colspan="3" class="text-center text-white-50 py-5">網路連線異常，無法更新偵測狀態。</td></tr>';
         });
     }
+	
+	// 🌟 獨立的異常表格渲染引擎：支援 maskIp 動態去識別化
+    function renderAnomalyTable(d) {
+        let tbody = document.getElementById('anoTableBody');
+        let badge = document.getElementById('anoStatusBadge');
+        if (!tbody || !badge) return;
 
+        if (!d || d.length === 0) {
+            badge.innerHTML = '<span class="badge bg-success fs-6 px-3 py-2 shadow-sm"><i class="bi bi-shield-check me-1"></i>全網安全</span>';
+            tbody.innerHTML = '<tr><td colspan="3" class="text-center text-success py-5 fw-bold fs-5"><i class="bi bi-check-circle-fill me-1 fs-4"></i><br>目前未偵測到任何私接 Hub 或迴圈。</td></tr>';
+        } else {
+            badge.innerHTML = `<span class="badge bg-danger blink-danger fs-6 px-3 py-2 shadow-sm"><i class="bi bi-exclamation-triangle-fill me-1"></i>發現 ${d.length} 項異常</span>`;
+            let html = '';
+            d.forEach(item => {
+                let sevBadge = item.severity === 'danger' ? '<span class="badge bg-danger fs-6">危險</span>' : '<span class="badge bg-warning text-dark fs-6">警告</span>';
+                let aliasHtml = item.alias ? `<br><span class="text-white-50" style="font-size:0.85rem;">(${item.alias})</span>` : '';
+                
+                html += `<tr>
+                            <td>
+                                <div class="text-info fw-bold text-truncate" style="max-width: 180px; font-size: 1.05rem;" title="${item.sysName}">${item.sysName}</div>
+                                <!-- 🌟 關鍵修改：套用 maskIp 實現動態遮蔽 -->
+                                <div class="text-white-50" style="font-size:0.85rem;">${maskIp(item.ip)}</div>
+                            </td>
+                            <td style="font-size: 1.05rem;"><span class="text-warning">${item.port}</span>${aliasHtml}</td>
+                            <td style="font-size: 1.05rem;">${sevBadge} <span class="${item.severity === 'danger' ? 'text-danger fw-bold' : 'text-light'}">${item.desc}</span></td>
+                         </tr>`;
+            });
+            tbody.innerHTML = html;
+        }
+    }
+	
     function initAnomalyPolling() {
         fetch('/api/settings/anomaly').then(res => res.json()).then(data => {
             let mins = data.success ? data.interval : 5; 
@@ -723,13 +825,15 @@
                             if(innerFlowEmpty) innerFlowEmpty.classList.add('d-none');
                             if(innerFlowWrapper) innerFlowWrapper.classList.remove('d-none');
                             
+                            cachedLatestFlowData = res.data; // 🌟 暫存供動態切換
+                            
                             const ctx = document.getElementById('internalFlowChart').getContext('2d');
                             if (internalFlowChartInstance) internalFlowChartInstance.destroy();
                             
                             internalFlowChartInstance = new Chart(ctx, {
                                 type: 'pie',
                                 data: {
-                                    labels: res.data.map(item => item.ip),
+                                    labels: res.data.map(item => maskIp(item.ip)), // 🌟 套用內網 IP 遮蔽
                                     datasets: [{
                                         data: res.data.map(item => item.traffic_mb),
                                         backgroundColor: chartColors,
@@ -741,7 +845,6 @@
                                     responsive: true, maintainAspectRatio: false,
                                     plugins: { 
                                         legend: { position: 'right', labels: { color: Chart.defaults.color, font: { size: 14, weight: 'bold' } } },
-                                        // 👇 🌟 核心修復：把 MB 單位補回到滑鼠懸停 (Tooltip) 的提示框中！
                                         tooltip: { 
                                             callbacks: { 
                                                 label: function(context) { 
@@ -1071,7 +1174,12 @@
             ? '<i class="bi bi-exclamation-triangle-fill text-warning me-2"></i>SNMP 異常設備清單 (Ping 正常但 SNMP 拒絕)'
             : '<i class="bi bi-x-circle-fill text-danger me-2"></i>徹底斷線設備清單 (Ping 無回應)';
 
-        const filtered = globalCachedDevices.filter(d => (d.status || '').toLowerCase() === statusType.toLowerCase());
+        // 🌟 核心過濾：僅納入 visible === 1 的監控設備，排除隱藏設備與自動探索的 AP
+        const filtered = globalCachedDevices.filter(d => {
+            const isVisible = (d.visible === 1 || d.visible === '1' || d.visible === true);
+            return isVisible && (d.status || '').toLowerCase() === statusType.toLowerCase();
+        });
+
         modalCount.innerText = `共 ${filtered.length} 台設備`;
 
         if (filtered.length === 0) {
@@ -1082,7 +1190,6 @@
                 const name = d.name || d.ip;
                 const brandModel = [d.brand, d.model].filter(Boolean).join(' / ') || 'Unknown';
                 const loc = d.location || '未標註';
-                // 🌟 1. 將狀態徽章加入 fs-6 放大一級
                 const statusBadge = isWarning
                     ? '<span class="badge bg-warning text-dark fs-6">SNMP 異常</span>'
                     : '<span class="badge bg-danger fs-6">徹底斷線</span>';
@@ -1090,10 +1197,8 @@
                 rowsHtml += `
                     <tr>
                         <td class="fw-bold text-info text-truncate" style="max-width: 220px; font-size: 1.05rem;" title="${name}">${name}</td>
-                        <!-- 🌟 2. IP 加入 style="font-size: 1.05rem;" 放大 -->
-                        <td><code style="font-size: 1.05rem;">${d.ip}</code></td>
+                        <td><code style="font-size: 1.05rem;">${maskIp(d.ip)}</code></td>
                         <td><span class="text-light" style="font-size: 1.05rem;">${brandModel}</span></td>
-                        <!-- 🌟 3. 加入 white-space: nowrap; 強制同行顯示絕對不換行 -->
                         <td style="white-space: nowrap;"><span class="text-white-50 me-2" style="font-size: 1.05rem;">${loc}</span> ${statusBadge}</td>
                     </tr>
                 `;
@@ -1105,6 +1210,6 @@
         const modalInstance = bootstrap.Modal.getOrCreateInstance(modalElem);
         modalInstance.show();
     }
-
+	
 </script>
 {% endblock %}

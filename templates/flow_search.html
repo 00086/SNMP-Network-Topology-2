@@ -98,6 +98,10 @@
     }
     body.light-theme .modal-header .btn-close-white:hover { opacity: 1; }
 	body.light-theme .text-warning { color: #d97706 !important; }
+	
+	/* 🌟 淺色模式下深青色按鈕高對比補正 (避免亮青色在白底看不清) */
+    body.light-theme .btn-outline-info { color: #0284c7 !important; border-color: #0284c7 !important; }
+    body.light-theme .btn-outline-info:hover { background-color: #0284c7 !important; color: #ffffff !important; }
 </style>
 {% endblock %}
 
@@ -107,7 +111,10 @@
     <div class="d-flex justify-content-between align-items-center mb-2 flex-shrink-0">
         <h4 class="text-info fw-bold mb-0"><i class="bi bi-search me-2"></i>NetFlow / sFlow 網路通訊軌跡明細檢索</h4>
         <div class="d-flex align-items-center gap-2">
-            <!-- 🌟 按鈕上移：與切換深淺色模式同列 -->
+            <!-- 🌟 比照資安預警與戰情總覽同款：隱藏內網 IP 開關按鈕 -->
+            <button id="btnMaskIp" class="btn btn-sm btn-outline-info fw-bold shadow-sm" onclick="toggleHideInternalIp()" title="切換是否遮蔽內網敏感 IP 位址">
+                <i class="bi bi-eye-slash me-1"></i>隱藏內網 IP
+            </button>
             <button class="btn btn-success btn-sm fw-bold shadow-sm" onclick="showQoeModal()" id="btnShowQoe" disabled>
                 <i class="bi bi-activity me-1"></i>QoE 服務品質
             </button>
@@ -118,7 +125,7 @@
                 <i class="bi bi-sun-fill me-1 text-warning"></i>切換淺色模式
             </button>
         </div>
-    </div>
+	</div>
     
     <div id="summaryDashboard" class="row g-2 mb-2 flex-shrink-0">
         <div class="col-md-4">
@@ -608,6 +615,42 @@ function renderCharts(dataArray) {
     });
 }
 
+// 🌟 內網 IP 脫敏遮罩狀態
+let isHideInternalIp = localStorage.getItem('dashboard_hide_ip') === '1';
+
+function maskIp(ipStr) {
+    if (!isHideInternalIp || !ipStr) return ipStr;
+    // 使用原生的 getIpType 判斷是否為內網 (internal 或 exclude 網段皆遮蔽)
+    const type = getIpType(ipStr);
+    if (type !== 'internal' && type !== 'exclude') return ipStr;
+    
+    const clean = String(ipStr).trim();
+    if (clean.includes('.')) {
+        const parts = clean.split('.');
+        if (parts.length === 4) return `${parts[0]}.${parts[1]}.*.*`;
+    }
+    return clean;
+}
+
+function toggleHideInternalIp() {
+    isHideInternalIp = !isHideInternalIp;
+    localStorage.setItem('dashboard_hide_ip', isHideInternalIp ? '1' : '0');
+    updateHideIpBtnUI();
+    if (currentDisplayData && currentDisplayData.length > 0) renderCurrentPage();
+}
+
+function updateHideIpBtnUI() {
+    const btn = document.getElementById('btnMaskIp');
+    if (!btn) return;
+    if (isHideInternalIp) {
+        btn.className = 'btn btn-sm btn-info text-dark fw-bold shadow-sm';
+        btn.innerHTML = '<i class="bi bi-eye me-1"></i>顯示內網 IP';
+    } else {
+        btn.className = 'btn btn-sm btn-outline-info fw-bold shadow-sm';
+        btn.innerHTML = '<i class="bi bi-eye-slash me-1"></i>隱藏內網 IP';
+    }
+}
+
 let allFetchedData = [];
 let currentActiveCard = '';
 let previousFiltersHistory = null; 
@@ -987,9 +1030,9 @@ function renderCurrentPage() {
         html += `
             <tr>
                 <td class="text-white-50">${item.time}</td>
-                <td><span class="${srcColor} fw-bold clickable-link" onclick="searchSpecificIP('${item.src_ip}', 'src')" oncontextmenu="showIpContextMenu(event, '${item.src_ip}')" title="左鍵: 快速過濾 | 右鍵: 來源探測">${item.src_ip}</span></td>
+                <td><span class="${srcColor} fw-bold clickable-link" onclick="searchSpecificIP('${item.src_ip}', 'src')" oncontextmenu="showIpContextMenu(event, '${item.src_ip}')">${maskIp(item.src_ip)}</span></td>
                 <td><i class="bi bi-arrow-right text-secondary"></i></td>
-                <td><span class="${dstColor} fw-bold clickable-link" onclick="searchSpecificIP('${item.dst_ip}', 'dst')" oncontextmenu="showIpContextMenu(event, '${item.dst_ip}')" title="左鍵: 快速過濾 | 右鍵: 來源探測">${item.dst_ip}</span></td>
+                <td><span class="${dstColor} fw-bold clickable-link" onclick="searchSpecificIP('${item.dst_ip}', 'dst')" oncontextmenu="showIpContextMenu(event, '${item.dst_ip}')">${maskIp(item.dst_ip)}</span></td>
                 <td>${srcPortHtml}</td>
                 <td>${dstPortHtml}</td>
                 <td><span class="badge ${protoInfo.badge} px-2 shadow-sm clickable-link" style="min-width:45px; display:inline-block;" onclick="filterByProtocol('${protoInfo.name}')" title="點擊秒過濾此協定 (再次點擊還原)">${protoInfo.name}</span></td>
@@ -1162,12 +1205,6 @@ function showIpContextMenu(e, ip) {
         ipContextMenu.style.top = y + 'px';
     }
 }
-
-document.addEventListener('click', function(e) {
-    if (ipContextMenu && ipContextMenu.style.display === 'block') {
-        ipContextMenu.style.display = 'none';
-    }
-});
 
 function copyContextIp() {
     navigator.clipboard.writeText(contextTargetIp).then(() => {
@@ -1424,9 +1461,8 @@ function toggleTheme() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    if (localStorage.getItem('flow_theme') === 'light') {
-        toggleTheme(); 
-    }
+    updateHideIpBtnUI(); // 🌟 初始化遮罩按鈕
+    if (localStorage.getItem('flow_theme') === 'light') toggleTheme(); 
 });
 
 let currentGeoData = null;

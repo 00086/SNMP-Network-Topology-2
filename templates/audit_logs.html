@@ -48,6 +48,10 @@
         --table-td-bg: #ffffff; --table-td-hover: #f1f3f5;
         --top-banner-bg: #ffffff; --status-bar-bg: #f8f9fa;
     }
+	
+	/* 🌟 淺色模式下深青色按鈕高對比補正 (避免在白底看不清) */
+    body.light-mode .btn-outline-info { color: #0284c7 !important; border-color: #0284c7 !important; }
+    body.light-mode .btn-outline-info:hover { background-color: #0284c7 !important; color: #ffffff !important; }
 
     body { overflow: hidden !important; background-color: var(--bg-body) !important; color: var(--text-main); transition: background-color 0.3s ease, color 0.3s ease; }
     .main-wrapper { margin-top: -16px; height: calc(100vh - 44px); display: flex; flex-direction: column; padding: 4px 15px 25px 15px; }
@@ -94,6 +98,10 @@
         <div class="d-flex justify-content-between align-items-center mb-3 p-2 rounded shadow-sm flex-shrink-0 top-banner border">
             <h5 class="m-0 fw-bold text-warning"><i class="bi bi-shield-lock-fill me-2"></i>全網實時運作與稽核日誌中心</h5>
             <div class="d-flex align-items-center">
+                <!-- 🌟 100% 依循資安預警中心 UI/UX 設計：開關按鈕 -->
+                <button id="btnMaskIp" class="btn btn-sm btn-outline-info fw-bold shadow-sm me-2" onclick="toggleHideInternalIp()" title="切換是否遮蔽內網敏感 IP 位址">
+                    <i class="bi bi-eye-slash me-1"></i>隱藏內網 IP
+                </button>
                 <button class="btn btn-sm btn-outline-secondary fw-bold shadow-sm me-2" onclick="toggleTheme()"><i class="bi bi-moon-stars-fill"></i> 深淺切換</button>
                 <button class="btn btn-sm btn-success fw-bold" onclick="openExportModal()"><i class="bi bi-file-earmark-arrow-down me-1"></i>匯出紀錄...</button>
             </div>
@@ -231,6 +239,73 @@
 
 {% block scripts %}
 <script>
+	// 🌟 內網 IP 脫敏遮罩引擎 (參照系統設定之內網網段)
+    let isHideInternalIp = localStorage.getItem('dashboard_hide_ip') === '1'; // 沿用全域記憶
+    let internalNetsConfig = []; // 儲存系統設定的「內網流量統計網段 (包含)」
+
+    function isInternalIp(ipStr) {
+        if (!ipStr) return false;
+        const cleanIp = String(ipStr).split('%')[0].replace('::ffff:', '').trim();
+        const nets = internalNetsConfig.length > 0 ? internalNetsConfig : ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '192.50.0.0/16'];
+        
+        for (let net of nets) {
+            try {
+                if (net.includes(':') && cleanIp.includes(':')) {
+                    const prefix = net.split('/')[0].toLowerCase();
+                    if (cleanIp.toLowerCase().startsWith(prefix.replace(/::.*$/, ''))) return true;
+                } else if (!net.includes(':') && !cleanIp.includes(':')) {
+                    const [netIp, maskStr] = net.split('/');
+                    const mask = maskStr ? parseInt(maskStr, 10) : 32;
+                    const ipParts = cleanIp.split('.').map(Number);
+                    const netParts = netIp.split('.').map(Number);
+                    if (ipParts.length === 4 && netParts.length === 4) {
+                        const ipNum = ((ipParts[0]<<24) | (ipParts[1]<<16) | (ipParts[2]<<8) | ipParts[3]) >>> 0;
+                        const netNum = ((netParts[0]<<24) | (netParts[1]<<16) | (netParts[2]<<8) | netParts[3]) >>> 0;
+                        const maskNum = mask === 0 ? 0 : (~0 << (32 - mask)) >>> 0;
+                        if ((ipNum & maskNum) === (netNum & maskNum)) return true;
+                    }
+                }
+            } catch(e) {}
+        }
+        return false;
+    }
+
+    function maskIp(ipStr) {
+        if (!isHideInternalIp || !ipStr) return ipStr;
+        if (!isInternalIp(ipStr)) return ipStr;
+        const parts = ipStr.split('.');
+        if (parts.length === 4) return `${parts[0]}.${parts[1]}.*.*`;
+        return ipStr;
+    }
+
+    // 🌟 全文 IP 搜尋替換 (針對 Details 與 Target 內的 IP 進行去識別化)
+    function maskTextIps(text) {
+        if (!isHideInternalIp || !text) return text;
+        return String(text).replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, (match) => {
+            return isInternalIp(match) ? maskIp(match) : match;
+        });
+    }
+
+    function toggleHideInternalIp() {
+        isHideInternalIp = !isHideInternalIp;
+        localStorage.setItem('dashboard_hide_ip', isHideInternalIp ? '1' : '0');
+        updateHideIpBtnUI();
+        renderTablePage(); // 即時重繪目前頁面日誌
+    }
+
+    // 🌟 比照資安預警中心：切換時字數等長（不跳動），深黑文字（不隱形）
+    function updateHideIpBtnUI() {
+        const btn = document.getElementById('btnMaskIp');
+        if (!btn) return;
+        if (isHideInternalIp) {
+            btn.className = 'btn btn-sm btn-info text-dark fw-bold shadow-sm me-2';
+            btn.innerHTML = '<i class="bi bi-eye me-1"></i>顯示內網 IP';
+        } else {
+            btn.className = 'btn btn-sm btn-outline-info fw-bold shadow-sm me-2';
+            btn.innerHTML = '<i class="bi bi-eye-slash me-1"></i>隱藏內網 IP';
+        }
+    }
+	
     function toggleTheme() {
         document.body.classList.toggle('light-mode');
         window.logFrontendAction("前端瀏覽軌跡", "切換日誌主題", `管理員在日誌中心切換了介面主題色彩。`);
@@ -330,14 +405,17 @@
             if (log.action.includes("HTTP")) actionIcon = "🌐";
             if (log.action.includes("前端") || log.action.includes("手動") || log.action.includes("設定")) actionIcon = "✋";
                 
+            const targetDisplay = maskTextIps(log.target);
+            const detailsDisplay = maskTextIps(log.details);
+
             html += `
                 <tr>
                     <td class="text-info fw-bold" style="font-family: monospace;">${log.timestamp}</td>
                     <td>${roleHtml}</td>
                     <td><span class="action-badge">${actionIcon} ${log.action}</span></td>
-                    <td class="text-truncate" style="max-width: 200px;" title="${log.target}">${log.target}</td>
+                    <td class="text-truncate" style="max-width: 200px;" title="${targetDisplay}">${targetDisplay}</td>
                     <td>${statusHtml}</td>
-                    <td class="details-cell">${log.details}</td>
+                    <td class="details-cell">${detailsDisplay}</td>
                 </tr>
             `;
         });
@@ -602,8 +680,18 @@
     // 更新網頁初始化行為
 	// 💡 網頁載入時，載入過濾器並讀取表格資料
     window.onload = function() {
+        updateHideIpBtnUI(); // 🌟 初始化按鈕外觀狀態
+
+        // 🌟 讀取系統設定中的「內網流量統計網段 (包含)」
+        fetch('/api/settings/allowed_ips').then(r => r.json()).then(res => {
+            if (res.success && res.flow_internal_nets) {
+                internalNetsConfig = res.flow_internal_nets.split(',').map(s => s.trim()).filter(Boolean);
+                if (allLogsData.length > 0) renderTablePage();
+            }
+        }).catch(() => {});
+
         loadFilters();
-        loadDevices(); // 💡 確保網頁載入時去抓取設備清單
+        loadDevices();
         loadLogs();
     };
 </script>
