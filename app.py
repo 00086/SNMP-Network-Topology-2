@@ -38,6 +38,54 @@ from snmp_core import (
 )
 from tftp_backup_core import init_backup_db, trigger_tftp_backup, sys_tftp_server
 
+def ensure_go_poller_running():
+    """
+    🐹 雙引擎自動巡護：
+    檢查 go_poller.exe 是否已在執行，若無則自動在背景無聲喚醒，
+    確保由 Go 引擎提供高速 SNMP 輪詢。
+    """
+    if platform.system().lower() != 'windows':
+        return
+
+    poller_name = "go_poller.exe"
+    
+    # 取得當前工作目錄或主程式所在目錄
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    poller_path = os.path.join(base_dir, poller_name)
+
+    # 若當前目錄找不到，搜尋當前執行目錄
+    if not os.path.exists(poller_path):
+        alt_path = os.path.join(os.getcwd(), poller_name)
+        if os.path.exists(alt_path):
+            poller_path = alt_path
+        else:
+            log_info(f"ℹ️ [引擎調度] 未在目錄中發現 {poller_name}，將維持由 Python 備援引擎執行輪詢。")
+            return
+
+    try:
+        # 1. 偵測進程清單是否已有 go_poller.exe
+        cmd = f'tasklist /FI "IMAGENAME eq {poller_name}" /NH'
+        output = subprocess.check_output(cmd, shell=True, text=True, errors='ignore')
+
+        if poller_name.lower() in output.lower():
+            log_info(f"🐹 [引擎調度] 偵測到 {poller_name} 運作中，Go 極速輪詢引擎已就緒。")
+            return
+
+        # 2. 未運行 -> 自動在背景拉起（無黑視窗、獨立進程樹）
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NO_WINDOW = 0x08000000
+
+        subprocess.Popen(
+            [poller_path],
+            creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+            close_fds=True,
+            cwd=os.path.dirname(poller_path)
+        )
+        log_info(f"🚀 [引擎調度] 偵測到 {poller_name} 尚未啟動，已自動預先載入並於背景喚醒！")
+
+    except Exception as e:
+        log_info(f"⚠️ [引擎調度] 自動喚醒 {poller_name} 失敗: {e}")
+
 def is_admin():
     """檢查目前是否具備 Windows 系統管理員或 Linux root 權限"""
     try:
@@ -48,7 +96,25 @@ def is_admin():
     except Exception:
         return False
 
-app = Flask(__name__)
+# ========================================================
+# 🌟 智慧打包路徑轉向引擎 (PyInstaller Standalone Executable 專用)
+# ========================================================
+def get_bundle_dir():
+    """判斷目前是在標準 Python 環境，還是被 PyInstaller 打包的單一執行檔環境"""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # 如果是 exe 執行檔，回傳其暫存解壓縮路徑
+        return sys._MEIPASS
+    else:
+        # 如果是普通的 python app.py，回傳當前腳本所在的目錄
+        return os.path.dirname(os.path.abspath(__file__))
+
+bundle_dir = get_bundle_dir()
+
+# 將 Flask 的靜態檔與模板路徑，強制指向這個智慧變數
+app = Flask(__name__, 
+            template_folder=os.path.join(bundle_dir, 'templates'),
+            static_folder=os.path.join(bundle_dir, 'static'))
+
 app.secret_key = os.urandom(24)  # 🌟 Flask Session 加密金鑰
 app.register_blueprint(main_bp)
 
@@ -368,6 +434,9 @@ if __name__ == '__main__':
     
     init_backup_db()
     sys_tftp_server.start()
+    
+    # 🌟 在此處自動喚醒 Go 輪詢引擎
+    ensure_go_poller_running()
     
     if not is_admin():
         sys_requirements = "NTP 網路校時、底層 ICMP 探測、服務控管等系統層級操作"
